@@ -1,0 +1,15 @@
+{
+  "markets": [
+    {
+      "market_id": "replace-with-condition-id",
+      "title": "Bitcoin Up or Down - replace with live market title",
+      "asset": "Bitcoin",
+      "symbol": "BTCUSDT",
+      "open_price": 60000.0,
+      "close_ts": 1783406700,
+      "up_token_id": "replace-with-up-token-id",
+      "down_token_id": "replace-with-down-token-id",
+      "max_allowed_price": 0.99
+    }
+  ]
+}

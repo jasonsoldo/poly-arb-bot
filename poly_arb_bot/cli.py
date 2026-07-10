@@ -1,0 +1,149 @@
+import argparse
+import json
+from pathlib import Path
+
+from .binance_source import BinanceSource
+from .chainlink_source import ChainlinkSource
+from .clob_client import PolymarketClobClient
+from .cpp_bridge import score_positions_cpp
+from .execution_engine import ExecutionEngine
+from .live_signals import LiveMarketSpec, LiveSignalBuilder
+from .models import MarketSignal, PositionCurve
+from .position_manager import PositionManager
+from .risk_manager import RiskManager
+from .strategy import UpDownStrategy
+from .strategy_config import StrategyConfig
+
+
+def load_snapshot(path: Path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    positions = {
+        item["market_id"]: PositionCurve(**item)
+        for item in data.get("positions", [])
+    }
+    signals = [MarketSignal(**item) for item in data.get("signals", [])]
+    return positions, signals
+
+
+def load_live_markets(path: Path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return [LiveMarketSpec(**item) for item in data.get("markets", [])]
+
+
+def write_live_snapshot(markets_path: Path, output_path: Path, binance_base_url: str) -> int:
+    markets = load_live_markets(markets_path)
+    builder = LiveSignalBuilder(BinanceSource(base_url=binance_base_url), PolymarketClobClient())
+    signals = builder.build(markets)
+    payload = {
+        "positions": [],
+        "signals": [signal.__dict__ for signal in signals],
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"WROTE {output_path} signals={len(signals)}")
+    return 0
+
+
+def print_binance_quote(symbol: str, binance_base_url: str) -> int:
+    ticker = BinanceSource(base_url=binance_base_url).ticker(symbol)
+    print(
+        f"{ticker.symbol} price={ticker.price} bid={ticker.bid_price} bid_qty={ticker.bid_qty} "
+        f"ask={ticker.ask_price} ask_qty={ticker.ask_qty} latency_ms={ticker.latency_ms}"
+    )
+    return 0
+
+
+def print_clob_book(token_id: str, size: float) -> int:
+    book = PolymarketClobClient().get_book(token_id)
+    expected = book.expected_buy_price(size)
+    print(
+        f"token_id={token_id} best_bid={book.best_bid} best_ask={book.best_ask} "
+        f"expected_buy_price_{size}={expected} ask_liquidity_0.99={book.ask_liquidity(0.99)} "
+        f"latency_ms={book.latency_ms}"
+    )
+    return 0
+
+
+def print_chainlink_price(rpc_url: str, feed_address: str) -> int:
+    price = ChainlinkSource(rpc_url).latest_price(feed_address)
+    print(
+        f"feed={price.feed_address} price={price.price} decimals={price.decimals} "
+        f"updated_at={price.updated_at} stale={price.stale}"
+    )
+    return 0
+
+
+def run_simulation(snapshot: Path, mode: str, require_cpp: bool, live_enabled: bool) -> int:
+    positions, signals = load_snapshot(snapshot)
+    config = StrategyConfig(trading_mode=mode, live_enabled=live_enabled)
+    position_manager = PositionManager(positions)
+    strategy = UpDownStrategy(config)
+    risk = RiskManager(config)
+    execution = ExecutionEngine(config)
+
+    exe_path = Path("build/pnl_curve_engine.exe")
+    curves = score_positions_cpp(positions.values(), exe_path, require_cpp=require_cpp)
+    print("PNL_CURVES")
+    for curve in curves:
+        print(
+            f"{curve.market_id} {curve.classification} "
+            f"cost={curve.total_cost:.2f} up={curve.pnl_if_up:.2f} down={curve.pnl_if_down:.2f}"
+        )
+
+    print("ORDER_DECISIONS")
+    accepted = 0
+    for signal in strategy.candidates(signals):
+        position = position_manager.get(signal.market_id, signal.title)
+        order = strategy.build_order_intent(signal, position)
+        decision = risk.check(signal, order, position, position_manager.total_exposure())
+        if not decision.allowed:
+            print(f"BLOCK {signal.market_id} {signal.outcome} reason={decision.reason}")
+            continue
+        result = execution.submit(order)
+        accepted += int(result.accepted)
+        print(
+            f"{result.status.upper()} {order.market_id} {order.outcome} "
+            f"size={order.size:.4f} price={order.limit_price:.4f} "
+            f"execution_reason={result.reason}; strategy_reason={order.reason}"
+        )
+
+    print(f"SUMMARY accepted={accepted} mode={mode}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["simulate", "live-snapshot", "binance-quote", "clob-book", "chainlink-price"])
+    parser.add_argument("--snapshot", default="data/sample_live_snapshot.json")
+    parser.add_argument("--markets", default="data/live_markets.example.json")
+    parser.add_argument("--output", default="data/live_snapshot.json")
+    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--binance-base-url", default="https://data-api.binance.vision")
+    parser.add_argument("--token-id")
+    parser.add_argument("--size", type=float, default=25.0)
+    parser.add_argument("--rpc-url")
+    parser.add_argument("--feed-address")
+    parser.add_argument("--mode", choices=["dry_run", "simulation", "live"], default="dry_run")
+    parser.add_argument("--require-cpp", action="store_true")
+    parser.add_argument("--live-enabled", action="store_true")
+    args = parser.parse_args()
+
+    if args.command == "simulate":
+        return run_simulation(Path(args.snapshot), args.mode, args.require_cpp, args.live_enabled)
+    if args.command == "live-snapshot":
+        return write_live_snapshot(Path(args.markets), Path(args.output), args.binance_base_url)
+    if args.command == "binance-quote":
+        return print_binance_quote(args.symbol, args.binance_base_url)
+    if args.command == "clob-book":
+        if not args.token_id:
+            raise SystemExit("--token-id is required")
+        return print_clob_book(args.token_id, args.size)
+    if args.command == "chainlink-price":
+        if not args.rpc_url or not args.feed_address:
+            raise SystemExit("--rpc-url and --feed-address are required")
+        return print_chainlink_price(args.rpc_url, args.feed_address)
+    raise ValueError(args.command)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

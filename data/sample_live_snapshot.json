@@ -1,0 +1,72 @@
+{
+  "positions": [
+    {
+      "market_id": "btc-5m-edge",
+      "title": "Bitcoin Up or Down - Sample 5m",
+      "up_shares": 80.0,
+      "up_cost": 4.0,
+      "down_shares": 240.0,
+      "down_cost": 210.0
+    },
+    {
+      "market_id": "eth-5m-both-profit",
+      "title": "Ethereum Up or Down - Sample 5m",
+      "up_shares": 130.0,
+      "up_cost": 60.0,
+      "down_shares": 125.0,
+      "down_cost": 55.0
+    },
+    {
+      "market_id": "xrp-5m-both-loss",
+      "title": "XRP Up or Down - Sample 5m",
+      "up_shares": 20.0,
+      "up_cost": 15.0,
+      "down_shares": 10.0,
+      "down_cost": 12.0
+    }
+  ],
+  "signals": [
+    {
+      "market_id": "btc-5m-edge",
+      "title": "Bitcoin Up or Down - Sample 5m",
+      "outcome": "Up",
+      "market_price": 0.08,
+      "expected_fill_price": 0.081,
+      "model_probability": 0.14,
+      "seconds_to_close": 42,
+      "distance_to_price_to_beat": -4.2,
+      "liquidity": 120.0,
+      "orderbook_age_ms": 120,
+      "settlement_source_ok": true,
+      "max_allowed_price": 0.1
+    },
+    {
+      "market_id": "eth-5m-both-profit",
+      "title": "Ethereum Up or Down - Sample 5m",
+      "outcome": "Down",
+      "market_price": 0.96,
+      "expected_fill_price": 0.961,
+      "model_probability": 0.985,
+      "seconds_to_close": 18,
+      "distance_to_price_to_beat": 12.5,
+      "liquidity": 300.0,
+      "orderbook_age_ms": 80,
+      "settlement_source_ok": true,
+      "max_allowed_price": 0.97
+    },
+    {
+      "market_id": "xrp-5m-both-loss",
+      "title": "XRP Up or Down - Sample 5m",
+      "outcome": "Up",
+      "market_price": 0.5,
+      "expected_fill_price": 0.53,
+      "model_probability": 0.54,
+      "seconds_to_close": 20,
+      "distance_to_price_to_beat": 0.2,
+      "liquidity": 5.0,
+      "orderbook_age_ms": 1200,
+      "settlement_source_ok": true,
+      "max_allowed_price": 0.55
+    }
+  ]
+}
