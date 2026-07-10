@@ -1,5 +1,7 @@
 import argparse
 import json
+import os
+import time
 from pathlib import Path
 
 from .binance_source import BinanceSource
@@ -81,7 +83,8 @@ def run_simulation(snapshot: Path, mode: str, require_cpp: bool, live_enabled: b
     risk = RiskManager(config)
     execution = ExecutionEngine(config)
 
-    exe_path = Path("build/pnl_curve_engine.exe")
+    exe_name = "pnl_curve_engine.exe" if os.name == "nt" else "pnl_curve_engine"
+    exe_path = Path("build") / exe_name
     curves = score_positions_cpp(positions.values(), exe_path, require_cpp=require_cpp)
     print("PNL_CURVES")
     for curve in curves:
@@ -111,9 +114,40 @@ def run_simulation(snapshot: Path, mode: str, require_cpp: bool, live_enabled: b
     return 0
 
 
+def run_live_loop(
+    markets_path: Path,
+    output_path: Path,
+    mode: str,
+    interval_seconds: float,
+    iterations: int,
+    require_cpp: bool,
+    live_enabled: bool,
+    binance_base_url: str,
+) -> int:
+    count = 0
+    while iterations <= 0 or count < iterations:
+        loop_started = time.time()
+        try:
+            write_live_snapshot(markets_path, output_path, binance_base_url)
+            run_simulation(output_path, mode, require_cpp, live_enabled)
+        except Exception as exc:
+            print(f"LOOP_ERROR {type(exc).__name__}: {exc}")
+        count += 1
+        elapsed = time.time() - loop_started
+        sleep_for = max(0.0, interval_seconds - elapsed)
+        if iterations > 0 and count >= iterations:
+            break
+        time.sleep(sleep_for)
+    print(f"LIVE_RUN_DONE iterations={count} mode={mode}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["simulate", "live-snapshot", "binance-quote", "clob-book", "chainlink-price"])
+    parser.add_argument(
+        "command",
+        choices=["simulate", "live-snapshot", "live-run", "binance-quote", "clob-book", "chainlink-price"],
+    )
     parser.add_argument("--snapshot", default="data/sample_live_snapshot.json")
     parser.add_argument("--markets", default="data/live_markets.example.json")
     parser.add_argument("--output", default="data/live_snapshot.json")
@@ -124,6 +158,8 @@ def main() -> int:
     parser.add_argument("--rpc-url")
     parser.add_argument("--feed-address")
     parser.add_argument("--mode", choices=["dry_run", "simulation", "live"], default="dry_run")
+    parser.add_argument("--interval-seconds", type=float, default=2.0)
+    parser.add_argument("--iterations", type=int, default=0)
     parser.add_argument("--require-cpp", action="store_true")
     parser.add_argument("--live-enabled", action="store_true")
     args = parser.parse_args()
@@ -132,6 +168,17 @@ def main() -> int:
         return run_simulation(Path(args.snapshot), args.mode, args.require_cpp, args.live_enabled)
     if args.command == "live-snapshot":
         return write_live_snapshot(Path(args.markets), Path(args.output), args.binance_base_url)
+    if args.command == "live-run":
+        return run_live_loop(
+            Path(args.markets),
+            Path(args.output),
+            args.mode,
+            args.interval_seconds,
+            args.iterations,
+            args.require_cpp,
+            args.live_enabled,
+            args.binance_base_url,
+        )
     if args.command == "binance-quote":
         return print_binance_quote(args.symbol, args.binance_base_url)
     if args.command == "clob-book":

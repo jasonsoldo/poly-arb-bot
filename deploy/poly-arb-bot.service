@@ -1,0 +1,17 @@
+[Unit]
+Description=Poly Arb Bot dry-run shadow loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/poly-arb-bot
+EnvironmentFile=/opt/poly-arb-bot/.env
+ExecStart=/opt/poly-arb-bot/.venv/bin/python -m poly_arb_bot.cli live-run --mode dry_run --markets /opt/poly-arb-bot/data/live_markets.json --output /opt/poly-arb-bot/data/live_snapshot.json --interval-seconds 2 --require-cpp
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/poly-arb-bot.log
+StandardError=append:/var/log/poly-arb-bot.err.log
+
+[Install]
+WantedBy=multi-user.target
