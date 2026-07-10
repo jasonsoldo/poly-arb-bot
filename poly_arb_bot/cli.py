@@ -10,7 +10,9 @@ from .clob_client import PolymarketClobClient
 from .cpp_bridge import score_positions_cpp
 from .execution_engine import ExecutionEngine
 from .live_signals import LiveMarketSpec, LiveSignalBuilder
+from .market_scanner import MarketScanner
 from .models import MarketSignal, PositionCurve
+from .polymarket_data import PolymarketDataClient
 from .position_manager import PositionManager
 from .risk_manager import RiskManager
 from .strategy import UpDownStrategy
@@ -43,6 +45,72 @@ def write_live_snapshot(markets_path: Path, output_path: Path, binance_base_url:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"WROTE {output_path} signals={len(signals)}")
+    return 0
+
+
+def scan_markets(output_path: Path, gamma_base_url: str, limit: int) -> int:
+    client = PolymarketDataClient(base_url=gamma_base_url)
+    scanner = MarketScanner()
+    events = client.events(limit=limit, active=True)
+    specs = scanner.specs_from_events(events)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(scanner.to_payload(specs), indent=2), encoding="utf-8")
+    print(f"WROTE {output_path} markets={len(specs)} events_scanned={len(events)}")
+    if not specs:
+        print("NO_MARKETS Parsed zero complete Crypto Up/Down markets; inspect Gamma fields for price_to_beat/open_price.")
+    return 0
+
+
+def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, slug_window: str, base_ts: int = None) -> int:
+    client = PolymarketDataClient(base_url=gamma_base_url)
+    scanner = MarketScanner()
+    interval_list = [item.strip() for item in intervals.split(",") if item.strip()]
+    include_previous = slug_window in ("previous,current", "previous,current,next")
+    include_next = slug_window in ("current,next", "previous,current,next")
+    slugs = scanner.updown_slugs(interval_list, now_ts=base_ts, include_previous=include_previous, include_next=include_next)
+    events = []
+    for slug in slugs:
+        events.extend(client.events_by_slug(slug))
+    specs = scanner.specs_from_events(events)
+    unique = {spec.market_id: spec for spec in specs}
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(scanner.to_payload(unique.values()), indent=2), encoding="utf-8")
+    print(f"WROTE {output_path} markets={len(unique)} slugs_checked={len(slugs)}")
+    return 0
+
+
+def inspect_gamma(gamma_base_url: str, limit: int) -> int:
+    client = PolymarketDataClient(base_url=gamma_base_url)
+    scanner = MarketScanner()
+    events = client.events(limit=limit, active=True)
+    candidates = scanner.candidate_markets(events)
+    print(f"events_scanned={len(events)} crypto_updown_candidates={len(candidates)}")
+    for index, market in enumerate(candidates[:10]):
+        title = market.get("question") or market.get("title") or market.get("slug")
+        interesting = {
+            key: market.get(key)
+            for key in sorted(market.keys())
+            if key in {
+                "conditionId",
+                "question",
+                "title",
+                "slug",
+                "outcomes",
+                "clobTokenIds",
+                "tokens",
+                "priceToBeat",
+                "openPrice",
+                "startPrice",
+                "targetPrice",
+                "endDate",
+                "endDateIso",
+                "rules",
+                "description",
+                "resolutionSource",
+            }
+        }
+        print(f"CANDIDATE {index} {title}")
+        print(json.dumps(interesting, ensure_ascii=False)[:3000])
     return 0
 
 
@@ -146,13 +214,28 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=["simulate", "live-snapshot", "live-run", "binance-quote", "clob-book", "chainlink-price"],
+        choices=[
+            "simulate",
+            "scan-markets",
+            "scan-updown",
+            "inspect-gamma",
+            "live-snapshot",
+            "live-run",
+            "binance-quote",
+            "clob-book",
+            "chainlink-price",
+        ],
     )
     parser.add_argument("--snapshot", default="data/sample_live_snapshot.json")
     parser.add_argument("--markets", default="data/live_markets.example.json")
     parser.add_argument("--output", default="data/live_snapshot.json")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--binance-base-url", default="https://data-api.binance.vision")
+    parser.add_argument("--gamma-base-url", default="https://gamma-api.polymarket.com")
+    parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--intervals", default="5m,15m")
+    parser.add_argument("--slug-window", choices=["current", "current,next", "previous,current", "previous,current,next"], default="current,next")
+    parser.add_argument("--base-ts", type=int)
     parser.add_argument("--token-id")
     parser.add_argument("--size", type=float, default=25.0)
     parser.add_argument("--rpc-url")
@@ -168,6 +251,12 @@ def main() -> int:
         return run_simulation(Path(args.snapshot), args.mode, args.require_cpp, args.live_enabled)
     if args.command == "live-snapshot":
         return write_live_snapshot(Path(args.markets), Path(args.output), args.binance_base_url)
+    if args.command == "scan-markets":
+        return scan_markets(Path(args.output), args.gamma_base_url, args.limit)
+    if args.command == "scan-updown":
+        return scan_updown_markets(Path(args.output), args.gamma_base_url, args.intervals, args.slug_window, args.base_ts)
+    if args.command == "inspect-gamma":
+        return inspect_gamma(args.gamma_base_url, args.limit)
     if args.command == "live-run":
         return run_live_loop(
             Path(args.markets),
