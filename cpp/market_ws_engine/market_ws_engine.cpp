@@ -47,14 +47,21 @@ int main(int argc,char**argv){
     for(const auto& item:root.get_child("markets")){const auto&p=item.second;std::string id=p.get<std::string>("market_id"),up=p.get<std::string>("up_token_id"),down=p.get<std::string>("down_token_id");markets[id]={up,down,argc>2?std::stod(argv[2]):10,argc>3?std::stod(argv[3]):.07,0};books[up];books[down];}
     if (books.empty()) { std::cerr << "NO_TOKENS live_markets.json contains no valid Up/Down tokens; rerun scan-updown\n"; return 4; }
     asio::io_context io; asio::ssl::context ctx(asio::ssl::context::tls_client); ctx.set_default_verify_paths(); ctx.set_verify_mode(asio::ssl::verify_peer); ssl_socket stream(io,ctx); stream.set_verify_callback(asio::ssl::host_name_verification("ws-subscriptions-clob.polymarket.com")); tcp::resolver resolver(io); auto endpoints=resolver.resolve("ws-subscriptions-clob.polymarket.com","443"); asio::connect(stream.next_layer(),endpoints); if(!SSL_set_tlsext_host_name(stream.native_handle(),"ws-subscriptions-clob.polymarket.com")) throw beast::system_error(beast::error_code(static_cast<int>(::ERR_get_error()),asio::error::get_ssl_category())); stream.handshake(asio::ssl::stream_base::client); websocket::stream<ssl_socket> ws(std::move(stream)); ws.handshake("ws-subscriptions-clob.polymarket.com","/ws/market");
+    const size_t initial_count = std::min<size_t>(20, books.size());
     std::string subscribe="{\"assets_ids\":[";
-    bool first=true;
-    for(const auto&x:books){if(!first)subscribe+=",";first=false;subscribe+="\""+x.first+"\"";}
+    bool first=true; size_t index=0;
+    for(const auto&x:books){if(index++>=initial_count) break; if(!first)subscribe+=",";first=false;subscribe+="\""+x.first+"\"";}
     subscribe+="] ,\"type\":\"market\",\"custom_feature_enabled\":true}";
     ws.text(true);
     ws.write(asio::buffer(subscribe));
     std::cerr<<"SUBSCRIBE "<<subscribe<<"\n";
     std::cout<<"connected\n";
+    std::vector<std::string> extra; index=0;
+    for(const auto&x:books) if(index++>=initial_count) extra.push_back(x.first);
+    for(size_t offset=0; offset<extra.size(); offset+=20) {
+        const size_t end=std::min(offset+20, extra.size());
+        subscribe_assets(ws, std::vector<std::string>(extra.begin()+offset, extra.begin()+end));
+    }
     for(;;){
         beast::flat_buffer buffer;
         try { ws.read(buffer); }
