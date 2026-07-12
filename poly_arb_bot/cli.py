@@ -86,10 +86,29 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         ]
         specs = scanner.specs_from_events(fallback)
         unique = {spec.market_id: spec for spec in specs}
+    valid, rejected = filter_specs_with_orderbooks(list(unique.values()), PolymarketClobClient())
+    unique = {spec.market_id: spec for spec in valid}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(scanner.to_payload(unique.values()), indent=2), encoding="utf-8")
+    print(f"CLOB_VALID markets={len(unique)} no_orderbook={rejected}")
     print(f"WROTE {output_path} markets={len(unique)} slugs_checked={len(slugs)}")
     return 0
+
+
+def filter_specs_with_orderbooks(specs, clob):
+    valid = []
+    rejected = 0
+    for spec in specs:
+        try:
+            up_book = clob.get_book(spec.up_token_id)
+            down_book = clob.get_book(spec.down_token_id)
+            if up_book.asks and down_book.asks:
+                valid.append(spec)
+            else:
+                rejected += 1
+        except Exception:
+            rejected += 1
+    return valid, rejected
 
 
 def inspect_gamma(gamma_base_url: str, limit: int) -> int:
