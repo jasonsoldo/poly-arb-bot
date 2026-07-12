@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from .binance_source import BinanceSource
@@ -99,6 +100,19 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None):
     diagnostics = diagnostics if diagnostics is not None else {}
     for spec in specs:
         try:
+            info = clob.get_market_info(spec.market_id)
+            token_map = {
+                str(token.get("o", "")).lower(): str(token.get("t", ""))
+                for token in info.get("t", [])
+                if isinstance(token, dict)
+            }
+            up_token_id = token_map.get("up")
+            down_token_id = token_map.get("down")
+            if not up_token_id or not down_token_id:
+                diagnostics["clob_outcome_mismatch"] = diagnostics.get("clob_outcome_mismatch", 0) + 1
+                rejected += 1
+                continue
+            spec = replace(spec, up_token_id=up_token_id, down_token_id=down_token_id)
             up_book = clob.get_book(spec.up_token_id)
             down_book = clob.get_book(spec.down_token_id)
             if not up_book.asks or not down_book.asks:
