@@ -41,3 +41,16 @@ def test_filter_reports_empty_asks_and_requires_buyable_depth():
     assert not valid
     assert rejected == 1
     assert diagnostics == {"empty_asks": 1}
+
+
+def test_http_404_is_a_missing_orderbook(monkeypatch):
+    class MissingBook:
+        def get_book(self, token_id):
+            raise RuntimeError("HTTP GET 404 failed for https://clob.polymarket.com/book body={\"error\":\"No orderbook exists\"}")
+
+    specs = [SimpleNamespace(up_token_id="up", down_token_id="down", market_id="m1")]
+    diagnostics = {}
+    valid, rejected = filter_specs_with_orderbooks(specs, MissingBook(), diagnostics)
+    assert not valid
+    assert rejected == 1
+    assert diagnostics == {"no_orderbook": 1}

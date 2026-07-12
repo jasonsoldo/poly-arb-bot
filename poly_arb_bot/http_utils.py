@@ -40,7 +40,14 @@ class HttpClient:
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8")
-        except (HTTPError, URLError, TimeoutError) as exc:
-            raise RuntimeError(f"HTTP {method} failed for {url}: {exc}") from exc
+        except HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                detail = ""
+            suffix = f" body={detail}" if detail else ""
+            raise RuntimeError(f"HTTP {method} {exc.code} failed for {url}:{suffix}") from exc
+        except (URLError, TimeoutError) as exc:
+            raise RuntimeError(f"HTTP {method} network failed for {url}: {exc}") from exc
         elapsed_ms = int((time.monotonic() - started) * 1000)
         return HttpResponse(json.loads(raw), elapsed_ms, url)

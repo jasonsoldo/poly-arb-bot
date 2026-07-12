@@ -126,7 +126,13 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None):
             else:
                 valid.append(spec)
         except RuntimeError as exc:
-            key = "clob_error" if "CLOB book rejected" in str(exc) else "http_error"
+            message = str(exc)
+            if "CLOB book rejected" in message or "HTTP GET 404" in message:
+                key = "no_orderbook"
+            elif "network failed" in message:
+                key = "network_error"
+            else:
+                key = "http_error"
             diagnostics[key] = diagnostics.get(key, 0) + 1
             rejected += 1
         except Exception:
