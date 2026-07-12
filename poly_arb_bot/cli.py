@@ -84,20 +84,24 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         specs = scanner.specs_from_events(fallback)
         unique = {spec.market_id: spec for spec in specs}
     diagnostics = {}
-    valid, rejected = filter_specs_with_orderbooks(list(unique.values()), PolymarketClobClient(), diagnostics)
+    examples = []
+    valid, rejected = filter_specs_with_orderbooks(list(unique.values()), PolymarketClobClient(), diagnostics, examples)
     unique = {spec.market_id: spec for spec in valid}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(scanner.to_payload(unique.values()), indent=2), encoding="utf-8")
     detail = " ".join(f"{key}={value}" for key, value in sorted(diagnostics.items()))
     print(f"CLOB_VALID markets={len(unique)} rejected={rejected} {detail}".rstrip())
+    for example in examples[:5]:
+        print(f"CLOB_REJECT market_id={example[0]} token_id={example[1]} reason={example[2]}")
     print(f"WROTE {output_path} markets={len(unique)} slugs_checked={len(slugs)}")
     return 0
 
 
-def filter_specs_with_orderbooks(specs, clob, diagnostics=None):
+def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
     valid = []
     rejected = 0
     diagnostics = diagnostics if diagnostics is not None else {}
+    examples = examples if examples is not None else []
     for spec in specs:
         try:
             info = clob.get_market_info(spec.market_id)
@@ -110,6 +114,7 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None):
             down_token_id = token_map.get("down")
             if not up_token_id or not down_token_id:
                 diagnostics["clob_outcome_mismatch"] = diagnostics.get("clob_outcome_mismatch", 0) + 1
+                examples.append((spec.market_id, "", "CLOB market did not return Up and Down tokens"))
                 rejected += 1
                 continue
             spec = replace(spec, up_token_id=up_token_id, down_token_id=down_token_id)
@@ -125,16 +130,21 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None):
                 valid.append(spec)
         except RuntimeError as exc:
             message = str(exc)
-            if "CLOB book rejected" in message or "HTTP GET 404" in message:
+            lower = message.lower()
+            if "invalid token id" in lower or "http get 400" in lower:
+                key = "invalid_token"
+            elif "no orderbook" in lower or "http get 404" in lower:
                 key = "no_orderbook"
             elif "network failed" in message:
                 key = "network_error"
             else:
                 key = "http_error"
             diagnostics[key] = diagnostics.get(key, 0) + 1
+            examples.append((spec.market_id, spec.up_token_id, message[:240]))
             rejected += 1
         except Exception:
             diagnostics["unexpected_error"] = diagnostics.get("unexpected_error", 0) + 1
+            examples.append((spec.market_id, spec.up_token_id, "unexpected error"))
             rejected += 1
     return valid, rejected
 

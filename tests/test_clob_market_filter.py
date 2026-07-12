@@ -63,3 +63,18 @@ def test_http_404_is_a_missing_orderbook(monkeypatch):
     assert not valid
     assert rejected == 1
     assert diagnostics == {"no_orderbook": 1}
+
+
+def test_invalid_token_is_not_reported_as_missing_orderbook():
+    class InvalidToken:
+        def get_market_info(self, market_id):
+            return {"t": [{"t": "up", "o": "Up"}, {"t": "down", "o": "Down"}]}
+
+        def get_book(self, token_id):
+            raise RuntimeError("CLOB book rejected token up: Invalid token id")
+
+    diagnostics = {}
+    valid, rejected = filter_specs_with_orderbooks([spec()], InvalidToken(), diagnostics)
+    assert not valid
+    assert rejected == 1
+    assert diagnostics == {"invalid_token": 1}
