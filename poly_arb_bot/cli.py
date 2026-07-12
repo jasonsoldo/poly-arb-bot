@@ -86,7 +86,8 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         ]
         specs = scanner.specs_from_events(fallback)
         unique = {spec.market_id: spec for spec in specs}
-    valid, rejected = filter_specs_with_orderbooks(list(unique.values()), PolymarketClobClient())
+    diagnostics = {}
+    valid, rejected = filter_specs_with_orderbooks(list(unique.values()), PolymarketClobClient(), diagnostics)
     if not valid:
         active_events = client.events(limit=1000, active=True)
         active_rows = []
@@ -97,28 +98,39 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
                     active_rows.append((row, event))
         active_specs = [scanner.spec_from_market(row, event) for row, event in active_rows]
         active_specs = [spec for spec in active_specs if spec is not None]
-        valid, fallback_rejected = filter_specs_with_orderbooks(active_specs, PolymarketClobClient())
+        valid, fallback_rejected = filter_specs_with_orderbooks(active_specs, PolymarketClobClient(), diagnostics)
         rejected += fallback_rejected
     unique = {spec.market_id: spec for spec in valid}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(scanner.to_payload(unique.values()), indent=2), encoding="utf-8")
-    print(f"CLOB_VALID markets={len(unique)} no_orderbook={rejected}")
+    detail = " ".join(f"{key}={value}" for key, value in sorted(diagnostics.items()))
+    print(f"CLOB_VALID markets={len(unique)} rejected={rejected} {detail}".rstrip())
     print(f"WROTE {output_path} markets={len(unique)} slugs_checked={len(slugs)}")
     return 0
 
 
-def filter_specs_with_orderbooks(specs, clob):
+def filter_specs_with_orderbooks(specs, clob, diagnostics=None):
     valid = []
     rejected = 0
+    diagnostics = diagnostics if diagnostics is not None else {}
     for spec in specs:
         try:
             up_book = clob.get_book(spec.up_token_id)
             down_book = clob.get_book(spec.down_token_id)
-            if up_book.asks and down_book.asks:
-                valid.append(spec)
-            else:
+            if not up_book.asks or not down_book.asks:
+                diagnostics["empty_asks"] = diagnostics.get("empty_asks", 0) + 1
                 rejected += 1
+            elif up_book.ask_liquidity(1.0) <= 0 or down_book.ask_liquidity(1.0) <= 0:
+                diagnostics["no_buy_depth"] = diagnostics.get("no_buy_depth", 0) + 1
+                rejected += 1
+            else:
+                valid.append(spec)
+        except RuntimeError as exc:
+            key = "clob_error" if "CLOB book rejected" in str(exc) else "http_error"
+            diagnostics[key] = diagnostics.get(key, 0) + 1
+            rejected += 1
         except Exception:
+            diagnostics["unexpected_error"] = diagnostics.get("unexpected_error", 0) + 1
             rejected += 1
     return valid, rejected
 

@@ -28,3 +28,16 @@ def test_filter_keeps_market_with_both_orderbooks():
     valid, rejected = filter_specs_with_orderbooks(specs, FakeClob({"up": book("up", 10), "down": book("down", 10)}))
     assert [item.market_id for item in valid] == ["m1"]
     assert rejected == 0
+
+
+def test_filter_reports_empty_asks_and_requires_buyable_depth():
+    specs = [SimpleNamespace(up_token_id="up", down_token_id="down", market_id="m1")]
+    diagnostics = {}
+    valid, rejected = filter_specs_with_orderbooks(
+        specs,
+        FakeClob({"up": book("up", 10), "down": book("down", 0)}),
+        diagnostics,
+    )
+    assert not valid
+    assert rejected == 1
+    assert diagnostics == {"empty_asks": 1}

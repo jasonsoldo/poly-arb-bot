@@ -52,6 +52,8 @@ class PolymarketClobClient:
     def get_book(self, token_id: str) -> ClobBook:
         response = self.http.get_json(self.base_url, "/book", {"token_id": token_id})
         data = response.data
+        if isinstance(data, dict) and data.get("error"):
+            raise RuntimeError(f"CLOB book rejected token {token_id}: {data['error']}")
         bids = self._levels(data.get("bids", []), reverse=True)
         asks = self._levels(data.get("asks", []), reverse=False)
         return ClobBook(
