@@ -64,7 +64,7 @@ class MarketScanner:
             return None
 
         outcomes = parse_jsonish(first_present(market, ("outcomes", "shortOutcomes")))
-        token_ids = parse_jsonish(first_present(market, ("clobTokenIds", "clobTokenIDs", "tokens")))
+        token_ids = self._token_ids(market)
         outcome_tokens = self._token_map(outcomes, token_ids)
         up_token_id = next((value for key, value in outcome_tokens.items() if key.lower() == "up"), None)
         down_token_id = next((value for key, value in outcome_tokens.items() if key.lower() == "down"), None)
@@ -105,9 +105,11 @@ class MarketScanner:
         tokens = []
         for token in token_ids:
             if isinstance(token, dict):
-                tokens.append(str(first_present(token, ("token_id", "tokenId", "id")) or ""))
+                value = first_present(token, ("token_id", "tokenId", "id"))
             else:
-                tokens.append(str(token))
+                value = token
+            normalized = str(value or "").strip().strip('"')
+            tokens.append(normalized if normalized.isdigit() else "")
         return {str(outcome): token for outcome, token in zip(outcomes, tokens) if token}
 
     @staticmethod
@@ -118,9 +120,18 @@ class MarketScanner:
                 value = first_present(token, ("token_id", "tokenId", "id"))
             else:
                 value = token
-            if value:
-                values.append(str(value))
+            normalized = str(value or "").strip().strip('"')
+            if normalized.isdigit():
+                values.append(normalized)
         return (values[0], values[1]) if len(values) == 2 else (None, None)
+
+    @staticmethod
+    def _token_ids(market: Dict[str, Any]):
+        for name in ("clobTokenIds", "clobTokenIDs", "tokens"):
+            value = parse_jsonish(market.get(name))
+            if isinstance(value, list) and len(value) == 2:
+                return value
+        return []
 
     def updown_slugs(
         self,

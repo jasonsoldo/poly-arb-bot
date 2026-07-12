@@ -61,6 +61,21 @@ def test_scanner_skips_market_without_open_price():
     assert MarketScanner().spec_from_market(market) is None
 
 
+def test_scanner_falls_back_to_tokens_objects_when_clob_ids_are_empty():
+    market = {
+        "conditionId": "0xcondition",
+        "question": "Bitcoin Up or Down - July 11, 9:25PM-9:30PM ET",
+        "outcomes": '["UP", "DOWN"]',
+        "clobTokenIds": "[]",
+        "tokens": [{"token_id": "111"}, {"token_id": "222"}],
+        "priceToBeat": "118234.50",
+        "endDate": "2026-07-11T13:30:00Z",
+    }
+    spec = MarketScanner().spec_from_market(market)
+    assert spec.up_token_id == "111"
+    assert spec.down_token_id == "222"
+
+
 def test_scanner_reads_open_price_from_rules_text():
     market = {
         "conditionId": "0xcondition",
