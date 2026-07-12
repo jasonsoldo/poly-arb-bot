@@ -1,6 +1,8 @@
 from poly_arb_bot.execution_engine import ExecutionEngine
+from poly_arb_bot.logger import JsonlLogger
 from poly_arb_bot.models import MarketSignal, OrderIntent, PositionCurve
 from poly_arb_bot.risk_manager import RiskManager
+from poly_arb_bot.state_store import JsonStateStore
 from poly_arb_bot.strategy_config import StrategyConfig
 
 
@@ -78,3 +80,25 @@ def test_live_execution_is_blocked_without_explicit_enable():
     assert not result.accepted
     assert result.status == "blocked"
     assert "live_enabled" in result.reason
+
+
+def test_duplicate_order_guard_blocks_repeated_client_order_id(tmp_path):
+    store = JsonStateStore(tmp_path / "orders.json")
+    engine = ExecutionEngine(StrategyConfig(trading_mode="dry_run"), state_store=store)
+    order = make_order(client_order_id="same-id")
+
+    first = engine.submit(order)
+    second = engine.submit(order)
+
+    assert first.accepted
+    assert not second.accepted
+    assert "duplicate_order_guard" in second.reason
+
+
+def test_jsonl_logger_writes_event(tmp_path):
+    path = tmp_path / "orders.jsonl"
+    JsonlLogger(path).write("order_decision", {"market_id": "m1"})
+
+    text = path.read_text(encoding="utf-8")
+    assert '"event_type": "order_decision"' in text
+    assert '"market_id": "m1"' in text

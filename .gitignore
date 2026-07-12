@@ -10,3 +10,5 @@ venv/
 *.log
 data/live_snapshot.json
 data/live_markets.scanned.json
+state/
+logs/

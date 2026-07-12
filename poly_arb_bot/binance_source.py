@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterable
+from typing import Dict, Iterable, List
 
 from .http_utils import HttpClient
 
@@ -60,3 +60,25 @@ class BinanceSource:
             "bids": response.data.get("bids", []),
             "asks": response.data.get("asks", []),
         }
+
+
+class BinanceFailoverSource:
+    def __init__(self, http: HttpClient = None, base_urls: List[str] = None):
+        self.http = http or HttpClient(timeout=1.5)
+        self.base_urls = base_urls or [
+            "https://data-api.binance.vision",
+            "https://api1.binance.com",
+            "https://api2.binance.com",
+            "https://api3.binance.com",
+            "https://api4.binance.com",
+            "https://api-gcp.binance.com",
+        ]
+
+    def ticker(self, symbol: str) -> BinanceTicker:
+        errors = []
+        for base_url in self.base_urls:
+            try:
+                return BinanceSource(http=self.http, base_url=base_url).ticker(symbol)
+            except RuntimeError as exc:
+                errors.append(f"{base_url}: {exc}")
+        raise RuntimeError("all Binance official endpoints failed: " + " | ".join(errors))

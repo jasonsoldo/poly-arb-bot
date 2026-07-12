@@ -10,13 +10,16 @@ from .clob_client import PolymarketClobClient
 from .cpp_bridge import score_positions_cpp
 from .execution_engine import ExecutionEngine
 from .live_signals import LiveMarketSpec, LiveSignalBuilder
+from .logger import JsonlLogger
 from .market_scanner import MarketScanner
 from .models import MarketSignal, PositionCurve
 from .polymarket_data import PolymarketDataClient
 from .position_manager import PositionManager
 from .risk_manager import RiskManager
+from .state_store import JsonStateStore
 from .strategy import UpDownStrategy
 from .strategy_config import StrategyConfig
+from .web_monitor import serve
 
 
 def load_snapshot(path: Path):
@@ -143,13 +146,22 @@ def print_chainlink_price(rpc_url: str, feed_address: str) -> int:
     return 0
 
 
-def run_simulation(snapshot: Path, mode: str, require_cpp: bool, live_enabled: bool) -> int:
+def run_simulation(
+    snapshot: Path,
+    mode: str,
+    require_cpp: bool,
+    live_enabled: bool,
+    state_file: Path = None,
+    log_file: Path = None,
+) -> int:
     positions, signals = load_snapshot(snapshot)
     config = StrategyConfig(trading_mode=mode, live_enabled=live_enabled)
     position_manager = PositionManager(positions)
     strategy = UpDownStrategy(config)
     risk = RiskManager(config)
-    execution = ExecutionEngine(config)
+    state_store = JsonStateStore(state_file) if state_file else None
+    event_logger = JsonlLogger(log_file) if log_file else None
+    execution = ExecutionEngine(config, state_store=state_store)
 
     exe_name = "pnl_curve_engine.exe" if os.name == "nt" else "pnl_curve_engine"
     exe_path = Path("build") / exe_name
@@ -168,10 +180,26 @@ def run_simulation(snapshot: Path, mode: str, require_cpp: bool, live_enabled: b
         order = strategy.build_order_intent(signal, position)
         decision = risk.check(signal, order, position, position_manager.total_exposure())
         if not decision.allowed:
+            if event_logger:
+                event_logger.write("risk_block", {"market_id": signal.market_id, "outcome": signal.outcome, "reason": decision.reason})
             print(f"BLOCK {signal.market_id} {signal.outcome} reason={decision.reason}")
             continue
         result = execution.submit(order)
         accepted += int(result.accepted)
+        if event_logger:
+            event_logger.write(
+                "order_decision",
+                {
+                    "market_id": order.market_id,
+                    "outcome": order.outcome,
+                    "size": order.size,
+                    "limit_price": order.limit_price,
+                    "client_order_id": order.client_order_id,
+                    "status": result.status,
+                    "execution_reason": result.reason,
+                    "strategy_reason": order.reason,
+                },
+            )
         print(
             f"{result.status.upper()} {order.market_id} {order.outcome} "
             f"size={order.size:.4f} price={order.limit_price:.4f} "
@@ -191,14 +219,24 @@ def run_live_loop(
     require_cpp: bool,
     live_enabled: bool,
     binance_base_url: str,
+    auto_scan: bool,
+    gamma_base_url: str,
+    scan_intervals: str,
+    slug_window: str,
+    state_file: Path,
+    log_file: Path,
 ) -> int:
     count = 0
     while iterations <= 0 or count < iterations:
         loop_started = time.time()
         try:
+            if auto_scan:
+                scan_updown_markets(markets_path, gamma_base_url, scan_intervals, slug_window)
             write_live_snapshot(markets_path, output_path, binance_base_url)
-            run_simulation(output_path, mode, require_cpp, live_enabled)
+            run_simulation(output_path, mode, require_cpp, live_enabled, state_file=state_file, log_file=log_file)
         except Exception as exc:
+            if log_file:
+                JsonlLogger(log_file).write("loop_error", {"error_type": type(exc).__name__, "error": str(exc)})
             print(f"LOOP_ERROR {type(exc).__name__}: {exc}")
         count += 1
         elapsed = time.time() - loop_started
@@ -221,6 +259,7 @@ def main() -> int:
             "inspect-gamma",
             "live-snapshot",
             "live-run",
+            "web-monitor",
             "binance-quote",
             "clob-book",
             "chainlink-price",
@@ -243,12 +282,27 @@ def main() -> int:
     parser.add_argument("--mode", choices=["dry_run", "simulation", "live"], default="dry_run")
     parser.add_argument("--interval-seconds", type=float, default=2.0)
     parser.add_argument("--iterations", type=int, default=0)
+    parser.add_argument("--auto-scan", action="store_true")
+    parser.add_argument("--state-file", default="")
+    parser.add_argument("--log-file", default="logs/orders.jsonl")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--require-cpp", action="store_true")
     parser.add_argument("--live-enabled", action="store_true")
     args = parser.parse_args()
+    if args.command == "web-monitor":
+        serve(args.host, args.port, Path("web"), Path("data"), Path(args.log_file), Path(args.state_file or "state/orders.json"))
+        return 0
 
     if args.command == "simulate":
-        return run_simulation(Path(args.snapshot), args.mode, args.require_cpp, args.live_enabled)
+        return run_simulation(
+            Path(args.snapshot),
+            args.mode,
+            args.require_cpp,
+            args.live_enabled,
+            state_file=Path(args.state_file) if args.state_file else None,
+            log_file=Path(args.log_file),
+        )
     if args.command == "live-snapshot":
         return write_live_snapshot(Path(args.markets), Path(args.output), args.binance_base_url)
     if args.command == "scan-markets":
@@ -267,6 +321,12 @@ def main() -> int:
             args.require_cpp,
             args.live_enabled,
             args.binance_base_url,
+            args.auto_scan,
+            args.gamma_base_url,
+            args.intervals,
+            args.slug_window,
+            Path(args.state_file or "state/orders.json"),
+            Path(args.log_file),
         )
     if args.command == "binance-quote":
         return print_binance_quote(args.symbol, args.binance_base_url)

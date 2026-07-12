@@ -30,25 +30,40 @@ bash scripts/build_cpp.sh
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
 ```
 
-## 4. Configure live markets
+## 4. Auto-scan live markets
 
-Create `/opt/poly-arb-bot/data/live_markets.json` from `data/live_markets.example.json`.
+The bot can now auto-generate `/opt/poly-arb-bot/data/live_markets.json` from Polymarket Gamma:
 
-You must fill real values:
+```bash
+python -m poly_arb_bot.cli scan-updown \
+  --output data/live_markets.json \
+  --intervals 5m,15m \
+  --slug-window current,next
+```
 
-- `market_id`
-- `open_price`
-- `close_ts`
-- `up_token_id`
-- `down_token_id`
+If it returns zero markets, widen the search:
 
-Do not run live trading until the dry-run logs are stable.
+```bash
+python -m poly_arb_bot.cli scan-updown \
+  --output data/live_markets.json \
+  --intervals 5m,15m \
+  --slug-window previous,current,next
+```
 
 ## 5. Run one dry-run iteration
 
 ```bash
 . .venv/bin/activate
-python -m poly_arb_bot.cli live-run --mode dry_run --markets data/live_markets.json --output data/live_snapshot.json --interval-seconds 2 --iterations 1 --require-cpp
+python -m poly_arb_bot.cli live-run \
+  --mode dry_run \
+  --auto-scan \
+  --markets data/live_markets.json \
+  --output data/live_snapshot.json \
+  --interval-seconds 2 \
+  --iterations 1 \
+  --require-cpp \
+  --state-file state/orders.json \
+  --log-file logs/orders.jsonl
 ```
 
 ## 6. Install systemd dry-run service
@@ -60,6 +75,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable poly-arb-bot
 sudo systemctl start poly-arb-bot
 sudo systemctl status poly-arb-bot
+
+# Start the web monitor on port 8787
+sudo cp deploy/poly-arb-web.service /etc/systemd/system/poly-arb-web.service
+sudo systemctl daemon-reload
+sudo systemctl enable poly-arb-web
+sudo systemctl start poly-arb-web
+sudo ufw allow 8787/tcp
 ```
 
 Logs:
@@ -67,6 +89,7 @@ Logs:
 ```bash
 tail -f /var/log/poly-arb-bot.log
 tail -f /var/log/poly-arb-bot.err.log
+tail -f /opt/poly-arb-bot/logs/orders.jsonl
 ```
 
 ## Safety

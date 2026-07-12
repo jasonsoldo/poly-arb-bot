@@ -1,0 +1,16 @@
+[Unit]
+Description=Poly Arb Bot web monitor
+After=network-online.target poly-arb-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/poly-arb-bot
+ExecStart=/opt/poly-arb-bot/.venv/bin/python -m poly_arb_bot.cli web-monitor --host 0.0.0.0 --port 8787 --log-file /opt/poly-arb-bot/logs/orders.jsonl --state-file /opt/poly-arb-bot/state/orders.json
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/poly-arb-web.log
+StandardError=append:/var/log/poly-arb-web.err.log
+
+[Install]
+WantedBy=multi-user.target
