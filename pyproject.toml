@@ -3,6 +3,7 @@ name = "poly-arb-bot"
 version = "0.1.0"
 requires-python = ">=3.9"
 description = "Polymarket Crypto Up/Down live-ready dry-run strategy loop"
+dependencies = ["websockets>=12,<16"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

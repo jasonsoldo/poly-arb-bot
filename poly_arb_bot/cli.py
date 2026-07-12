@@ -20,6 +20,7 @@ from .state_store import JsonStateStore
 from .strategy import UpDownStrategy
 from .strategy_config import StrategyConfig
 from .web_monitor import serve
+from .shadow_ws import ShadowMarketMonitor
 
 
 def load_snapshot(path: Path):
@@ -248,6 +249,18 @@ def run_live_loop(
     return 0
 
 
+def run_shadow_ws(markets_path: Path, size: float, fee_rate: float, log_file: Path) -> int:
+    import asyncio
+    from .shadow_ws import ShadowMarketMonitor
+    markets = load_live_markets(markets_path)
+    selected = [market.__dict__ for market in markets if market.asset == "Bitcoin" and market.title.startswith("Bitcoin Up or Down")]
+    if not selected:
+        raise SystemExit("No BTC 5m/15m markets found; run scan-updown --intervals 5m,15m first")
+    print(f"SHADOW_WS markets={len(selected)} tokens={len(selected) * 2} fee_rate={fee_rate}")
+    asyncio.run(ShadowMarketMonitor(selected, size=size, fee_rate=fee_rate, log_file=log_file).run())
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -260,6 +273,7 @@ def main() -> int:
             "live-snapshot",
             "live-run",
             "web-monitor",
+            "shadow-ws",
             "binance-quote",
             "clob-book",
             "chainlink-price",
@@ -277,6 +291,7 @@ def main() -> int:
     parser.add_argument("--base-ts", type=int)
     parser.add_argument("--token-id")
     parser.add_argument("--size", type=float, default=25.0)
+    parser.add_argument("--fee-rate", type=float, default=0.07)
     parser.add_argument("--rpc-url")
     parser.add_argument("--feed-address")
     parser.add_argument("--mode", choices=["dry_run", "simulation", "live"], default="dry_run")
@@ -293,6 +308,8 @@ def main() -> int:
     if args.command == "web-monitor":
         serve(args.host, args.port, Path("web"), Path("data"), Path(args.log_file), Path(args.state_file or "state/orders.json"))
         return 0
+    if args.command == "shadow-ws":
+        return run_shadow_ws(Path(args.markets), args.size, args.fee_rate, Path(args.log_file))
 
     if args.command == "simulate":
         return run_simulation(

@@ -8,7 +8,7 @@ Ubuntu/Debian:
 
 ```bash
 sudo apt update
-sudo apt install -y git python3 python3-venv python3-pip g++
+sudo apt install -y git python3 python3-venv python3-pip g++ libboost-system-dev libssl-dev pkg-config
 ```
 
 ## 2. Clone
@@ -28,6 +28,15 @@ python3 -m venv .venv
 python -m pip install -U pip pytest
 bash scripts/build_cpp.sh
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
+```
+
+## 4.1 C++ WebSocket shadow engine
+
+The low-latency path is handled by `build/market_ws_engine`: Boost.Beast connects directly to the Polymarket market WebSocket, applies `book` and `price_change` messages, then runs VWAP, fee, depth and FOK checks in C++. It only writes Shadow opportunities and never submits orders.
+
+```bash
+./build/market_ws_engine data/live_markets.json 10 0.07 \
+  | tee -a logs/shadow-cpp.tsv
 ```
 
 ## 4. Auto-scan live markets
