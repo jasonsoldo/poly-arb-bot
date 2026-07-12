@@ -84,7 +84,7 @@ class PolymarketClobClient:
             page = data.get("data", []) if isinstance(data, dict) else []
             rows.extend(item for item in page if isinstance(item, dict))
             cursor = data.get("next_cursor") if isinstance(data, dict) else None
-            if not page or not cursor:
+            if not page or not cursor or cursor == "LTE=":
                 break
         return rows
 

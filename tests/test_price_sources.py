@@ -76,6 +76,20 @@ def test_clob_sampling_markets_uses_v2_endpoint():
     assert http.calls[-1] == ("GET", "https://clob.polymarket.com", "/sampling-markets", None)
 
 
+def test_clob_sampling_stops_on_clob_terminal_cursor():
+    class TerminalCursorHttp:
+        def __init__(self):
+            self.calls = []
+
+        def get_json(self, base_url, path, params=None):
+            self.calls.append(params)
+            return HttpResponse({"data": [{"condition_id": "0x1"}], "next_cursor": "LTE="}, 1, "url")
+
+    http = TerminalCursorHttp()
+    assert PolymarketClobClient(http=http).sampling_markets() == [{"condition_id": "0x1"}]
+    assert http.calls == [None]
+
+
 def test_chainlink_latest_round_data_decode():
     price = ChainlinkSource("https://polygon-rpc.example", http=FakeHttp(), max_staleness_seconds=999999999).latest_price("0xfeed")
 
