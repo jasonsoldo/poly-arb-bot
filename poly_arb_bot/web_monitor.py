@@ -30,14 +30,16 @@ def _jsonl(path, limit=100):
 
 def build_status(data_dir, log_file, state_file):
     snapshot = _json(data_dir / "live_snapshot.json", {"signals": [], "positions": []})
+    market_ids = {item.get("market_id") for item in _json(data_dir / "live_markets.json", {"markets": []}).get("markets", [])}
+    signals = [item for item in snapshot.get("signals", []) if item.get("market_id") in market_ids]
     state = _json(state_file, {"client_order_ids": {}})
     return {
         "ts": int(time.time()),
         "mode": "DRY RUN",
         "snapshot": snapshot,
-        "signals": snapshot.get("signals", []),
+        "signals": signals,
         "events": _jsonl(log_file),
-        "orders_recorded": len(state.get("client_order_ids", {})),
+        "orders_recorded": len(state.get("client_order_ids", {})) if signals else 0,
         "sources": {"polymarket_clob": "configured", "binance": "configured", "chainlink": "validation-only"},
     }
 
