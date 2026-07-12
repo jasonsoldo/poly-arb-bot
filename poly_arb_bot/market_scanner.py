@@ -66,8 +66,10 @@ class MarketScanner:
         outcomes = parse_jsonish(first_present(market, ("outcomes", "shortOutcomes")))
         token_ids = parse_jsonish(first_present(market, ("clobTokenIds", "clobTokenIDs", "tokens")))
         outcome_tokens = self._token_map(outcomes, token_ids)
-        up_token_id = outcome_tokens.get("Up")
-        down_token_id = outcome_tokens.get("Down")
+        up_token_id = next((value for key, value in outcome_tokens.items() if key.lower() == "up"), None)
+        down_token_id = next((value for key, value in outcome_tokens.items() if key.lower() == "down"), None)
+        if (not up_token_id or not down_token_id) and len(token_ids) == 2:
+            up_token_id, down_token_id = self._binary_token_pair(token_ids)
         if not up_token_id or not down_token_id:
             return None
 
@@ -107,6 +109,18 @@ class MarketScanner:
             else:
                 tokens.append(str(token))
         return {str(outcome): token for outcome, token in zip(outcomes, tokens) if token}
+
+    @staticmethod
+    def _binary_token_pair(token_ids: Any):
+        values = []
+        for token in token_ids:
+            if isinstance(token, dict):
+                value = first_present(token, ("token_id", "tokenId", "id"))
+            else:
+                value = token
+            if value:
+                values.append(str(value))
+        return (values[0], values[1]) if len(values) == 2 else (None, None)
 
     def updown_slugs(
         self,
