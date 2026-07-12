@@ -11,24 +11,31 @@ class PolymarketDataClient:
         self.base_url = base_url
 
     def events(self, limit: int = 100, offset: int = 0, active: bool = True) -> List[Dict[str, Any]]:
-        response = self.http.get_json(
-            self.base_url,
-            "/events",
-            {"limit": limit, "offset": offset, "active": str(active).lower(), "closed": "false"},
-        )
-        return _as_list(response.data)
+        return self._paged("/events", limit, offset, active)
 
     def events_by_slug(self, slug: str) -> List[Dict[str, Any]]:
         response = self.http.get_json(self.base_url, "/events", {"slug": slug})
         return _as_list(response.data)
 
     def markets(self, limit: int = 100, offset: int = 0, active: bool = True) -> List[Dict[str, Any]]:
-        response = self.http.get_json(
-            self.base_url,
-            "/markets",
-            {"limit": limit, "offset": offset, "active": str(active).lower(), "closed": "false"},
-        )
-        return _as_list(response.data)
+        return self._paged("/markets", limit, offset, active)
+
+    def _paged(self, path: str, limit: int, offset: int, active: bool) -> List[Dict[str, Any]]:
+        rows = []
+        remaining = limit
+        while remaining > 0:
+            page_size = min(100, remaining)
+            response = self.http.get_json(
+                self.base_url,
+                path,
+                {"limit": page_size, "offset": offset + len(rows), "active": str(active).lower(), "closed": "false"},
+            )
+            page = _as_list(response.data)
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            remaining -= len(page)
+        return rows
 
 
 def _as_list(data: Any) -> List[Dict[str, Any]]:
