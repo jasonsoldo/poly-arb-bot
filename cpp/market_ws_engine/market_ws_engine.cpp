@@ -13,6 +13,7 @@
 #include <iostream>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace asio = boost::asio; namespace beast = boost::beast; namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp; using ssl_socket = asio::ssl::stream<tcp::socket>; using boost::property_tree::ptree;
@@ -34,6 +35,11 @@ void evaluate(const std::string& id, Market& m, const std::map<std::string,Book>
     auto u=books.find(m.up), d=books.find(m.down); if(u==books.end()||d==books.end())return; auto uv=vwap(u->second,m.size), dv=vwap(d->second,m.size); bool fok=uv.first>=m.size&&dv.first>=m.size;
     double uf=uv.first*m.fee*uv.second*(1-uv.second), df=dv.first*m.fee*dv.second*(1-dv.second), total=m.size*(uv.second+dv.second)+uf+df, profit=fok?m.size-total:0; bool good=fok&&profit>0; double t=now(); if(good&&m.active==0)m.active=t; if(!good)m.active=0;
     if(good) std::cout<<"shadow_opportunity\t"<<id<<"\t"<<std::setprecision(12)<<uv.second<<"\t"<<dv.second<<"\t"<<uf<<"\t"<<df<<"\t"<<total<<"\t"<<profit<<"\t1\t1\t"<<t-m.active<<"\n"<<std::flush;
+}
+bool btc_short_market(const std::string& slug) { return slug.find("btc-updown-5m-") != std::string::npos || slug.find("btc-updown-15m-") != std::string::npos; }
+void subscribe_assets(websocket::stream<ssl_socket>& ws, const std::vector<std::string>& assets) {
+    std::string message = "{\"assets_ids\":["; for (size_t i=0;i<assets.size();++i) { if (i) message += ","; message += "\"" + assets[i] + "\""; } message += "],\"type\":\"market\",\"custom_feature_enabled\":true}";
+    ws.text(true); ws.write(asio::buffer(message)); std::cerr << "SUBSCRIBE_DYNAMIC " << message << "\n";
 }
 int main(int argc,char**argv){
     if(argc<2){std::cerr<<"usage: market_ws_engine <markets.json> [size] [fee_rate]\n";return 2;}
@@ -58,7 +64,12 @@ int main(int argc,char**argv){
         std::stringstream input;input<<beast::make_printable(buffer.data());std::cerr<<"WS_FRAME "<<input.str()<<"\n";ptree msg;
         try{std::istringstream json(input.str());boost::property_tree::read_json(json,msg);}catch(...){continue;}
         std::string type=msg.get<std::string>("event_type","");std::string asset=msg.get<std::string>("asset_id","");
-        if(type=="book"&&books.count(asset)){levels(books[asset],msg.get_child("bids",ptree{}),true,true);levels(books[asset],msg.get_child("asks",ptree{}),false,true);}
+        if(type=="new_market") {
+            std::string slug=msg.get<std::string>("slug",""); auto assets=msg.get_child("assets_ids",ptree{}); std::vector<std::string> ids;
+            for(const auto& item:assets) ids.push_back(item.second.get_value<std::string>());
+            if(btc_short_market(slug)&&ids.size()>=2) { std::string id=msg.get<std::string>("market",""); markets[id]={ids[0],ids[1],argc>2?std::stod(argv[2]):10,argc>3?std::stod(argv[3]):.07,0}; books[ids[0]]; books[ids[1]]; subscribe_assets(ws,ids); }
+        }
+        else if(type=="book"&&books.count(asset)){levels(books[asset],msg.get_child("bids",ptree{}),true,true);levels(books[asset],msg.get_child("asks",ptree{}),false,true);}
         else if(type=="price_change"){for(const auto&x:msg.get_child("price_changes",ptree{})){const auto&p=x.second;std::string a=p.get<std::string>("asset_id",asset);if(books.count(a))change(books[a],p);}}
         for(auto&x:markets)evaluate(x.first,x.second,books);
     }
