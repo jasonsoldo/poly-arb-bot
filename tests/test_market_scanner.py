@@ -1,5 +1,7 @@
 from poly_arb_bot.market_scanner import MarketScanner
 from poly_arb_bot.cli import is_crypto_market
+from poly_arb_bot.cli import current_window_specs
+from types import SimpleNamespace
 from poly_arb_bot.polymarket_data import parse_timestamp_seconds
 
 
@@ -96,3 +98,9 @@ def test_scanner_reads_open_price_from_rules_text():
 def test_crypto_discovery_uses_market_identity_not_description_keywords():
     assert is_crypto_market({"question": "Bitcoin all time high by September 30, 2026?", "slug": "bitcoin-ath"})
     assert not is_crypto_market({"question": "Will Seth Moulton win?", "slug": "seth-moulton", "description": "Bitcoin policy"})
+
+
+def test_current_window_specs_rejects_stale_slug_results():
+    now = 1783857600
+    specs = [SimpleNamespace(close_ts=now - 901), SimpleNamespace(close_ts=now + 300), SimpleNamespace(close_ts=now + 3601)]
+    assert current_window_specs(specs, now) == [specs[1]]

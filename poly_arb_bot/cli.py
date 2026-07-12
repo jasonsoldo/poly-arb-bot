@@ -77,11 +77,11 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     events = []
     for slug in slugs:
         events.extend(client.events_by_slug(slug))
-    specs = scanner.specs_from_events(events)
+    specs = current_window_specs(scanner.specs_from_events(events), now_ts)
     unique = {spec.market_id: spec for spec in specs}
     if not unique:
         fallback = client.markets_in_window(now_ts - 900, now_ts + 3600)
-        specs = scanner.specs_from_events(fallback)
+        specs = current_window_specs(scanner.specs_from_events(fallback), now_ts)
         unique = {spec.market_id: spec for spec in specs}
     diagnostics = {}
     examples = []
@@ -94,7 +94,13 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     for example in examples[:5]:
         print(f"CLOB_REJECT market_id={example[0]} token_id={example[1]} reason={example[2]}")
     print(f"WROTE {output_path} markets={len(unique)} slugs_checked={len(slugs)}")
+    if not unique and not rejected:
+        print("NO_CURRENT_UPDOWN_MARKETS no active 5m/15m Up/Down market in the official end-date window")
     return 0
+
+
+def current_window_specs(specs, now_ts):
+    return [spec for spec in specs if now_ts - 900 <= spec.close_ts <= now_ts + 3600]
 
 
 def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
