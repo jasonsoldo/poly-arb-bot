@@ -71,11 +71,20 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     scanner = MarketScanner()
     interval_list = [item.strip() for item in intervals.split(",") if item.strip()]
     now_ts = int(base_ts or time.time())
+    series_slugs = scanner.updown_series_slugs(interval_list)
+    events = []
+    for series_slug in series_slugs:
+        for series in client.series_by_slug(series_slug):
+            for event in current_series_events(series.get("events") or [], now_ts):
+                full_event = client.event_by_id(str(event.get("id")))
+                if full_event:
+                    full_event["eventMetadata"] = event.get("eventMetadata") or {}
+                    full_event["markets"] = tradable_markets(full_event.get("markets") or [])
+                    if full_event["markets"]:
+                        events.append(full_event)
+    specs = scanner.specs_from_events(events)
+    unique = {spec.market_id: spec for spec in specs}
     clob = PolymarketClobClient()
-    clob_rows = clob.sampling_markets()
-    condition_ids = current_updown_condition_ids(clob_rows, interval_list, now_ts)
-    specs = scanner.specs_from_events(client.markets_by_condition_ids(condition_ids))
-    unique = {spec.market_id: spec for spec in specs if spec.market_id in condition_ids}
     diagnostics = {}
     examples = []
     valid, rejected = filter_specs_with_orderbooks(list(unique.values()), clob, diagnostics, examples)
@@ -86,32 +95,24 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     print(f"CLOB_VALID markets={len(unique)} rejected={rejected} {detail}".rstrip())
     for example in examples[:5]:
         print(f"CLOB_REJECT market_id={example[0]} token_id={example[1]} reason={example[2]}")
-    print(f"CLOB_SAMPLING rows={len(clob_rows)} short_candidates={len(condition_ids)} gamma_enriched={len(specs)}")
+    print(f"GAMMA_SERIES series_checked={len(series_slugs)} current_events={len(events)} parsed_markets={len(specs)}")
     print(f"WROTE {output_path} markets={len(unique)}")
     if not unique and not rejected:
-        print("NO_CURRENT_UPDOWN_MARKETS no accepting 5m/15m Up/Down market in official CLOB sampling")
+        print("NO_CURRENT_UPDOWN_MARKETS no current event in official 5m/15m recurring series")
     return 0
 
 
-def current_updown_condition_ids(rows, intervals, now_ts):
-    markers = tuple(f"updown-{interval}" for interval in intervals)
-    ids = []
-    for row in rows:
-        title = str(row.get("question", ""))
-        slug = str(row.get("market_slug", "")).lower()
-        close_ts = parse_timestamp_seconds(row.get("end_date_iso"))
-        if not title.startswith(("Bitcoin Up or Down", "Ethereum Up or Down", "Solana Up or Down", "XRP Up or Down", "Dogecoin Up or Down", "BNB Up or Down")):
-            continue
-        if not any(marker in slug for marker in markers):
-            continue
-        if not row.get("active") or row.get("closed") or not row.get("enable_order_book") or not row.get("accepting_orders"):
-            continue
-        if close_ts is None or not now_ts - 900 <= close_ts <= now_ts + 3600:
-            continue
-        condition_id = str(row.get("condition_id", ""))
-        if condition_id:
-            ids.append(condition_id)
-    return ids
+def current_series_events(events, now_ts):
+    return [
+        event for event in events
+        if event.get("active") and not event.get("closed")
+        and (close_ts := parse_timestamp_seconds(event.get("endDate"))) is not None
+        and now_ts < close_ts <= now_ts + 3600
+    ]
+
+
+def tradable_markets(markets):
+    return [market for market in markets if market.get("enableOrderBook") and market.get("acceptingOrders")]
 
 
 def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):

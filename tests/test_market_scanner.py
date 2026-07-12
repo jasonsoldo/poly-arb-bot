@@ -1,6 +1,7 @@
 from poly_arb_bot.market_scanner import MarketScanner
 from poly_arb_bot.cli import is_crypto_market
-from poly_arb_bot.cli import current_updown_condition_ids
+from poly_arb_bot.cli import current_series_events
+from poly_arb_bot.cli import tradable_markets
 from types import SimpleNamespace
 from poly_arb_bot.polymarket_data import parse_timestamp_seconds
 
@@ -100,10 +101,23 @@ def test_crypto_discovery_uses_market_identity_not_description_keywords():
     assert not is_crypto_market({"question": "Will Seth Moulton win?", "slug": "seth-moulton", "description": "Bitcoin policy"})
 
 
-def test_current_updown_condition_ids_requires_live_clob_market():
+def test_current_series_events_requires_active_current_event():
     now = 1783857600
-    rows = [
-        {"question": "Bitcoin Up or Down", "market_slug": "btc-updown-5m-live", "end_date_iso": "2026-07-12T12:05:00Z", "condition_id": "live", "active": True, "closed": False, "enable_order_book": True, "accepting_orders": True},
-        {"question": "Bitcoin Up or Down", "market_slug": "btc-updown-5m-old", "end_date_iso": "2026-07-12T11:00:00Z", "condition_id": "old", "active": True, "closed": False, "enable_order_book": True, "accepting_orders": True},
+    events = [
+        {"id": "live", "endDate": "2026-07-12T12:05:00Z", "active": True, "closed": False},
+        {"id": "old", "endDate": "2026-07-12T11:00:00Z", "active": True, "closed": True},
     ]
-    assert current_updown_condition_ids(rows, ["5m", "15m"], now) == ["live"]
+    assert [event["id"] for event in current_series_events(events, now)] == ["live"]
+
+
+def test_tradable_markets_requires_orderbook_and_accepting_orders():
+    markets = [
+        {"conditionId": "live", "enableOrderBook": True, "acceptingOrders": True},
+        {"conditionId": "stopped", "enableOrderBook": True, "acceptingOrders": False},
+    ]
+    assert [market["conditionId"] for market in tradable_markets(markets)] == ["live"]
+
+
+def test_scanner_generates_official_recurring_series_slugs():
+    slugs = MarketScanner().updown_series_slugs(["5m", "15m"])
+    assert slugs == ["btc-up-or-down-5m", "btc-up-or-down-15m"]

@@ -157,6 +157,9 @@ class MarketScanner:
                     slugs.append(f"{prefix}-updown-{interval}-{start}")
         return slugs
 
+    def updown_series_slugs(self, intervals: Iterable[str]) -> List[str]:
+        return [f"btc-up-or-down-{interval}" for interval in intervals]
+
     def _open_price(self, market: Dict[str, Any], event: Dict[str, Any]) -> Optional[float]:
         direct = first_present(
             market,

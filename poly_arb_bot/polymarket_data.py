@@ -17,6 +17,18 @@ class PolymarketDataClient:
         response = self.http.get_json(self.base_url, "/events", {"slug": slug})
         return _as_list(response.data)
 
+    def event_by_id(self, event_id: str) -> Dict[str, Any]:
+        response = self.http.get_json(self.base_url, f"/events/{event_id}")
+        return response.data if isinstance(response.data, dict) else {}
+
+    def series_by_slug(self, slug: str) -> List[Dict[str, Any]]:
+        response = self.http.get_json(
+            self.base_url,
+            "/series",
+            {"slug": slug, "closed": "false", "exclude_events": "false"},
+        )
+        return _as_list(response.data)
+
     def events_keyset(self, limit: int = 1000, active: bool = True) -> List[Dict[str, Any]]:
         return self._keyset("/events/keyset", "events", limit, active)
 

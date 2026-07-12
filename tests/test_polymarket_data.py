@@ -57,3 +57,27 @@ def test_markets_by_condition_ids_uses_repeated_query_values():
     http = WindowHttp()
     PolymarketDataClient(http=http).markets_by_condition_ids(["0xa", "0xb"])
     assert http.params[0]["condition_ids"] == ["0xa", "0xb"]
+
+
+class SeriesHttp:
+    def __init__(self):
+        self.calls = []
+
+    def get_json(self, base_url, path, params=None):
+        self.calls.append((path, params))
+        if path == "/series":
+            return HttpResponse([{"id": "10684", "events": []}], 1, "url")
+        if path == "/events/693216":
+            return HttpResponse({"id": "693216", "markets": []}, 1, "url")
+        raise AssertionError(path)
+
+
+def test_series_and_event_use_official_gamma_endpoints():
+    http = SeriesHttp()
+    client = PolymarketDataClient(http=http)
+    assert client.series_by_slug("btc-up-or-down-5m")[0]["id"] == "10684"
+    assert client.event_by_id("693216")["id"] == "693216"
+    assert http.calls == [
+        ("/series", {"slug": "btc-up-or-down-5m", "closed": "false", "exclude_events": "false"}),
+        ("/events/693216", None),
+    ]
