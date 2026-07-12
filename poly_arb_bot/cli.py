@@ -87,6 +87,18 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         specs = scanner.specs_from_events(fallback)
         unique = {spec.market_id: spec for spec in specs}
     valid, rejected = filter_specs_with_orderbooks(list(unique.values()), PolymarketClobClient())
+    if not valid:
+        active_events = client.events(limit=1000, active=True)
+        active_rows = []
+        for event in active_events:
+            for row in event.get("markets") or [event]:
+                slug = str(row.get("slug", ""))
+                if slug.startswith("btc-updown-5m-") or slug.startswith("btc-updown-15m-"):
+                    active_rows.append((row, event))
+        active_specs = [scanner.spec_from_market(row, event) for row, event in active_rows]
+        active_specs = [spec for spec in active_specs if spec is not None]
+        valid, fallback_rejected = filter_specs_with_orderbooks(active_specs, PolymarketClobClient())
+        rejected += fallback_rejected
     unique = {spec.market_id: spec for spec in valid}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(scanner.to_payload(unique.values()), indent=2), encoding="utf-8")
