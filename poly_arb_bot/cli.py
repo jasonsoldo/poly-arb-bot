@@ -71,35 +71,19 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     interval_list = [item.strip() for item in intervals.split(",") if item.strip()]
     include_previous = slug_window in ("previous,current", "previous,current,next")
     include_next = slug_window in ("current,next", "previous,current,next")
-    slugs = scanner.updown_slugs(interval_list, now_ts=base_ts, include_previous=include_previous, include_next=include_next)
+    now_ts = int(base_ts or time.time())
+    slugs = scanner.updown_slugs(interval_list, now_ts=now_ts, include_previous=include_previous, include_next=include_next)
     events = []
     for slug in slugs:
         events.extend(client.events_by_slug(slug))
     specs = scanner.specs_from_events(events)
     unique = {spec.market_id: spec for spec in specs}
     if not unique:
-        fallback = client.markets(limit=1000, active=True)
-        fallback = [
-            row for row in fallback
-            if str(row.get("slug", "")).startswith("btc-updown-5m-")
-            or str(row.get("slug", "")).startswith("btc-updown-15m-")
-        ]
+        fallback = client.markets_in_window(now_ts - 900, now_ts + 3600)
         specs = scanner.specs_from_events(fallback)
         unique = {spec.market_id: spec for spec in specs}
     diagnostics = {}
     valid, rejected = filter_specs_with_orderbooks(list(unique.values()), PolymarketClobClient(), diagnostics)
-    if not valid:
-        active_events = client.events(limit=1000, active=True)
-        active_rows = []
-        for event in active_events:
-            for row in event.get("markets") or [event]:
-                slug = str(row.get("slug", ""))
-                if slug.startswith("btc-updown-5m-") or slug.startswith("btc-updown-15m-"):
-                    active_rows.append((row, event))
-        active_specs = [scanner.spec_from_market(row, event) for row, event in active_rows]
-        active_specs = [spec for spec in active_specs if spec is not None]
-        valid, fallback_rejected = filter_specs_with_orderbooks(active_specs, PolymarketClobClient(), diagnostics)
-        rejected += fallback_rejected
     unique = {spec.market_id: spec for spec in valid}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(scanner.to_payload(unique.values()), indent=2), encoding="utf-8")
@@ -184,8 +168,7 @@ def discover_crypto_markets(output_path: Path, gamma_base_url: str, limit: int) 
     rejected = 0
     for event in events:
         for market in event.get("markets") or []:
-            text = " ".join(str(market.get(key, "")) for key in ("question", "title", "slug", "description")).lower()
-            if not any(term in text for term in ("bitcoin", "ethereum", "solana", "xrp", "dogecoin", "bnb", "btc-", "eth-", "sol-")):
+            if not is_crypto_market(market):
                 continue
             close_ts = parse_timestamp_seconds(market.get("endDate") or market.get("endDateIso"))
             condition_id = str(market.get("conditionId") or "")
@@ -223,6 +206,12 @@ def discover_crypto_markets(output_path: Path, gamma_base_url: str, limit: int) 
     print(f"CLOB_CRYPTO markets={len(markets)} rejected={rejected} events_scanned={len(events)}")
     print(f"WROTE {output_path} markets={len(markets)}")
     return 0
+
+
+def is_crypto_market(market) -> bool:
+    title = " ".join(str(market.get(key, "")) for key in ("question", "title")).lower()
+    slug = str(market.get("slug", "")).lower()
+    return any(term in title for term in ("bitcoin", "ethereum", "solana", "xrp", "dogecoin", "bnb", "crypto")) or slug.startswith(("btc-", "eth-", "sol-", "xrp-", "doge-", "bnb-"))
 
 
 def print_binance_quote(symbol: str, binance_base_url: str) -> int:

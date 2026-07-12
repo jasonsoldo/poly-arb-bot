@@ -35,3 +35,19 @@ def test_events_keyset_uses_cursor_not_offset():
     rows = PolymarketDataClient(http=http).events_keyset(limit=200)
     assert [row["id"] for row in rows] == ["1", "2"]
     assert http.cursors == [None, "next"]
+
+
+class WindowHttp:
+    def __init__(self):
+        self.params = []
+
+    def get_json(self, base_url, path, params):
+        self.params.append(params)
+        return HttpResponse([], 1, "url")
+
+
+def test_markets_window_uses_official_end_date_filters():
+    http = WindowHttp()
+    PolymarketDataClient(http=http).markets_in_window(1783856700, 1783860300)
+    assert http.params[0]["end_date_min"] == "2026-07-12T11:45:00Z"
+    assert http.params[0]["end_date_max"] == "2026-07-12T12:45:00Z"

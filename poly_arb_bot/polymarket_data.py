@@ -23,6 +23,23 @@ class PolymarketDataClient:
     def markets(self, limit: int = 100, offset: int = 0, active: bool = True) -> List[Dict[str, Any]]:
         return self._paged("/markets", limit, offset, active)
 
+    def markets_in_window(self, start_ts: int, end_ts: int, limit: int = 500) -> List[Dict[str, Any]]:
+        rows = []
+        for offset in range(0, limit, 100):
+            params = {
+                "limit": min(100, limit - offset),
+                "offset": offset,
+                "active": "true",
+                "closed": "false",
+                "end_date_min": datetime.fromtimestamp(start_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+                "end_date_max": datetime.fromtimestamp(end_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            page = _as_list(self.http.get_json(self.base_url, "/markets", params).data)
+            rows.extend(page)
+            if len(page) < params["limit"]:
+                break
+        return rows
+
     def _paged(self, path: str, limit: int, offset: int, active: bool) -> List[Dict[str, Any]]:
         rows = []
         remaining = limit

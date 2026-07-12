@@ -1,4 +1,5 @@
 from poly_arb_bot.market_scanner import MarketScanner
+from poly_arb_bot.cli import is_crypto_market
 from poly_arb_bot.polymarket_data import parse_timestamp_seconds
 
 
@@ -90,3 +91,8 @@ def test_scanner_reads_open_price_from_rules_text():
 
     assert spec.open_price == 3456.78
     assert spec.symbol == "ETHUSDT"
+
+
+def test_crypto_discovery_uses_market_identity_not_description_keywords():
+    assert is_crypto_market({"question": "Bitcoin all time high by September 30, 2026?", "slug": "bitcoin-ath"})
+    assert not is_crypto_market({"question": "Will Seth Moulton win?", "slug": "seth-moulton", "description": "Bitcoin policy"})
