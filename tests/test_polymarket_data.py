@@ -51,3 +51,9 @@ def test_markets_window_uses_official_end_date_filters():
     PolymarketDataClient(http=http).markets_in_window(1783856700, 1783860300)
     assert http.params[0]["end_date_min"] == "2026-07-12T11:45:00Z"
     assert http.params[0]["end_date_max"] == "2026-07-12T12:45:00Z"
+
+
+def test_markets_by_condition_ids_uses_repeated_query_values():
+    http = WindowHttp()
+    PolymarketDataClient(http=http).markets_by_condition_ids(["0xa", "0xb"])
+    assert http.params[0]["condition_ids"] == ["0xa", "0xb"]

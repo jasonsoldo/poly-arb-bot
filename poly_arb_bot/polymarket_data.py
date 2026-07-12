@@ -40,6 +40,16 @@ class PolymarketDataClient:
                 break
         return rows
 
+    def markets_by_condition_ids(self, condition_ids: List[str]) -> List[Dict[str, Any]]:
+        if not condition_ids:
+            return []
+        response = self.http.get_json(
+            self.base_url,
+            "/markets",
+            {"condition_ids": condition_ids, "active": "true", "closed": "false", "limit": len(condition_ids)},
+        )
+        return _as_list(response.data)
+
     def _paged(self, path: str, limit: int, offset: int, active: bool) -> List[Dict[str, Any]]:
         rows = []
         remaining = limit

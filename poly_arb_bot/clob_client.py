@@ -75,6 +75,19 @@ class PolymarketClobClient:
             raise RuntimeError(f"CLOB market rejected condition {condition_id}: {response.data}")
         return response.data
 
+    def sampling_markets(self, max_pages: int = 20) -> List[Dict]:
+        rows = []
+        cursor = None
+        for _ in range(max_pages):
+            params = {"next_cursor": cursor} if cursor else None
+            data = self.http.get_json(self.base_url, "/sampling-markets", params).data
+            page = data.get("data", []) if isinstance(data, dict) else []
+            rows.extend(item for item in page if isinstance(item, dict))
+            cursor = data.get("next_cursor") if isinstance(data, dict) else None
+            if not page or not cursor:
+                break
+        return rows
+
     @staticmethod
     def _levels(rows: List[Dict], reverse: bool) -> List[ClobLevel]:
         levels = []

@@ -30,6 +30,8 @@ class FakeHttp:
             )
         if path.startswith("/clob-markets/"):
             return HttpResponse({"t": [{"t": "123", "o": "Yes"}], "mos": 5, "mts": 0.01, "tbf": 7}, 5, "url")
+        if path == "/sampling-markets":
+            return HttpResponse({"data": [{"condition_id": "0x1"}], "next_cursor": None}, 5, "url")
         raise AssertionError(path)
 
     def post_json(self, base_url, path, payload):
@@ -66,6 +68,12 @@ def test_clob_market_info_uses_v2_endpoint():
     info = PolymarketClobClient(http=http).get_market_info("0xcondition")
     assert info["mos"] == 5
     assert http.calls[-1] == ("GET", "https://clob.polymarket.com", "/clob-markets/0xcondition", None)
+
+
+def test_clob_sampling_markets_uses_v2_endpoint():
+    http = FakeHttp()
+    assert PolymarketClobClient(http=http).sampling_markets() == [{"condition_id": "0x1"}]
+    assert http.calls[-1] == ("GET", "https://clob.polymarket.com", "/sampling-markets", None)
 
 
 def test_chainlink_latest_round_data_decode():

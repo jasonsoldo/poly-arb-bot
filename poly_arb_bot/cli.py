@@ -70,22 +70,15 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     client = PolymarketDataClient(base_url=gamma_base_url)
     scanner = MarketScanner()
     interval_list = [item.strip() for item in intervals.split(",") if item.strip()]
-    include_previous = slug_window in ("previous,current", "previous,current,next")
-    include_next = slug_window in ("current,next", "previous,current,next")
     now_ts = int(base_ts or time.time())
-    slugs = scanner.updown_slugs(interval_list, now_ts=now_ts, include_previous=include_previous, include_next=include_next)
-    events = []
-    for slug in slugs:
-        events.extend(client.events_by_slug(slug))
-    specs = current_window_specs(scanner.specs_from_events(events), now_ts)
-    unique = {spec.market_id: spec for spec in specs}
-    if not unique:
-        fallback = client.markets_in_window(now_ts - 900, now_ts + 3600)
-        specs = current_window_specs(scanner.specs_from_events(fallback), now_ts)
-        unique = {spec.market_id: spec for spec in specs}
+    clob = PolymarketClobClient()
+    clob_rows = clob.sampling_markets()
+    condition_ids = current_updown_condition_ids(clob_rows, interval_list, now_ts)
+    specs = scanner.specs_from_events(client.markets_by_condition_ids(condition_ids))
+    unique = {spec.market_id: spec for spec in specs if spec.market_id in condition_ids}
     diagnostics = {}
     examples = []
-    valid, rejected = filter_specs_with_orderbooks(list(unique.values()), PolymarketClobClient(), diagnostics, examples)
+    valid, rejected = filter_specs_with_orderbooks(list(unique.values()), clob, diagnostics, examples)
     unique = {spec.market_id: spec for spec in valid}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(scanner.to_payload(unique.values()), indent=2), encoding="utf-8")
@@ -93,14 +86,32 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     print(f"CLOB_VALID markets={len(unique)} rejected={rejected} {detail}".rstrip())
     for example in examples[:5]:
         print(f"CLOB_REJECT market_id={example[0]} token_id={example[1]} reason={example[2]}")
-    print(f"WROTE {output_path} markets={len(unique)} slugs_checked={len(slugs)}")
+    print(f"CLOB_SAMPLING rows={len(clob_rows)} short_candidates={len(condition_ids)} gamma_enriched={len(specs)}")
+    print(f"WROTE {output_path} markets={len(unique)}")
     if not unique and not rejected:
-        print("NO_CURRENT_UPDOWN_MARKETS no active 5m/15m Up/Down market in the official end-date window")
+        print("NO_CURRENT_UPDOWN_MARKETS no accepting 5m/15m Up/Down market in official CLOB sampling")
     return 0
 
 
-def current_window_specs(specs, now_ts):
-    return [spec for spec in specs if now_ts - 900 <= spec.close_ts <= now_ts + 3600]
+def current_updown_condition_ids(rows, intervals, now_ts):
+    markers = tuple(f"updown-{interval}" for interval in intervals)
+    ids = []
+    for row in rows:
+        title = str(row.get("question", ""))
+        slug = str(row.get("market_slug", "")).lower()
+        close_ts = parse_timestamp_seconds(row.get("end_date_iso"))
+        if not title.startswith(("Bitcoin Up or Down", "Ethereum Up or Down", "Solana Up or Down", "XRP Up or Down", "Dogecoin Up or Down", "BNB Up or Down")):
+            continue
+        if not any(marker in slug for marker in markers):
+            continue
+        if not row.get("active") or row.get("closed") or not row.get("enable_order_book") or not row.get("accepting_orders"):
+            continue
+        if close_ts is None or not now_ts - 900 <= close_ts <= now_ts + 3600:
+            continue
+        condition_id = str(row.get("condition_id", ""))
+        if condition_id:
+            ids.append(condition_id)
+    return ids
 
 
 def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):

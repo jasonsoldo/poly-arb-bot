@@ -1,6 +1,6 @@
 from poly_arb_bot.market_scanner import MarketScanner
 from poly_arb_bot.cli import is_crypto_market
-from poly_arb_bot.cli import current_window_specs
+from poly_arb_bot.cli import current_updown_condition_ids
 from types import SimpleNamespace
 from poly_arb_bot.polymarket_data import parse_timestamp_seconds
 
@@ -100,7 +100,10 @@ def test_crypto_discovery_uses_market_identity_not_description_keywords():
     assert not is_crypto_market({"question": "Will Seth Moulton win?", "slug": "seth-moulton", "description": "Bitcoin policy"})
 
 
-def test_current_window_specs_rejects_stale_slug_results():
+def test_current_updown_condition_ids_requires_live_clob_market():
     now = 1783857600
-    specs = [SimpleNamespace(close_ts=now - 901), SimpleNamespace(close_ts=now + 300), SimpleNamespace(close_ts=now + 3601)]
-    assert current_window_specs(specs, now) == [specs[1]]
+    rows = [
+        {"question": "Bitcoin Up or Down", "market_slug": "btc-updown-5m-live", "end_date_iso": "2026-07-12T12:05:00Z", "condition_id": "live", "active": True, "closed": False, "enable_order_book": True, "accepting_orders": True},
+        {"question": "Bitcoin Up or Down", "market_slug": "btc-updown-5m-old", "end_date_iso": "2026-07-12T11:00:00Z", "condition_id": "old", "active": True, "closed": False, "enable_order_book": True, "accepting_orders": True},
+    ]
+    assert current_updown_condition_ids(rows, ["5m", "15m"], now) == ["live"]
