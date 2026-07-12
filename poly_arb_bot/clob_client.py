@@ -69,6 +69,12 @@ class PolymarketClobClient:
         data = response.data
         return float(data["price"])
 
+    def get_market_info(self, condition_id: str) -> Dict:
+        response = self.http.get_json(self.base_url, f"/clob-markets/{condition_id}")
+        if not isinstance(response.data, dict) or response.data.get("error"):
+            raise RuntimeError(f"CLOB market rejected condition {condition_id}: {response.data}")
+        return response.data
+
     @staticmethod
     def _levels(rows: List[Dict], reverse: bool) -> List[ClobLevel]:
         levels = []

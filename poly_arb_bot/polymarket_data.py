@@ -17,6 +17,9 @@ class PolymarketDataClient:
         response = self.http.get_json(self.base_url, "/events", {"slug": slug})
         return _as_list(response.data)
 
+    def events_keyset(self, limit: int = 1000, active: bool = True) -> List[Dict[str, Any]]:
+        return self._keyset("/events/keyset", "events", limit, active)
+
     def markets(self, limit: int = 100, offset: int = 0, active: bool = True) -> List[Dict[str, Any]]:
         return self._paged("/markets", limit, offset, active)
 
@@ -35,6 +38,21 @@ class PolymarketDataClient:
             if len(page) < page_size:
                 break
             remaining -= len(page)
+        return rows
+
+    def _keyset(self, path: str, key: str, limit: int, active: bool) -> List[Dict[str, Any]]:
+        rows = []
+        cursor = None
+        while len(rows) < limit:
+            params = {"limit": min(100, limit - len(rows)), "active": str(active).lower(), "closed": "false"}
+            if cursor:
+                params["after_cursor"] = cursor
+            data = self.http.get_json(self.base_url, path, params).data
+            page = data.get(key, []) if isinstance(data, dict) else []
+            rows.extend(item for item in page if isinstance(item, dict))
+            cursor = data.get("next_cursor") if isinstance(data, dict) else None
+            if not page or not cursor:
+                break
         return rows
 
 

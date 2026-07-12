@@ -13,7 +13,7 @@ from .live_signals import LiveMarketSpec, LiveSignalBuilder
 from .logger import JsonlLogger
 from .market_scanner import MarketScanner
 from .models import MarketSignal, PositionCurve
-from .polymarket_data import PolymarketDataClient
+from .polymarket_data import PolymarketDataClient, parse_jsonish, parse_timestamp_seconds
 from .position_manager import PositionManager
 from .risk_manager import RiskManager
 from .state_store import JsonStateStore
@@ -176,6 +176,55 @@ def inspect_gamma(gamma_base_url: str, limit: int) -> int:
     return 0
 
 
+def discover_crypto_markets(output_path: Path, gamma_base_url: str, limit: int) -> int:
+    now = int(time.time())
+    events = PolymarketDataClient(base_url=gamma_base_url).events_keyset(limit=limit)
+    clob = PolymarketClobClient()
+    markets = []
+    rejected = 0
+    for event in events:
+        for market in event.get("markets") or []:
+            text = " ".join(str(market.get(key, "")) for key in ("question", "title", "slug", "description")).lower()
+            if not any(term in text for term in ("bitcoin", "ethereum", "solana", "xrp", "dogecoin", "bnb", "btc-", "eth-", "sol-")):
+                continue
+            close_ts = parse_timestamp_seconds(market.get("endDate") or market.get("endDateIso"))
+            condition_id = str(market.get("conditionId") or "")
+            if not condition_id or close_ts is None or close_ts <= now:
+                rejected += 1
+                continue
+            try:
+                info = clob.get_market_info(condition_id)
+                tokens = info.get("t", [])
+                token_ids = [str(token.get("t", "")) for token in tokens if isinstance(token, dict) and token.get("t")]
+                if len(token_ids) != 2:
+                    rejected += 1
+                    continue
+                books = [clob.get_book(token_id) for token_id in token_ids]
+                if not all(book.bids and book.asks for book in books):
+                    rejected += 1
+                    continue
+            except RuntimeError:
+                rejected += 1
+                continue
+            markets.append({
+                "market_id": condition_id,
+                "title": market.get("question") or market.get("title") or market.get("slug"),
+                "slug": market.get("slug"),
+                "close_ts": close_ts,
+                "outcomes": parse_jsonish(market.get("outcomes")) or [token.get("o") for token in tokens],
+                "token_ids": token_ids,
+                "min_order_size": info.get("mos"),
+                "tick_size": info.get("mts"),
+                "taker_base_fee_bps": info.get("tbf"),
+                "fee_details": info.get("fd"),
+            })
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps({"markets": markets}, indent=2), encoding="utf-8")
+    print(f"CLOB_CRYPTO markets={len(markets)} rejected={rejected} events_scanned={len(events)}")
+    print(f"WROTE {output_path} markets={len(markets)}")
+    return 0
+
+
 def print_binance_quote(symbol: str, binance_base_url: str) -> int:
     ticker = BinanceSource(base_url=binance_base_url).ticker(symbol)
     print(
@@ -328,6 +377,7 @@ def main() -> int:
             "scan-markets",
             "scan-updown",
             "inspect-gamma",
+            "discover-crypto",
             "live-snapshot",
             "live-run",
             "web-monitor",
@@ -384,6 +434,8 @@ def main() -> int:
         return scan_markets(Path(args.output), args.gamma_base_url, args.limit)
     if args.command == "scan-updown":
         return scan_updown_markets(Path(args.output), args.gamma_base_url, args.intervals, args.slug_window, args.base_ts)
+    if args.command == "discover-crypto":
+        return discover_crypto_markets(Path(args.output), args.gamma_base_url, args.limit)
     if args.command == "inspect-gamma":
         return inspect_gamma(args.gamma_base_url, args.limit)
     if args.command == "live-run":
