@@ -38,13 +38,14 @@ void evaluate(const std::string& id, Market& m, const std::map<std::string,Book>
 }
 bool btc_short_market(const std::string& slug) { return slug.find("btc-updown-5m-") != std::string::npos || slug.find("btc-updown-15m-") != std::string::npos; }
 void subscribe_assets(websocket::stream<ssl_socket>& ws, const std::vector<std::string>& assets) {
-    std::string message = "{\"assets_ids\":["; for (size_t i=0;i<assets.size();++i) { if (i) message += ","; message += "\"" + assets[i] + "\""; } message += "],\"type\":\"market\",\"custom_feature_enabled\":true}";
+    std::string message = "{\"assets_ids\":["; for (size_t i=0;i<assets.size();++i) { if (i) message += ","; message += "\"" + assets[i] + "\""; } message += "],\"operation\":\"subscribe\",\"custom_feature_enabled\":true}";
     ws.text(true); ws.write(asio::buffer(message)); std::cerr << "SUBSCRIBE_DYNAMIC " << message << "\n";
 }
 int main(int argc,char**argv){
     if(argc<2){std::cerr<<"usage: market_ws_engine <markets.json> [size] [fee_rate]\n";return 2;}
     std::ifstream file(argv[1]); ptree root; boost::property_tree::read_json(file,root); std::map<std::string,Market> markets; std::map<std::string,Book> books;
     for(const auto& item:root.get_child("markets")){const auto&p=item.second;std::string id=p.get<std::string>("market_id"),up=p.get<std::string>("up_token_id"),down=p.get<std::string>("down_token_id");markets[id]={up,down,argc>2?std::stod(argv[2]):10,argc>3?std::stod(argv[3]):.07,0};books[up];books[down];}
+    if (books.empty()) { std::cerr << "NO_TOKENS live_markets.json contains no valid Up/Down tokens; rerun scan-updown\n"; return 4; }
     asio::io_context io; asio::ssl::context ctx(asio::ssl::context::tls_client); ctx.set_default_verify_paths(); ctx.set_verify_mode(asio::ssl::verify_peer); ssl_socket stream(io,ctx); stream.set_verify_callback(asio::ssl::host_name_verification("ws-subscriptions-clob.polymarket.com")); tcp::resolver resolver(io); auto endpoints=resolver.resolve("ws-subscriptions-clob.polymarket.com","443"); asio::connect(stream.next_layer(),endpoints); if(!SSL_set_tlsext_host_name(stream.native_handle(),"ws-subscriptions-clob.polymarket.com")) throw beast::system_error(beast::error_code(static_cast<int>(::ERR_get_error()),asio::error::get_ssl_category())); stream.handshake(asio::ssl::stream_base::client); websocket::stream<ssl_socket> ws(std::move(stream)); ws.handshake("ws-subscriptions-clob.polymarket.com","/ws/market");
     std::string subscribe="{\"assets_ids\":[";
     bool first=true;

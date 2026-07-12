@@ -77,6 +77,15 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         events.extend(client.events_by_slug(slug))
     specs = scanner.specs_from_events(events)
     unique = {spec.market_id: spec for spec in specs}
+    if not unique:
+        fallback = client.markets(limit=1000, active=True)
+        fallback = [
+            row for row in fallback
+            if str(row.get("slug", "")).startswith("btc-updown-5m-")
+            or str(row.get("slug", "")).startswith("btc-updown-15m-")
+        ]
+        specs = scanner.specs_from_events(fallback)
+        unique = {spec.market_id: spec for spec in specs}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(scanner.to_payload(unique.values()), indent=2), encoding="utf-8")
     print(f"WROTE {output_path} markets={len(unique)} slugs_checked={len(slugs)}")

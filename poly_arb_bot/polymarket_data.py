@@ -14,7 +14,7 @@ class PolymarketDataClient:
         response = self.http.get_json(
             self.base_url,
             "/events",
-            {"limit": limit, "offset": offset, "active": str(active).lower()},
+            {"limit": limit, "offset": offset, "active": str(active).lower(), "closed": "false"},
         )
         return _as_list(response.data)
 
@@ -26,7 +26,7 @@ class PolymarketDataClient:
         response = self.http.get_json(
             self.base_url,
             "/markets",
-            {"limit": limit, "offset": offset, "active": str(active).lower()},
+            {"limit": limit, "offset": offset, "active": str(active).lower(), "closed": "false"},
         )
         return _as_list(response.data)
 
