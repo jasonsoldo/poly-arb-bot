@@ -44,6 +44,7 @@ int main(int argc,char**argv){
     bool first=true;
     for(const auto&x:books){if(!first)subscribe+=",";first=false;subscribe+="\""+x.first+"\"";}
     subscribe+="] ,\"type\":\"market\",\"custom_feature_enabled\":true}";
+    ws.text(true);
     ws.write(asio::buffer(subscribe));
     std::cerr<<"SUBSCRIBE "<<subscribe<<"\n";
     std::cout<<"connected\n";
