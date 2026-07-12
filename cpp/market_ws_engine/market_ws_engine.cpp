@@ -41,5 +41,18 @@ int main(int argc,char**argv){
     for(const auto& item:root.get_child("markets")){const auto&p=item.second;std::string id=p.get<std::string>("market_id"),up=p.get<std::string>("up_token_id"),down=p.get<std::string>("down_token_id");markets[id]={up,down,argc>2?std::stod(argv[2]):10,argc>3?std::stod(argv[3]):.07,0};books[up];books[down];}
     asio::io_context io; asio::ssl::context ctx(asio::ssl::context::tls_client); ctx.set_default_verify_paths(); ctx.set_verify_mode(asio::ssl::verify_peer); ssl_socket stream(io,ctx); stream.set_verify_callback(asio::ssl::host_name_verification("ws-subscriptions-clob.polymarket.com")); tcp::resolver resolver(io); auto endpoints=resolver.resolve("ws-subscriptions-clob.polymarket.com","443"); asio::connect(stream.next_layer(),endpoints); if(!SSL_set_tlsext_host_name(stream.native_handle(),"ws-subscriptions-clob.polymarket.com")) throw beast::system_error(beast::error_code(static_cast<int>(::ERR_get_error()),asio::error::get_ssl_category())); stream.handshake(asio::ssl::stream_base::client); websocket::stream<ssl_socket> ws(std::move(stream)); ws.handshake("ws-subscriptions-clob.polymarket.com","/ws/market");
     std::string subscribe="{\"assets_ids\":["; bool first=true; for(const auto&x:books){if(!first)subscribe+=",";first=false;subscribe+="\""+x.first+"\"";} subscribe+="];\"type\":\"market\",\"custom_feature_enabled\":true}"; ws.write(asio::buffer(subscribe)); std::cout<<"connected\n";
-    for(;;){beast::flat_buffer buffer;ws.read(buffer);std::stringstream input;input<<beast::make_printable(buffer.data());ptree msg;try{std::istringstream json(input.str());boost::property_tree::read_json(json,msg);}catch(...){continue;}std::string type=msg.get<std::string>("event_type","");std::string asset=msg.get<std::string>("asset_id","");if(type=="book"&&books.count(asset)){levels(books[asset],msg.get_child("bids",ptree{}),true,true);levels(books[asset],msg.get_child("asks",ptree{}),false,true);}else if(type=="price_change"){for(const auto&x:msg.get_child("price_changes",ptree{})){const auto&p=x.second;std::string a=p.get<std::string>("asset_id",asset);if(books.count(a))change(books[a],p);}}for(auto&x:markets)evaluate(x.first,x.second,books);}
+    for(;;){
+        beast::flat_buffer buffer;
+        try { ws.read(buffer); }
+        catch (const beast::system_error& error) {
+            std::cerr << "WS_READ_ERROR code=" << error.code().value() << " message=" << error.code().message() << "\n";
+            return 3;
+        }
+        std::stringstream input;input<<beast::make_printable(buffer.data());ptree msg;
+        try{std::istringstream json(input.str());boost::property_tree::read_json(json,msg);}catch(...){continue;}
+        std::string type=msg.get<std::string>("event_type","");std::string asset=msg.get<std::string>("asset_id","");
+        if(type=="book"&&books.count(asset)){levels(books[asset],msg.get_child("bids",ptree{}),true,true);levels(books[asset],msg.get_child("asks",ptree{}),false,true);}
+        else if(type=="price_change"){for(const auto&x:msg.get_child("price_changes",ptree{})){const auto&p=x.second;std::string a=p.get<std::string>("asset_id",asset);if(books.count(a))change(books[a],p);}}
+        for(auto&x:markets)evaluate(x.first,x.second,books);
+    }
 }
