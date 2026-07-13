@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -73,27 +74,73 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     now_ts = int(base_ts or time.time())
     series_slugs = scanner.updown_series_slugs(interval_list)
     events = []
-    missing_series = 0
+    candidates = {slug: (asset, interval) for asset, interval, slug in series_slugs}
+
+    def fetch_series(slugs):
+        try:
+            return client.series_by_slugs(slugs), 0
+        except (OSError, RuntimeError, TimeoutError):
+            return [], 1
+
+    series_batches = [list(candidates)[index:index + 7] for index in range(0, len(candidates), 7)]
+    matching_series = []
+    series_errors = 0
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for rows, errors in executor.map(fetch_series, series_batches):
+            matching_series.extend(rows)
+            series_errors += errors
+    matched_slugs = set()
     missing_events = 0
-    for asset, interval, series_slug in series_slugs:
-        found_series = False
-        for series in client.series_by_slug(series_slug):
-            found_series = True
-            series_id = str(series.get("id"))
-            horizon = INTERVAL_SECONDS[interval] * 2
-            series_events = client.events_by_series_window(series_id, now_ts, now_ts + horizon)
-            selected = current_series_events(series_events, now_ts, limit=2, horizon_seconds=horizon)
-            if not selected:
-                missing_events += 1
-            for event in selected:
-                event["_asset"] = asset
-                event["_interval"] = interval
-                event["_series_id"] = series_id
-                event["markets"] = tradable_markets(event.get("markets") or [])
-                if event["markets"]:
-                    events.append(event)
-        if not found_series:
-            missing_series += 1
+    series_by_id = {}
+    for series in matching_series:
+        series_slug = str(series.get("slug") or "")
+        if series_slug not in candidates:
+            continue
+        matched_slugs.add(series_slug)
+        asset, interval = candidates[series_slug]
+        series_id = str(series.get("id"))
+        series_by_id[series_id] = (asset, interval, series_slug)
+    event_candidates = {}
+    for series_id, (asset, interval, series_slug) in series_by_id.items():
+        seconds = INTERVAL_SECONDS[interval]
+        current_start = now_ts - now_ts % seconds
+        prefix = series_slug.replace("-up-or-down-", "-updown-")
+        for start in (current_start, current_start + seconds):
+            event_candidates[f"{prefix}-{start}"] = series_id
+    if event_candidates:
+        def fetch_events(slugs):
+            try:
+                return client.events_by_slugs(slugs), 0
+            except (OSError, RuntimeError, TimeoutError):
+                return [], 1
+
+        event_slugs = list(event_candidates)
+        event_batches = [event_slugs[index:index + 20] for index in range(0, len(event_slugs), 20)]
+        window_events = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for rows, errors in executor.map(fetch_events, event_batches):
+                window_events.extend(rows)
+                series_errors += errors
+    else:
+        window_events = []
+    grouped_events = {series_id: [] for series_id in series_by_id}
+    for event in window_events:
+        series_id = event_candidates.get(str(event.get("slug") or ""))
+        if series_id in grouped_events:
+            grouped_events[series_id].append(event)
+    for series_id, (asset, interval, series_slug) in series_by_id.items():
+        horizon = INTERVAL_SECONDS[interval] * 2
+        selected = current_series_events(grouped_events[series_id], now_ts, limit=2, horizon_seconds=horizon)
+        if not selected:
+            missing_events += 1
+        for event in selected:
+            event["_asset"] = asset
+            event["_interval"] = interval
+            event["_series_id"] = series_id
+            event["markets"] = tradable_markets(event.get("markets") or [])
+            if event["markets"]:
+                events.append(event)
+    missing_series = len(candidates) - len(matched_slugs) if not series_errors else 0
     specs = scanner.specs_from_events(events)
     unique = {}
     used_tokens = set()
@@ -103,6 +150,11 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
             continue
         unique[spec.market_id] = spec
         used_tokens.update(tokens)
+    print(
+        f"GAMMA_DISCOVERY series={len(series_by_id)} event_candidates={len(event_candidates)} "
+        f"events={len(events)} unique_markets={len(unique)}",
+        flush=True,
+    )
     clob = PolymarketClobClient()
     diagnostics = {}
     examples = []
@@ -115,7 +167,7 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     for example in examples[:5]:
         print(f"CLOB_REJECT market_id={example[0]} token_id={example[1]} reason={example[2]}")
     print(
-        f"GAMMA_SERIES series_checked={len(series_slugs)} series_not_found={missing_series} "
+        f"GAMMA_SERIES series_checked={len(series_slugs)} series_error={series_errors} series_not_found={missing_series} "
         f"event_not_found={missing_events} current_events={len(events)} parsed_markets={len(specs)}"
     )
     print(f"{'WROTE' if unique else 'KEPT'} {output_path} markets={len(unique)}")
@@ -153,10 +205,10 @@ def tradable_markets(markets):
 
 def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
     valid = []
-    rejected = 0
     diagnostics = diagnostics if diagnostics is not None else {}
     examples = examples if examples is not None else []
-    for spec in specs:
+
+    def validate(spec):
         try:
             info = clob.get_market_info(spec.market_id)
             token_map = {
@@ -167,10 +219,7 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
             up_token_id = token_map.get("up")
             down_token_id = token_map.get("down")
             if not up_token_id or not down_token_id:
-                diagnostics["clob_outcome_mismatch"] = diagnostics.get("clob_outcome_mismatch", 0) + 1
-                examples.append((spec.market_id, "", "CLOB market did not return Up and Down tokens"))
-                rejected += 1
-                continue
+                return None, "clob_outcome_mismatch", (spec.market_id, "", "CLOB market did not return Up and Down tokens")
             fee_data = info.get("fd") if isinstance(info.get("fd"), dict) else {}
             fee_value = fee_data.get("r", spec.fee_rate)
             try:
@@ -178,21 +227,15 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
             except (TypeError, ValueError):
                 fee_rate = 0
             if fee_rate <= 0:
-                diagnostics["fee_schedule_unavailable"] = diagnostics.get("fee_schedule_unavailable", 0) + 1
-                examples.append((spec.market_id, "", "CLOB fee schedule unavailable"))
-                rejected += 1
-                continue
+                return None, "fee_schedule_unavailable", (spec.market_id, "", "CLOB fee schedule unavailable")
             spec = replace(spec, up_token_id=up_token_id, down_token_id=down_token_id, fee_rate=fee_rate)
             up_book = clob.get_book(spec.up_token_id)
             down_book = clob.get_book(spec.down_token_id)
             if not up_book.asks or not down_book.asks:
-                diagnostics["empty_asks"] = diagnostics.get("empty_asks", 0) + 1
-                rejected += 1
+                return None, "empty_asks", None
             elif up_book.ask_liquidity(1.0) <= 0 or down_book.ask_liquidity(1.0) <= 0:
-                diagnostics["no_buy_depth"] = diagnostics.get("no_buy_depth", 0) + 1
-                rejected += 1
-            else:
-                valid.append(spec)
+                return None, "no_buy_depth", None
+            return spec, None, None
         except RuntimeError as exc:
             message = str(exc)
             lower = message.lower()
@@ -204,14 +247,20 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
                 key = "network_error"
             else:
                 key = "http_error"
-            diagnostics[key] = diagnostics.get(key, 0) + 1
-            examples.append((spec.market_id, spec.up_token_id, message[:240]))
-            rejected += 1
+            return None, key, (spec.market_id, spec.up_token_id, message[:240])
         except Exception:
-            diagnostics["unexpected_error"] = diagnostics.get("unexpected_error", 0) + 1
-            examples.append((spec.market_id, spec.up_token_id, "unexpected error"))
-            rejected += 1
-    return valid, rejected
+            return None, "unexpected_error", (spec.market_id, spec.up_token_id, "unexpected error")
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(specs)))) as executor:
+        results = executor.map(validate, specs)
+        for spec, reason, example in results:
+            if spec is not None:
+                valid.append(spec)
+            else:
+                diagnostics[reason] = diagnostics.get(reason, 0) + 1
+                if example:
+                    examples.append(example)
+    return valid, len(specs) - len(valid)
 
 
 def inspect_gamma(gamma_base_url: str, limit: int) -> int:

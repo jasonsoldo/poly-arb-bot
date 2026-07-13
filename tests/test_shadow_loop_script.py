@@ -31,6 +31,12 @@ def test_shadow_loop_starts_shadow_execution_state_machine():
     assert '"$execution_pid"' in SCRIPT
 
 
+def test_shadow_loop_scans_all_supported_timeframes():
+    assert "--intervals 5m,15m,1h,4h" in SCRIPT
+    deploy = Path("deploy/VPS_DEPLOY.md").read_text(encoding="utf-8")
+    assert deploy.count("--intervals 5m,15m,1h,4h") >= 2
+
+
 def test_systemd_requires_ntp_and_logrotate_retains_thirty_days():
     service = Path("deploy/poly-arb-bot.service").read_text(encoding="utf-8")
     ntp = Path("scripts/check_ntp.sh").read_text(encoding="utf-8")

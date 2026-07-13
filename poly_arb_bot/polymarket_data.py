@@ -7,7 +7,7 @@ from .http_utils import HttpClient
 
 class PolymarketDataClient:
     def __init__(self, http: HttpClient = None, base_url: str = "https://gamma-api.polymarket.com"):
-        self.http = http or HttpClient(timeout=2.0)
+        self.http = http or HttpClient(timeout=10.0)
         self.base_url = base_url
 
     def events(self, limit: int = 100, offset: int = 0, active: bool = True) -> List[Dict[str, Any]]:
@@ -15,6 +15,13 @@ class PolymarketDataClient:
 
     def events_by_slug(self, slug: str) -> List[Dict[str, Any]]:
         response = self.http.get_json(self.base_url, "/events", {"slug": slug})
+        return _as_list(response.data)
+
+    def events_by_slugs(self, slugs: List[str]) -> List[Dict[str, Any]]:
+        response = self.http.get_json(
+            self.base_url, "/events",
+            {"slug": slugs, "active": "true", "closed": "false", "limit": 100},
+        )
         return _as_list(response.data)
 
     def event_by_id(self, event_id: str) -> Dict[str, Any]:
@@ -26,6 +33,14 @@ class PolymarketDataClient:
             self.base_url,
             "/series",
             {"slug": slug, "closed": "false", "exclude_events": "false"},
+        )
+        return _as_list(response.data)
+
+    def series_by_slugs(self, slugs: List[str]) -> List[Dict[str, Any]]:
+        response = self.http.get_json(
+            self.base_url,
+            "/series",
+            {"slug": slugs, "closed": "false", "exclude_events": "true"},
         )
         return _as_list(response.data)
 
@@ -41,6 +56,22 @@ class PolymarketDataClient:
             "limit": 100,
         }
         return _as_list(self.http.get_json(self.base_url, "/events", params).data)
+
+    def events_in_window(self, start_ts: int, end_ts: int, limit: int = 1000) -> List[Dict[str, Any]]:
+        rows = []
+        while len(rows) < limit:
+            params = {
+                "active": "true", "closed": "false", "limit": min(100, limit - len(rows)),
+                "offset": len(rows),
+                "end_date_min": datetime.fromtimestamp(start_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+                "end_date_max": datetime.fromtimestamp(end_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+                "order": "endDate", "ascending": "true",
+            }
+            page = _as_list(self.http.get_json(self.base_url, "/events", params).data)
+            rows.extend(page)
+            if len(page) < params["limit"]:
+                break
+        return rows
 
     def events_keyset(self, limit: int = 1000, active: bool = True) -> List[Dict[str, Any]]:
         return self._keyset("/events/keyset", "events", limit, active)

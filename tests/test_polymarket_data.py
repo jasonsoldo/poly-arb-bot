@@ -67,6 +67,8 @@ class SeriesHttp:
         self.calls.append((path, params))
         if path == "/series":
             return HttpResponse([{"id": "10684", "events": []}], 1, "url")
+        if path == "/events":
+            return HttpResponse([], 1, "url")
         if path == "/events/693216":
             return HttpResponse({"id": "693216", "markets": []}, 1, "url")
         raise AssertionError(path)
@@ -83,6 +85,24 @@ def test_series_and_event_use_official_gamma_endpoints():
     ]
 
 
+def test_series_by_slugs_uses_official_array_parameter():
+    http = SeriesHttp()
+    PolymarketDataClient(http=http).series_by_slugs(["btc-up-or-down-5m", "eth-up-or-down-5m"])
+    assert http.calls[0] == (
+        "/series",
+        {"slug": ["btc-up-or-down-5m", "eth-up-or-down-5m"], "closed": "false", "exclude_events": "true"},
+    )
+
+
+def test_events_by_slugs_uses_official_array_parameter():
+    http = SeriesHttp()
+    PolymarketDataClient(http=http).events_by_slugs(["btc-updown-5m-1", "eth-updown-5m-1"])
+    assert http.calls[0] == (
+        "/events",
+        {"slug": ["btc-updown-5m-1", "eth-updown-5m-1"], "active": "true", "closed": "false", "limit": 100},
+    )
+
+
 def test_events_by_series_window_uses_official_time_filters():
     http = WindowHttp()
     PolymarketDataClient(http=http).events_by_series_window("10684", 1783900800, 1783904400)
@@ -91,3 +111,13 @@ def test_events_by_series_window_uses_official_time_filters():
     assert params["end_date_min"] == "2026-07-13T00:00:00Z"
     assert params["end_date_max"] == "2026-07-13T01:00:00Z"
     assert params["order"] == "endDate"
+
+
+def test_events_window_uses_official_filters_and_pagination():
+    http = WindowHttp()
+    PolymarketDataClient(http=http).events_in_window(1783900800, 1783929600, limit=100)
+    params = http.params[0]
+    assert params["active"] == "true"
+    assert params["end_date_min"] == "2026-07-13T00:00:00Z"
+    assert params["end_date_max"] == "2026-07-13T08:00:00Z"
+    assert params["limit"] == 100

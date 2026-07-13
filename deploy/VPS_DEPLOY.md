@@ -46,7 +46,7 @@ The bot can now auto-generate `/opt/poly-arb-bot/data/live_markets.json` from Po
 ```bash
 python -m poly_arb_bot.cli scan-updown \
   --output data/live_markets.json \
-  --intervals 5m,15m \
+  --intervals 5m,15m,1h,4h \
   --slug-window current,next
 ```
 
@@ -55,7 +55,7 @@ If it returns zero markets, widen the search:
 ```bash
 python -m poly_arb_bot.cli scan-updown \
   --output data/live_markets.json \
-  --intervals 5m,15m \
+  --intervals 5m,15m,1h,4h \
   --slug-window previous,current,next
 ```
 

@@ -23,7 +23,7 @@ min_expected_value="${SHADOW_MIN_EXPECTED_VALUE:-0.01}"
 scan_once() {
   "$python_bin" -m poly_arb_bot.cli scan-updown \
     --output data/live_markets.json \
-    --intervals 5m,15m \
+    --intervals 5m,15m,1h,4h \
     --slug-window current,next
 }
 
