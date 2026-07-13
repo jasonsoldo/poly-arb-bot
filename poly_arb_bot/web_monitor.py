@@ -1,7 +1,8 @@
 import json
 import mimetypes
+import threading
 import time
-from collections import Counter, deque
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -10,6 +11,9 @@ from .strategy_config import StrategyConfig
 
 
 _REPORT_CACHE = {}
+_REPORT_LOCK = threading.Lock()
+_STRATEGY_COUNT_CACHE = {}
+_STRATEGY_COUNT_LOCK = threading.Lock()
 ASSETS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE")
 INTERVALS = ("5m", "15m", "1h", "4h")
 
@@ -23,11 +27,15 @@ def _cached_report(path, execution_path=None):
            execution_stat.st_size if execution_stat else 0,
            execution_stat.st_mtime_ns if execution_stat else 0)
     cached = _REPORT_CACHE.get(str(path))
-    if cached and cached[0] == key:
+    if cached and (cached[0] == key or time.monotonic() - cached[2] < 5):
         return cached[1]
-    report = build_report(path, execution_path)
-    _REPORT_CACHE[str(path)] = (key, report)
-    return report
+    with _REPORT_LOCK:
+        cached = _REPORT_CACHE.get(str(path))
+        if cached and (cached[0] == key or time.monotonic() - cached[2] < 5):
+            return cached[1]
+        report = build_report(path, execution_path)
+        _REPORT_CACHE[str(path)] = (key, report, time.monotonic())
+        return report
 
 
 def build_report_empty():
@@ -54,8 +62,19 @@ def _jsonl(path, limit=100):
     if not path.exists():
         return []
     try:
-        with path.open(encoding="utf-8") as handle:
-            lines = deque(handle, maxlen=limit)
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            position = handle.tell()
+            chunks = []
+            newlines = 0
+            while position > 0 and newlines <= limit:
+                size = min(65536, position)
+                position -= size
+                handle.seek(position)
+                chunk = handle.read(size)
+                chunks.append(chunk)
+                newlines += chunk.count(b"\n")
+        lines = b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()[-limit:]
     except OSError:
         return []
     rows = []
@@ -69,39 +88,53 @@ def _jsonl(path, limit=100):
 
 def _strategy_counts(paths):
     names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
-    counts = {name: {"evaluations": 0, "accepts": 0, "rejections": 0} for name in names}
-    seen = set()
-    for path in paths:
-        for row in _rows_for_counts(path):
-            if row.get("event_type") != "shadow_eval" or row.get("strategy") not in counts:
-                continue
-            event_id = row.get("event_id")
-            if event_id and event_id in seen:
-                continue
-            if event_id:
-                seen.add(event_id)
-            bucket = counts[row["strategy"]]
-            bucket["evaluations"] += 1
-            accepted = row.get("decision") == "ACCEPT"
-            bucket["accepts"] += int(accepted)
-            bucket["rejections"] += int(not accepted)
-    return counts
-
-
-def _rows_for_counts(path):
-    if not path.exists():
-        return
-    try:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
+    total = {name: {"evaluations": 0, "accepts": 0, "rejections": 0} for name in names}
+    with _STRATEGY_COUNT_LOCK:
+        for path in paths:
+            key = str(path.resolve())
+            state = _STRATEGY_COUNT_CACHE.setdefault(key, {
+                "offset": 0, "size": 0, "seen": set(),
+                "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0} for name in names},
+            })
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            if size < state["offset"]:
+                state.update({
+                    "offset": 0, "size": 0, "seen": set(),
+                    "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0} for name in names},
+                })
+            if size > state["offset"]:
                 try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if float(row.get("ts", 0)) <= time.time() + 300:
-                    yield row
-    except OSError:
-        return
+                    with path.open(encoding="utf-8") as handle:
+                        handle.seek(state["offset"])
+                        while line := handle.readline():
+                            try:
+                                row = json.loads(line)
+                            except ValueError:
+                                continue
+                            strategy = row.get("strategy")
+                            if row.get("event_type") != "shadow_eval" or strategy not in state["counts"]:
+                                continue
+                            event_id = row.get("event_id")
+                            if event_id and event_id in state["seen"]:
+                                continue
+                            if event_id:
+                                state["seen"].add(event_id)
+                            bucket = state["counts"][strategy]
+                            bucket["evaluations"] += 1
+                            accepted = row.get("decision") == "ACCEPT"
+                            bucket["accepts"] += int(accepted)
+                            bucket["rejections"] += int(not accepted)
+                        state["offset"] = handle.tell()
+                except OSError:
+                    pass
+            state["size"] = size
+            for name in names:
+                for field in ("evaluations", "accepts", "rejections"):
+                    total[name][field] += state["counts"][name][field]
+    return total
 
 
 def _signal_block_reason(signal, config):
@@ -349,7 +382,10 @@ def make_handler(web_dir, data_dir, log_file, state_file):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def do_GET(self):  # noqa: N802
             route = self.path.split("?", 1)[0]

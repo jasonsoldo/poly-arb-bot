@@ -1,7 +1,7 @@
 import json
 import time
 
-from poly_arb_bot.web_monitor import build_status
+from poly_arb_bot.web_monitor import _jsonl, _strategy_counts, build_status
 
 
 def test_web_status_ignores_snapshot_signals_without_current_market(tmp_path):
@@ -337,3 +337,19 @@ def test_web_status_ages_each_normalized_reference_source(tmp_path):
     assert btc["kraken"]["status"] == "NOT_RECEIVED"
     assert status["latency_rankings"]["coinbase"]["samples"] == 1
     assert status["latency_rankings"]["kraken"]["samples"] == 0
+
+
+def test_recent_jsonl_reader_does_not_require_full_history(tmp_path):
+    path = tmp_path / "large.jsonl"
+    path.write_text("".join(json.dumps({"n": i}) + "\n" for i in range(5000)), encoding="utf-8")
+    rows = _jsonl(path, limit=3)
+    assert [row["n"] for row in rows] == [4999, 4998, 4997]
+
+
+def test_strategy_count_cache_consumes_only_appended_events(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    path.write_text(json.dumps({"event_id": "1", "event_type": "shadow_eval", "strategy": "paired_lock", "decision": "REJECT"}) + "\n", encoding="utf-8")
+    assert _strategy_counts((path,))["paired_lock"]["evaluations"] == 1
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"event_id": "2", "event_type": "shadow_eval", "strategy": "paired_lock", "decision": "ACCEPT"}) + "\n")
+    assert _strategy_counts((path,))["paired_lock"] == {"evaluations": 2, "accepts": 1, "rejections": 1}
