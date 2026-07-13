@@ -15,3 +15,25 @@ def test_dashboard_uses_paired_lock_execution_and_health_fields():
     for asset in ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"):
         assert asset in source
     assert 'id="btc5"' not in source
+
+
+def test_dashboard_contains_real_analytics_modules_without_static_equity():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    for element_id in (
+        "simPnl", "winRate", "sharpe", "sharpeSamples", "equityChart",
+        "tradeLedger", "strategyScore", "scoreBreakdown", "pnlMeter",
+        "rejectionReasons", "latencyRankings", "pipelineSteps",
+    ):
+        assert f'id="{element_id}"' in source
+    assert "equity:after" not in source
+    assert '<div class="step active">' not in source
+    assert "NO COMPLETED SIMULATIONS" in source
+    assert "REAL ORDERS" in source
+
+
+def test_dashboard_renders_binance_and_chainlink_independently():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    assert "binance_stale" in source
+    assert "chainlink_stale" in source
+    assert "BINANCE" in source
+    assert "CHAINLINK" in source

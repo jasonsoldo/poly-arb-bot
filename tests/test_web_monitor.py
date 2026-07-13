@@ -183,3 +183,41 @@ def test_web_status_marks_reference_assets_independently_stale(tmp_path):
     assert status["reference_prices"]["assets"]["BTC"]["binance"] == 65000
     assert status["reference_prices"]["assets"]["ETH"]["binance"] is None
     assert status["reference_prices"]["assets"]["HYPE"]["supported"] is False
+
+
+def test_web_status_does_not_erase_fresh_binance_when_chainlink_is_stale(tmp_path):
+    now_ms = time.time() * 1000
+    (tmp_path / "venue-status.json").write_text(json.dumps({
+        "updated_at_ms": now_ms,
+        "assets": {"BTC": {"supported": True, "binance": 65000, "chainlink": 64999,
+                            "binance_source_age_ms": 5, "chainlink_source_age_ms": 20000}},
+    }), encoding="utf-8")
+
+    status = build_status(tmp_path, tmp_path / "missing.jsonl", tmp_path / "state.json")
+    btc = status["reference_prices"]["assets"]["BTC"]
+
+    assert btc["binance"] == 65000
+    assert btc["binance_stale"] is False
+    assert btc["chainlink"] is None
+    assert btc["chainlink_stale"] is True
+    assert btc["divergence_bps"] is None
+
+
+def test_web_status_includes_completed_shadow_analytics(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (logs / "shadow-audit.jsonl").write_text(json.dumps({
+        "ts": 100.0, "event_type": "shadow_opportunity", "market_id": "m1",
+        "expected_execution_value": 0.25,
+    }), encoding="utf-8")
+    (logs / "shadow-execution.jsonl").write_text(json.dumps({
+        "ts": 101.0, "event_type": "shadow_execution", "event_id": "m1:100.0",
+        "market_id": "m1", "state": "COMPLETE",
+    }), encoding="utf-8")
+
+    status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
+
+    assert status["performance"]["completed"] == 1
+    assert status["performance"]["simulated_pnl"] == 0.25
+    assert status["counts"]["simulated_complete"] == 1

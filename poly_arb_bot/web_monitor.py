@@ -14,15 +14,18 @@ ASSETS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE")
 INTERVALS = ("5m", "15m", "1h", "4h")
 
 
-def _cached_report(path):
+def _cached_report(path, execution_path=None):
     if not path.exists():
         return build_report_empty()
     stat = path.stat()
-    key = (stat.st_size, stat.st_mtime_ns)
+    execution_stat = execution_path.stat() if execution_path and execution_path.exists() else None
+    key = (stat.st_size, stat.st_mtime_ns,
+           execution_stat.st_size if execution_stat else 0,
+           execution_stat.st_mtime_ns if execution_stat else 0)
     cached = _REPORT_CACHE.get(str(path))
     if cached and cached[0] == key:
         return cached[1]
-    report = build_report(path)
+    report = build_report(path, execution_path)
     _REPORT_CACHE[str(path)] = (key, report)
     return report
 
@@ -33,6 +36,9 @@ def build_report_empty():
         "invalid_json": 0, "rejection_reasons": {},
         "opportunity_duration_ms": {"p50": None, "p95": None, "max": None},
         "source_age_ms": {"p50": None, "p95": None, "max": None},
+        "performance": {"completed": 0, "wins": 0, "losses": 0, "simulated_pnl": 0.0,
+                        "win_rate": None, "sharpe": None, "sharpe_samples": 0},
+        "equity_curve": [], "trade_ledger": [],
     }
 
 
@@ -79,6 +85,24 @@ def _signal_block_reason(signal, config):
     return None
 
 
+def _strategy_score(event):
+    blockers = {"books_not_synced", "up_depth", "down_depth", "fee_schedule_unavailable",
+                "net_cost_above_threshold", "execution_value_below_threshold", "closing_window"}
+    if not event or event.get("reason") in blockers or event.get("event_type") != "shadow_opportunity":
+        return {"total": 0, "blocked": True, "components": {}}
+    size = max(float(event.get("size", 0)), 1e-9)
+    eev = max(0.0, min(1.0, float(event.get("expected_execution_value", 0)) / 0.01))
+    depth = max(0.0, min(1.0, min(float(event.get("up_fill", 0)), float(event.get("down_fill", 0))) / size))
+    freshness = max(0.0, min(1.0, 1 - float(event.get("source_age_ms", 1000)) / 1000))
+    skew = max(0.0, min(1.0, 1 - float(event.get("book_skew_ms", 500)) / 500))
+    leg_risk = max(0.0, min(1.0, float(event.get("leg_1_fill_probability", 0)) *
+                            float(event.get("leg_2_fill_probability", 0)) *
+                            (1 - min(1.0, float(event.get("orphan_leg_loss", 1))))))
+    components = {"eev": eev, "depth": depth, "freshness": freshness, "book_skew": skew, "leg_risk": leg_risk}
+    total = 100 * (0.35 * eev + 0.20 * depth + 0.15 * freshness + 0.15 * skew + 0.15 * leg_risk)
+    return {"total": round(total, 2), "blocked": False, "components": components}
+
+
 def build_status(data_dir, log_file, state_file):
     snapshot = _json(data_dir / "live_snapshot.json", {"signals": [], "positions": []})
     markets = _json(data_dir / "live_markets.json", {"markets": []}).get("markets", [])
@@ -87,7 +111,8 @@ def build_status(data_dir, log_file, state_file):
     shadow_log = data_dir.parent / "logs" / "shadow-audit.jsonl"
     selected_log = shadow_log if shadow_log.exists() else log_file
     events = _jsonl(selected_log, limit=1000)
-    report = _cached_report(selected_log)
+    execution_log = data_dir.parent / "logs" / "shadow-execution.jsonl"
+    report = _cached_report(selected_log, execution_log)
     shadow_events = [item for item in events if item.get("event_type") in {"shadow_eval", "shadow_opportunity"}]
     latest_shadow = {}
     for item in shadow_events:
@@ -103,15 +128,16 @@ def build_status(data_dir, log_file, state_file):
     reference_age_ms = time.time() * 1000 - reference_prices.get("updated_at_ms", 0)
     reference_prices["stale"] = reference_age_ms > 10_000
     for asset in reference_prices.get("assets", {}).values():
-        asset_stale = reference_age_ms > 10_000 or any(
-            asset.get(key, 10_001) + max(reference_age_ms, 0) > 10_000
-            for key in ("binance_source_age_ms", "chainlink_source_age_ms")
-            if asset.get(key, -1) >= 0
-        )
-        asset["stale"] = asset_stale
-        if asset_stale:
-            for key in ("binance", "chainlink", "divergence_bps"):
-                asset[key] = None
+        file_age = max(reference_age_ms, 0)
+        for source in ("binance", "chainlink"):
+            source_age = asset.get(f"{source}_source_age_ms", -1)
+            stale = reference_age_ms > 10_000 or source_age < 0 or source_age + file_age > 10_000
+            asset[f"{source}_stale"] = stale
+            if stale:
+                asset[source] = None
+        asset["stale"] = asset["binance_stale"] and asset["chainlink_stale"]
+        if asset.get("binance") is None or asset.get("chainlink") is None:
+            asset["divergence_bps"] = None
     if reference_prices["stale"]:
         for key in ("binance_btcusdt", "chainlink_btcusd", "divergence_usd", "divergence_bps"):
             reference_prices[key] = None
@@ -142,6 +168,16 @@ def build_status(data_dir, log_file, state_file):
             entry["slot"] = "current" if cell["count"] == 0 else "next"
             cell["markets"].append(entry)
             cell["count"] += 1
+    latest_event = next(iter(latest_shadow.values()), None)
+    strategy_score = _strategy_score(latest_event)
+    engine_latency = reference_prices.get("engine_latency_us")
+    latency_rankings = {
+        "polymarket": {"latest": None, "p50": None, "p95": None, "p99": None, "samples": 0, "unit": "ms"},
+        "binance": {"latest": None, "p50": None, "p95": None, "p99": None, "samples": 0, "unit": "ms"},
+        "chainlink": {"latest": None, "p50": None, "p95": None, "p99": None, "samples": 0, "unit": "ms"},
+        "engine": {"latest": engine_latency, "p50": None, "p95": None, "p99": None,
+                   "samples": int(engine_latency is not None), "unit": "us"},
+    }
     return {
         "ts": int(time.time()),
         "mode": "DRY RUN",
@@ -158,6 +194,7 @@ def build_status(data_dir, log_file, state_file):
             "shadow_evaluations": report["evaluations"],
             "fok_passed": report["fok_passed"],
             "shadow_opportunities": report["accepts"],
+            "simulated_complete": report["performance"]["completed"],
         },
         "shadow_markets": list(latest_shadow.values()),
         "reference_prices": reference_prices,
@@ -167,6 +204,21 @@ def build_status(data_dir, log_file, state_file):
         "system_status": system_status,
         "rejection_reasons": report["rejection_reasons"] or dict(rejection_reasons),
         "shadow_report": report,
+        "performance": report["performance"],
+        "equity_curve": report["equity_curve"],
+        "trade_ledger": report["trade_ledger"],
+        "pnl_meter": {"simulated_pnl": report["performance"]["simulated_pnl"], "realized_pnl": 0.0},
+        "strategy_score": strategy_score,
+        "pipeline_steps": {
+            "ingest": "PASS" if markets else "BLOCKED",
+            "clob_snap": "PASS" if shadow_health.get("ready_markets", 0) else "BLOCKED",
+            "replay": "PASS" if report["evaluations"] else "N/A",
+            "backtest": "N/A",
+            "validate": "PASS" if latest_event else "N/A",
+            "approve": "PASS" if latest_event and latest_event.get("event_type") == "shadow_opportunity" else "BLOCKED",
+            "deploy": "BLOCKED",
+        },
+        "latency_rankings": latency_rankings,
         "blocked_reasons": dict(blocked),
         "risk_limits": {"max_seconds_to_close": config.max_seconds_to_close, "min_liquidity": config.min_liquidity},
         "latency_ms": {"polymarket": None, "binance": None, "chainlink": None, "engine": None},
