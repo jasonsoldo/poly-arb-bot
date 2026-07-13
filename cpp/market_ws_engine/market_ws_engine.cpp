@@ -17,6 +17,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace asio = boost::asio;
@@ -27,7 +28,10 @@ using ssl_socket = asio::ssl::stream<tcp::socket>;
 using boost::property_tree::ptree;
 
 struct Book { std::map<double, double> bids, asks; };
-struct Market { std::string up, down; double size = 10, fee = .07, active_since = 0; };
+struct Market {
+    std::string up, down, last_reason;
+    double size = 10, fee = .07, active_since = 0, last_audit = 0;
+};
 
 double now_seconds() { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); }
 double number(const ptree& row, const std::string& key) { return row.get<double>(key, 0); }
@@ -135,7 +139,8 @@ private:
             }
             ++price_changes_;
         }
-        if (type == "book" || type == "price_change") std::cerr << "WS_DATA type=" << type << " books=" << book_events_ << " changes=" << price_changes_ << "\n";
+        if (type == "book" || (type == "price_change" && price_changes_ % 100 == 0))
+            std::cerr << "WS_DATA type=" << type << " books=" << book_events_ << " changes=" << price_changes_ << "\n";
         evaluate();
     }
 
@@ -146,9 +151,20 @@ private:
             const double up_fee = up.first * fee_ * up.second * (1 - up.second), down_fee = down.first * fee_ * down.second * (1 - down.second);
             const double total = size_ * (up.second + down.second) + up_fee + down_fee, profit = fok ? size_ - total : 0;
             const bool good = fok && profit > 0; const double timestamp = now_seconds();
+            const std::string reason = up.first < size_ ? "up_depth" : down.first < size_ ? "down_depth" : profit <= 0 ? "no_edge" : "opportunity";
             if (good && item.second.active_since == 0) item.second.active_since = timestamp;
             if (!good) item.second.active_since = 0;
-            if (good) std::cout << "shadow_opportunity\t" << item.first << '\t' << std::setprecision(12) << up.second << '\t' << down.second << '\t' << up_fee << '\t' << down_fee << '\t' << total << '\t' << profit << "\t1\t1\t" << timestamp - item.second.active_since << "\n" << std::flush;
+            if (reason != item.second.last_reason || timestamp - item.second.last_audit >= 5) {
+                std::cout << "SHADOW_EVAL\tmarket=" << item.first << "\treason=" << reason
+                          << "\tfok=" << (fok ? 1 : 0) << "\tup_fill=" << up.first << "\tdown_fill=" << down.first
+                          << "\tup_vwap=" << up.second << "\tdown_vwap=" << down.second
+                          << "\tfees=" << up_fee + down_fee << "\ttotal=" << total << "\tprofit=" << profit << "\n" << std::flush;
+                item.second.last_reason = reason;
+                item.second.last_audit = timestamp;
+            }
+            if (good) std::cout << "SHADOW_OPPORTUNITY\tmarket=" << item.first << "\tup_vwap=" << std::setprecision(12) << up.second
+                                << "\tdown_vwap=" << down.second << "\tfees=" << up_fee + down_fee << "\ttotal=" << total
+                                << "\tprofit=" << profit << "\tfok=1\tduration_ms=" << (timestamp - item.second.active_since) * 1000 << "\n" << std::flush;
         }
     }
 
@@ -218,9 +234,13 @@ int main(int argc, char** argv) {
         }
         if (markets.empty()) { std::cerr << "NO_TOKENS live_markets.json contains no valid Up/Down tokens\n"; return 4; }
         const double size = argc > 2 ? std::stod(argv[2]) : 10, fee = argc > 3 ? std::stod(argv[3]) : .07;
-        asio::io_context io; asio::ssl::context ssl(asio::ssl::context::tls_client);
-        ssl.set_default_verify_paths(); ssl.set_verify_mode(asio::ssl::verify_peer);
-        auto session = std::make_shared<MarketWsSession>(io, ssl, std::move(markets), size, fee);
-        session->run(); io.run();
+        for (;;) {
+            asio::io_context io; asio::ssl::context ssl(asio::ssl::context::tls_client);
+            ssl.set_default_verify_paths(); ssl.set_verify_mode(asio::ssl::verify_peer);
+            auto session = std::make_shared<MarketWsSession>(io, ssl, markets, size, fee);
+            session->run(); io.run();
+            std::cerr << "WS_RECONNECT delay_s=2\n";
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
     } catch (const std::exception& error) { std::cerr << "FATAL " << error.what() << "\n"; return 1; }
 }

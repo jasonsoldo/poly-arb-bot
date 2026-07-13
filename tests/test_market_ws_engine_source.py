@@ -16,3 +16,12 @@ def test_ws_engine_keeps_initial_and_dynamic_subscriptions_distinct():
     assert 'operation.empty()' in SOURCE
     assert '\\"type\\":\\"market\\"' in SOURCE
     assert '\\"operation\\":\\"subscribe\\"' in SOURCE
+
+
+def test_ws_engine_reconnects_and_audits_rejected_shadow_evaluations():
+    assert '"WS_RECONNECT delay_s=2' in SOURCE
+    assert '"SHADOW_EVAL\\tmarket="' in SOURCE
+    assert '"SHADOW_OPPORTUNITY\\tmarket="' in SOURCE
+    assert '"up_depth"' in SOURCE
+    assert '"down_depth"' in SOURCE
+    assert '"no_edge"' in SOURCE
