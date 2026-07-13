@@ -55,3 +55,11 @@ def test_reference_engine_emits_normalized_source_and_quorum_state():
         "cross_source_divergence_bps", "reference_quorum_met", "reference_state",
     ):
         assert field in SOURCE
+
+
+def test_rtds_subscription_contains_only_officially_supported_crypto_symbols():
+    subscription = SOURCE.split('const std::string rtds_sub =', 1)[1].split(';', 1)[0]
+    for symbol in ("btcusdt", "ethusdt", "solusdt", "xrpusdt"):
+        assert symbol in subscription
+    for unsupported in ("bnbusdt", "dogeusdt", "hypeusdt", "doge/usd"):
+        assert unsupported not in subscription

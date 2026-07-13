@@ -62,9 +62,9 @@ const AssetConfig ASSETS[] = {
     {"ETH", "ethusdt", "eth/usd", "ETH-USD", "ETH/USD"},
     {"SOL", "solusdt", "sol/usd", "SOL-USD", "SOL/USD"},
     {"XRP", "xrpusdt", "xrp/usd", "XRP-USD", "XRP/USD"},
-    {"BNB", "bnbusdt", "", "", ""},
-    {"DOGE", "dogeusdt", "doge/usd", "DOGE-USD", "DOGE/USD"},
-    {"HYPE", "hypeusdt", "", "", ""},
+    {"BNB", "", "", "", ""},
+    {"DOGE", "", "", "DOGE-USD", "DOGE/USD"},
+    {"HYPE", "", "", "", ""},
 };
 
 struct SharedState {
@@ -289,7 +289,7 @@ int main(int argc, char** argv) {
     initialize(shared);
     { std::lock_guard<std::mutex> lock(shared.mutex); write_status_locked(shared); }
 
-    const std::string rtds_sub = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices","type":"update","filters":"btcusdt,ethusdt,solusdt,xrpusdt,bnbusdt,dogeusdt,hypeusdt"},{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
+    const std::string rtds_sub = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices","type":"update","filters":"btcusdt,ethusdt,solusdt,xrpusdt"},{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
     const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","DOGE-USD"],"channels":["ticker"]})";
     const std::string kraken_sub = R"({"method":"subscribe","params":{"channel":"ticker","symbol":["BTC/USD","ETH/USD","SOL/USD","XRP/USD","DOGE/USD"]}})";
 
