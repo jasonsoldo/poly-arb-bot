@@ -18,7 +18,7 @@ class LiveMarketSpec:
     close_ts: int
     up_token_id: str
     down_token_id: str
-    fee_rate: float = 0.07
+    fee_rate: Optional[float] = None
     max_allowed_price: float = 0.99
 
 

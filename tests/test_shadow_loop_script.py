@@ -13,3 +13,13 @@ def test_shadow_loop_creates_audit_log_before_network_startup():
 def test_shadow_loop_runs_cpp_engine_with_structured_audit_path():
     assert "./build/market_ws_engine" in SCRIPT
     assert "logs/shadow-audit.jsonl" in SCRIPT
+
+
+def test_systemd_requires_ntp_and_logrotate_retains_thirty_days():
+    service = Path("deploy/poly-arb-bot.service").read_text(encoding="utf-8")
+    ntp = Path("scripts/check_ntp.sh").read_text(encoding="utf-8")
+    rotation = Path("deploy/poly-arb-bot.logrotate").read_text(encoding="utf-8")
+    assert "ExecStartPre=/bin/bash /opt/poly-arb-bot/scripts/check_ntp.sh" in service
+    assert "NTPSynchronized" in ntp
+    assert "rotate 30" in rotation
+    assert "copytruncate" in rotation

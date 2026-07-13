@@ -87,17 +87,29 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     examples = []
     valid, rejected = filter_specs_with_orderbooks(list(unique.values()), clob, diagnostics, examples)
     unique = {spec.market_id: spec for spec in valid}
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(scanner.to_payload(unique.values()), indent=2), encoding="utf-8")
+    if unique:
+        write_market_payload_atomic(output_path, scanner.to_payload(unique.values()), now_ts)
     detail = " ".join(f"{key}={value}" for key, value in sorted(diagnostics.items()))
     print(f"CLOB_VALID markets={len(unique)} rejected={rejected} {detail}".rstrip())
     for example in examples[:5]:
         print(f"CLOB_REJECT market_id={example[0]} token_id={example[1]} reason={example[2]}")
     print(f"GAMMA_SERIES series_checked={len(series_slugs)} current_events={len(events)} parsed_markets={len(specs)}")
-    print(f"WROTE {output_path} markets={len(unique)}")
+    print(f"{'WROTE' if unique else 'KEPT'} {output_path} markets={len(unique)}")
     if not unique and not rejected:
         print("NO_CURRENT_UPDOWN_MARKETS no current event in official 5m/15m recurring series")
-    return 0
+    return 0 if unique else 3
+
+
+def write_market_payload_atomic(output_path: Path, payload, generated_at: int) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    version = int(generated_at * 1000)
+    document = {"version": version, "generated_at": generated_at, "markets": payload.get("markets", [])}
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output_path)
 
 
 def current_series_events(events, now_ts, limit=None):
@@ -135,7 +147,18 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
                 examples.append((spec.market_id, "", "CLOB market did not return Up and Down tokens"))
                 rejected += 1
                 continue
-            spec = replace(spec, up_token_id=up_token_id, down_token_id=down_token_id)
+            fee_data = info.get("fd") if isinstance(info.get("fd"), dict) else {}
+            fee_value = fee_data.get("r", spec.fee_rate)
+            try:
+                fee_rate = float(fee_value)
+            except (TypeError, ValueError):
+                fee_rate = 0
+            if fee_rate <= 0:
+                diagnostics["fee_schedule_unavailable"] = diagnostics.get("fee_schedule_unavailable", 0) + 1
+                examples.append((spec.market_id, "", "CLOB fee schedule unavailable"))
+                rejected += 1
+                continue
+            spec = replace(spec, up_token_id=up_token_id, down_token_id=down_token_id, fee_rate=fee_rate)
             up_book = clob.get_book(spec.up_token_id)
             down_book = clob.get_book(spec.down_token_id)
             if not up_book.asks or not down_book.asks:

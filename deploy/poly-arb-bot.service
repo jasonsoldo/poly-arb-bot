@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/poly-arb-bot
 EnvironmentFile=/opt/poly-arb-bot/.env
+ExecStartPre=/bin/bash /opt/poly-arb-bot/scripts/check_ntp.sh
 ExecStart=/bin/bash /opt/poly-arb-bot/scripts/run_shadow_loop.sh
 Restart=always
 RestartSec=5

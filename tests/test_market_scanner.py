@@ -29,7 +29,7 @@ def test_scanner_builds_live_market_spec_from_gamma_market():
     assert spec.up_token_id == "111"
     assert spec.down_token_id == "222"
     assert spec.symbol == "BTCUSDT"
-    assert spec.fee_rate == 0.07
+    assert spec.fee_rate is None
 
 
 def test_scanner_reads_market_fee_schedule():

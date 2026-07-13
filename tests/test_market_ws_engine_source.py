@@ -56,3 +56,12 @@ def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
     assert 'subscription(added, "subscribe")' in SOURCE
     assert 'subscription(removed, "unsubscribe")' in SOURCE
     assert '"MARKET_RELOAD markets="' in SOURCE
+    assert "subscription_generation" in SOURCE
+    assert "ws_session_id" in SOURCE
+    assert "timestamp_rollback" in SOURCE
+    assert "invalid_level_update" in SOURCE
+    assert "crossed_book" in SOURCE
+    assert "BOOK_RESYNC token=" in SOURCE
+    assert "clock_skew_ms" in SOURCE
+    assert "source_age_ms" in SOURCE
+    assert '\\"fee_rate\\":' in SOURCE

@@ -11,7 +11,7 @@ class FakeClob:
         return self.books[token_id]
 
     def get_market_info(self, market_id):
-        return {"t": [{"t": "up", "o": "Up"}, {"t": "down", "o": "Down"}]}
+        return {"t": [{"t": "up", "o": "Up"}, {"t": "down", "o": "Down"}], "fd": {"r": 0.07}}
 
 
 def book(token_id, asks):
@@ -34,6 +34,18 @@ def test_filter_keeps_market_with_both_orderbooks():
     valid, rejected = filter_specs_with_orderbooks(specs, FakeClob({"up": book("up", 10), "down": book("down", 10)}))
     assert [item.market_id for item in valid] == ["m1"]
     assert rejected == 0
+    assert valid[0].fee_rate == 0.07
+
+
+def test_filter_rejects_market_without_official_fee_schedule():
+    class NoFee(FakeClob):
+        def get_market_info(self, market_id):
+            return {"t": [{"t": "up", "o": "Up"}, {"t": "down", "o": "Down"}]}
+    diagnostics = {}
+    valid, rejected = filter_specs_with_orderbooks([spec()], NoFee({"up": book("up", 10), "down": book("down", 10)}), diagnostics)
+    assert not valid
+    assert rejected == 1
+    assert diagnostics == {"fee_schedule_unavailable": 1}
 
 
 def test_filter_reports_empty_asks_and_requires_buyable_depth():
@@ -52,7 +64,7 @@ def test_filter_reports_empty_asks_and_requires_buyable_depth():
 def test_http_404_is_a_missing_orderbook(monkeypatch):
     class MissingBook:
         def get_market_info(self, market_id):
-            return {"t": [{"t": "up", "o": "Up"}, {"t": "down", "o": "Down"}]}
+            return {"t": [{"t": "up", "o": "Up"}, {"t": "down", "o": "Down"}], "fd": {"r": 0.07}}
 
         def get_book(self, token_id):
             raise RuntimeError("HTTP GET 404 failed for https://clob.polymarket.com/book body={\"error\":\"No orderbook exists\"}")
@@ -68,7 +80,7 @@ def test_http_404_is_a_missing_orderbook(monkeypatch):
 def test_invalid_token_is_not_reported_as_missing_orderbook():
     class InvalidToken:
         def get_market_info(self, market_id):
-            return {"t": [{"t": "up", "o": "Up"}, {"t": "down", "o": "Down"}]}
+            return {"t": [{"t": "up", "o": "Up"}, {"t": "down", "o": "Down"}], "fd": {"r": 0.07}}
 
         def get_book(self, token_id):
             raise RuntimeError("CLOB book rejected token up: Invalid token id")

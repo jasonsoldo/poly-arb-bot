@@ -1,0 +1,10 @@
+/opt/poly-arb-bot/logs/shadow-audit.jsonl {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root root
+}

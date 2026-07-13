@@ -9,6 +9,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -35,6 +36,7 @@ struct Book {
     bool initialized = false, ws_snapshot = false;
     double updated_at = 0, source_timestamp_ms = 0;
     std::string hash;
+    unsigned long long generation = 0;
 };
 struct Market {
     std::string up, down, last_reason;
@@ -43,16 +45,29 @@ struct Market {
     Market(const std::string& up_token, const std::string& down_token) : up(up_token), down(down_token) {}
 };
 
-std::map<std::string, Market> load_markets(const std::string& path) {
+double now_seconds();
+
+std::map<std::string, Market> load_markets(const std::string& path, unsigned long long* version_out = nullptr, double* generated_at_out = nullptr) {
     std::ifstream file(path); ptree root; boost::property_tree::read_json(file, root);
+    const auto version = root.get<unsigned long long>("version", 0);
+    const double generated_at = root.get<double>("generated_at", 0);
+    if (!version || generated_at <= 0) throw std::runtime_error("market document metadata missing");
+    if (std::abs(now_seconds() - generated_at) > 300) throw std::runtime_error("market document stale");
     std::map<std::string, Market> markets;
+    std::map<std::string, bool> tokens;
     for (const auto& item : root.get_child("markets")) {
         const auto& row = item.second;
         Market market(row.get<std::string>("up_token_id"), row.get<std::string>("down_token_id"));
-        market.fee = row.get<double>("fee_rate", .07);
+        market.fee = row.get<double>("fee_rate");
         market.close_ts = row.get<double>("close_ts", 0);
+        if (market.up == market.down || tokens.count(market.up) || tokens.count(market.down)) throw std::runtime_error("duplicate market token");
+        if (market.fee <= 0 || market.close_ts <= generated_at) throw std::runtime_error("invalid market fee or close time");
+        tokens[market.up] = true; tokens[market.down] = true;
         markets[row.get<std::string>("market_id")] = market;
     }
+    if (markets.size() > 4) throw std::runtime_error("market count exceeds current/next limit");
+    if (version_out) *version_out = version;
+    if (generated_at_out) *generated_at_out = generated_at;
     return markets;
 }
 
@@ -69,10 +84,17 @@ void set_levels(Book& book, const ptree& rows, bool bid, bool clear) {
     }
 }
 
-void update_level(Book& book, const ptree& row) {
+bool update_level(Book& book, const ptree& row) {
     auto& side = row.get<std::string>("side", "") == "BUY" ? book.bids : book.asks;
     const double price = number(row, "price"), size = number(row, "size");
-    if (size <= 0) side.erase(price); else side[price] = size;
+    if (size < 0) return false;
+    if (size == 0 && !side.count(price)) return false;
+    if (size == 0) side.erase(price); else side[price] = size;
+    return true;
+}
+
+bool crossed(const Book& book) {
+    return !book.bids.empty() && !book.asks.empty() && book.bids.rbegin()->first >= book.asks.begin()->first;
 }
 
 std::pair<double, double> buy_vwap(const Book& book, double size) {
@@ -128,12 +150,15 @@ public:
                     std::map<std::string, Book> books, double size, double fee, double buffer_per_share,
                     double min_profit, double leg_interval_us, double execution_half_life_us,
                     double orphan_loss_per_share, double min_expected_value, const std::string& audit_path,
-                    const std::string& markets_path)
+                    const std::string& markets_path, unsigned long long document_version)
         : io_(io), ssl_(ssl), resolver_(io), ws_(io, ssl), timer_(io), reload_timer_(io), markets_(std::move(markets)), books_(std::move(books)),
           size_(size), fallback_fee_(fee), buffer_per_share_(buffer_per_share), min_profit_(min_profit),
           leg_interval_us_(leg_interval_us), execution_half_life_us_(execution_half_life_us),
           orphan_loss_per_share_(orphan_loss_per_share), min_expected_value_(min_expected_value),
-          last_activity_(now_seconds()), audit_(audit_path, std::ios::app), markets_path_(markets_path) {}
+          last_activity_(now_seconds()), audit_(audit_path, std::ios::app), markets_path_(markets_path),
+          document_version_(document_version), generation_(1), ws_session_id_(++next_session_id_) {
+        for (auto& item : books_) item.second.generation = generation_;
+    }
 
     void run() {
         resolver_.async_resolve(host_, "443", beast::bind_front_handler(&MarketWsSession::on_resolve, shared_from_this()));
@@ -216,12 +241,20 @@ private:
             if (!changes) return;
             for (const auto& item : *changes) {
                 const auto& row = item.second; const std::string token = row.get<std::string>("asset_id", asset);
-                if (!books_.count(token)) continue;
+                if (!books_.count(token) || books_[token].generation != generation_) continue;
                 if (!books_[token].ws_snapshot) continue;
-                update_level(books_[token], row);
+                if (source_timestamp && books_[token].source_timestamp_ms && source_timestamp < books_[token].source_timestamp_ms) {
+                    resync_token(token, "timestamp_rollback");
+                    continue;
+                }
+                if (!update_level(books_[token], row)) {
+                    resync_token(token, "invalid_level_update");
+                    continue;
+                }
                 books_[token].updated_at = now_seconds();
                 books_[token].source_timestamp_ms = source_timestamp;
                 books_[token].hash = row.get<std::string>("hash", books_[token].hash);
+                if (crossed(books_[token])) resync_token(token, "crossed_book");
             }
             ++price_changes_;
         }
@@ -246,6 +279,7 @@ private:
             const bool books_fresh = up_age_ms <= 2000 && down_age_ms <= 2000;
             const bool books_synced = books_fresh && std::abs(up_book.source_timestamp_ms - down_book.source_timestamp_ms) <= 2000;
             const double seconds_to_close = item.second.close_ts - timestamp;
+            const double source_age_ms = std::max(std::abs(timestamp * 1000 - up_book.source_timestamp_ms), std::abs(timestamp * 1000 - down_book.source_timestamp_ms));
             auto up = buy_vwap(up_book, size_), down = buy_vwap(down_book, size_);
             const bool fok = up.first >= size_ && down.first >= size_;
             const double rate = item.second.fee > 0 ? item.second.fee : fallback_fee_;
@@ -272,9 +306,12 @@ private:
                 if (audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_type\":\"shadow_eval\",\"strategy\":\"paired_lock\",\"market_id\":\"" << item.first
                                    << "\",\"reason\":\"" << reason << "\",\"fok\":" << (fok ? "true" : "false")
                                    << ",\"seconds_to_close\":" << seconds_to_close << ",\"size\":" << size_
+                                   << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
+                                   << ",\"clock_skew_ms\":null,\"source_age_ms\":" << source_age_ms
                                    << ",\"up_fill\":" << up.first << ",\"down_fill\":" << down.first
                                    << ",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
                                    << ",\"up_fee\":" << up_fee << ",\"down_fee\":" << down_fee
+                                   << ",\"fee_rate\":" << rate
                                    << ",\"gross_cost\":" << gross_cost << ",\"buffer\":" << buffer
                                    << ",\"net_cost\":" << net_cost << ",\"guaranteed_payout\":" << size_
                                    << ",\"locked_profit\":" << profit << ",\"locked_roi\":" << (net_cost > 0 ? profit / net_cost : 0)
@@ -293,7 +330,7 @@ private:
                                 << "\tprofit=" << profit << "\tfok=1\tduration_ms=" << (timestamp - item.second.active_since) * 1000 << "\n" << std::flush;
             if (good && audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_type\":\"shadow_opportunity\",\"market_id\":\"" << item.first
                                        << "\",\"strategy\":\"paired_lock\",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
-                                       << ",\"fees\":" << up_fee + down_fee << ",\"net_cost\":" << net_cost << ",\"locked_profit\":" << profit
+                                       << ",\"fee_rate\":" << rate << ",\"fees\":" << up_fee + down_fee << ",\"net_cost\":" << net_cost << ",\"locked_profit\":" << profit
                                        << ",\"fok\":true,\"duration_ms\":" << (timestamp - item.second.active_since) * 1000 << "}\n" << std::flush;
         }
     }
@@ -318,9 +355,21 @@ private:
         });
     }
 
+    void resync_token(const std::string& token, const std::string& reason) {
+        auto found = books_.find(token);
+        if (found == books_.end()) return;
+        found->second.ws_snapshot = false;
+        ++full_resync_count_;
+        std::cerr << "BOOK_RESYNC token=" << token << " reason=" << reason << " count=" << full_resync_count_ << "\n";
+        queue_write(subscription({token}, "unsubscribe"));
+        queue_write(subscription({token}, "subscribe"));
+    }
+
     void reload_markets() {
         try {
-            auto next = load_markets(markets_path_);
+            unsigned long long next_version = 0;
+            auto next = load_markets(markets_path_, &next_version);
+            if (next_version <= document_version_) return;
             std::map<std::string, bool> old_tokens, next_tokens;
             for (const auto& item : markets_) { old_tokens[item.second.up] = true; old_tokens[item.second.down] = true; }
             for (auto& item : next) {
@@ -333,13 +382,17 @@ private:
                 }
             }
             std::vector<std::string> added, removed;
+            ++generation_;
+            for (auto& book : books_) book.second.generation = generation_;
             for (const auto& token : next_tokens) if (!old_tokens.count(token.first)) {
                 books_[token.first] = Book{};
+                books_[token.first].generation = generation_;
                 fetch_book(io_, ssl_, token.first, books_[token.first]);
                 added.push_back(token.first);
             }
             for (const auto& token : old_tokens) if (!next_tokens.count(token.first)) removed.push_back(token.first);
             markets_ = std::move(next);
+            document_version_ = next_version;
             if (!added.empty()) queue_write(subscription(added, "subscribe"));
             if (!removed.empty()) queue_write(subscription(removed, "unsubscribe"));
             for (const auto& token : removed) books_.erase(token);
@@ -398,12 +451,17 @@ private:
     bool stopped_ = false;
     std::ofstream audit_;
     std::string markets_path_;
+    unsigned long long document_version_, generation_, ws_session_id_, full_resync_count_ = 0;
+    static std::atomic<unsigned long long> next_session_id_;
 };
+
+std::atomic<unsigned long long> MarketWsSession::next_session_id_{0};
 
 int main(int argc, char** argv) {
     if (argc < 2) { std::cerr << "usage: market_ws_engine <markets.json> [size] [fallback_fee_rate] [audit.jsonl] [buffer_per_share] [min_profit] [leg_interval_us] [execution_half_life_us] [orphan_loss_per_share] [min_expected_value]\n"; return 2; }
     try {
-        std::map<std::string, Market> markets = load_markets(argv[1]);
+        unsigned long long document_version = 0;
+        std::map<std::string, Market> markets = load_markets(argv[1], &document_version);
         if (markets.empty()) { std::cerr << "NO_TOKENS live_markets.json contains no valid Up/Down tokens\n"; return 4; }
         const double size = argc > 2 ? std::stod(argv[2]) : 10, fee = argc > 3 ? std::stod(argv[3]) : .07;
         const std::string audit_path = argc > 4 ? argv[4] : "logs/shadow-audit.jsonl";
@@ -422,7 +480,8 @@ int main(int argc, char** argv) {
             for (auto& item : books) if (fetch_book(io, ssl, item.first, item.second)) ++initialized;
             std::cerr << "BOOK_BOOTSTRAP_SUMMARY initialized=" << initialized << " tokens=" << books.size() << "\n";
             auto session = std::make_shared<MarketWsSession>(io, ssl, markets, std::move(books), size, fee, buffer_per_share,
-                min_profit, leg_interval_us, execution_half_life_us, orphan_loss_per_share, min_expected_value, audit_path, argv[1]);
+                min_profit, leg_interval_us, execution_half_life_us, orphan_loss_per_share, min_expected_value,
+                audit_path, argv[1], document_version);
             session->run(); io.run();
             std::cerr << "WS_RECONNECT delay_s=2\n";
             std::this_thread::sleep_for(std::chrono::seconds(2));

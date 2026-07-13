@@ -1,0 +1,22 @@
+import json
+
+from poly_arb_bot.cli import scan_updown_markets, write_market_payload_atomic
+
+
+def test_market_payload_is_versioned_and_leaves_no_temporary_file(tmp_path):
+    target = tmp_path / "live_markets.json"
+    write_market_payload_atomic(target, {"markets": [{"market_id": "m1"}]}, 1783904400)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["version"] == 1783904400000
+    assert payload["generated_at"] == 1783904400
+    assert payload["markets"] == [{"market_id": "m1"}]
+    assert not (tmp_path / "live_markets.json.tmp").exists()
+
+
+def test_zero_market_scan_keeps_previous_verified_file(tmp_path, monkeypatch):
+    target = tmp_path / "live_markets.json"
+    target.write_text('{"version":1,"generated_at":1,"markets":[{"market_id":"verified"}]}', encoding="utf-8")
+    monkeypatch.setattr("poly_arb_bot.cli.PolymarketDataClient.series_by_slug", lambda *args: [])
+    result = scan_updown_markets(target, "https://example.invalid", "5m", "current,next", base_ts=1783904400)
+    assert result == 3
+    assert json.loads(target.read_text(encoding="utf-8"))["markets"][0]["market_id"] == "verified"

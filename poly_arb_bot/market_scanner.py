@@ -92,14 +92,15 @@ class MarketScanner:
         )
 
     @staticmethod
-    def _fee_rate(market: Dict[str, Any]) -> float:
+    def _fee_rate(market: Dict[str, Any]) -> Optional[float]:
         schedule = parse_jsonish(market.get("feeSchedule")) or {}
         if isinstance(schedule, dict):
             try:
-                return float(first_present(schedule, ("rate", "r")) or 0.07)
+                value = first_present(schedule, ("rate", "r"))
+                return float(value) if value is not None else None
             except (TypeError, ValueError):
                 pass
-        return 0.07
+        return None
 
     def to_payload(self, specs: Iterable[LiveMarketSpec]) -> Dict[str, Any]:
         return {"markets": [asdict(spec) for spec in specs]}
