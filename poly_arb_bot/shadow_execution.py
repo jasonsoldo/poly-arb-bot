@@ -32,7 +32,7 @@ class ShadowExecutionStateMachine:
         self._save()
 
     def process(self, opportunity, leg1_result="filled", leg2_result="filled", orphan_action="hold"):
-        event_id = f'{opportunity.get("market_id")}:{opportunity.get("ts")}'
+        event_id = opportunity.get("event_id") or f'{opportunity.get("market_id")}:{opportunity.get("ts")}'
         if event_id in self.data["processed"]:
             return False
         market_id = opportunity["market_id"]

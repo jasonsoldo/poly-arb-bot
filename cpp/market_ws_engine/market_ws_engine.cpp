@@ -53,7 +53,7 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
     const auto version = root.get<unsigned long long>("version", 0);
     const double generated_at = root.get<double>("generated_at", 0);
     if (!version || generated_at <= 0) throw std::runtime_error("market document metadata missing");
-    if (std::abs(now_seconds() - generated_at) > 300) throw std::runtime_error("market document stale");
+    if (generated_at > now_seconds() + 300) throw std::runtime_error("market document from future");
     std::map<std::string, Market> markets;
     std::map<std::string, bool> tokens;
     for (const auto& item : root.get_child("markets")) {
@@ -61,11 +61,13 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
         Market market(row.get<std::string>("up_token_id"), row.get<std::string>("down_token_id"));
         market.fee = row.get<double>("fee_rate");
         market.close_ts = row.get<double>("close_ts", 0);
+        if (market.close_ts <= now_seconds()) continue;
         if (market.up == market.down || tokens.count(market.up) || tokens.count(market.down)) throw std::runtime_error("duplicate market token");
-        if (market.fee <= 0 || market.close_ts <= generated_at) throw std::runtime_error("invalid market fee or close time");
+        if (market.fee <= 0) throw std::runtime_error("invalid market fee");
         tokens[market.up] = true; tokens[market.down] = true;
         markets[row.get<std::string>("market_id")] = market;
     }
+    if (markets.empty()) throw std::runtime_error("no unexpired markets");
     if (markets.size() > 56) throw std::runtime_error("market count exceeds configured asset/timeframe limit");
     if (version_out) *version_out = version;
     if (generated_at_out) *generated_at_out = generated_at;
@@ -302,11 +304,13 @@ private:
             if (good && item.second.active_since == 0) item.second.active_since = timestamp;
             if (!good) item.second.active_since = 0;
             if (reason != item.second.last_reason || timestamp - item.second.last_audit >= 5) {
+                const unsigned long long evaluation_sequence = ++evaluation_sequence_;
+                const std::string evaluation_id = std::to_string(generation_) + ":" + std::to_string(ws_session_id_) + ":" + item.first + ":" + std::to_string(evaluation_sequence);
                 std::cout << "SHADOW_EVAL\tmarket=" << item.first << "\treason=" << reason
                           << "\tfok=" << (fok ? 1 : 0) << "\tup_fill=" << up.first << "\tdown_fill=" << down.first
                           << "\tup_vwap=" << up.second << "\tdown_vwap=" << down.second
                           << "\tfees=" << up_fee + down_fee << "\tnet_cost=" << net_cost << "\tlocked_profit=" << profit << "\n" << std::flush;
-                if (audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_type\":\"shadow_eval\",\"strategy\":\"paired_lock\",\"market_id\":\"" << item.first
+                if (audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_id\":\"" << evaluation_id << "\",\"evaluation_sequence\":" << evaluation_sequence << ",\"event_type\":\"shadow_eval\",\"strategy\":\"paired_lock\",\"market_id\":\"" << item.first
                                    << "\",\"reason\":\"" << reason << "\",\"fok\":" << (fok ? "true" : "false")
                                    << ",\"seconds_to_close\":" << seconds_to_close << ",\"size\":" << size_
                                    << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
@@ -332,7 +336,7 @@ private:
             if (good) std::cout << "SHADOW_OPPORTUNITY\tmarket=" << item.first << "\tup_vwap=" << std::setprecision(12) << up.second
                                 << "\tdown_vwap=" << down.second << "\tfees=" << up_fee + down_fee << "\tnet_cost=" << net_cost
                                 << "\tprofit=" << profit << "\tfok=1\tduration_ms=" << (timestamp - item.second.active_since) * 1000 << "\n" << std::flush;
-            if (good && audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_type\":\"shadow_opportunity\",\"market_id\":\"" << item.first
+            if (good && audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_id\":\"" << generation_ << ':' << ws_session_id_ << ':' << item.first << ":opportunity:" << ++opportunity_sequence_ << "\",\"event_type\":\"shadow_opportunity\",\"market_id\":\"" << item.first
                                        << "\",\"strategy\":\"paired_lock\",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
                                        << ",\"fee_rate\":" << rate << ",\"fees\":" << up_fee + down_fee << ",\"net_cost\":" << net_cost << ",\"locked_profit\":" << profit
                                        << ",\"fok\":true,\"duration_ms\":" << (timestamp - item.second.active_since) * 1000 << "}\n" << std::flush;
@@ -483,6 +487,7 @@ private:
     std::string markets_path_, health_path_;
     double last_health_write_ = 0;
     unsigned long long document_version_, generation_, ws_session_id_, full_resync_count_ = 0;
+    unsigned long long evaluation_sequence_ = 0, opportunity_sequence_ = 0;
     static std::atomic<unsigned long long> next_session_id_;
 };
 

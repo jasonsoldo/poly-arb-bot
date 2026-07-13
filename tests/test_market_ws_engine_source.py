@@ -91,3 +91,14 @@ def test_audit_stream_preserves_unix_timestamp_precision():
 def test_health_explains_paired_market_readiness_gap():
     assert '\\\"waiting_up_snapshot\\\":' in SOURCE
     assert '\\\"waiting_down_snapshot\\\":' in SOURCE
+
+
+def test_shadow_evaluations_have_stable_sequence_ids():
+    assert "evaluation_sequence_" in SOURCE
+    assert '\\\"evaluation_sequence\\\":' in SOURCE
+    assert '\\\"event_id\\\":\\\"' in SOURCE
+
+
+def test_engine_can_start_from_retained_config_during_gamma_outage():
+    assert 'throw std::runtime_error("market document stale")' not in SOURCE
+    assert 'market.close_ts <= now_seconds()' in SOURCE

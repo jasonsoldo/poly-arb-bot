@@ -570,6 +570,7 @@ def main() -> int:
             "binance-quote",
             "clob-book",
             "chainlink-price",
+            "shadow-acceptance",
         ],
     )
     parser.add_argument("--snapshot", default="data/sample_live_snapshot.json")
@@ -603,6 +604,9 @@ def main() -> int:
         return 0
     if args.command == "shadow-ws":
         return run_shadow_ws(Path(args.markets), args.size, args.fee_rate, Path(args.log_file))
+    if args.command == "shadow-acceptance":
+        from .shadow_acceptance import run as run_acceptance
+        return run_acceptance(Path("data"), Path(args.log_file), Path(args.state_file or "state/orders.json"))
 
     if args.command == "simulate":
         return run_simulation(

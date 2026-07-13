@@ -4,7 +4,7 @@ from poly_arb_bot.shadow_execution import ShadowExecutionStateMachine, process_a
 
 
 def opportunity():
-    return {"market_id": "m1", "ts": 123.0, "orphan_leg_loss": 0.2}
+    return {"event_id": "stable-opportunity", "market_id": "m1", "ts": 123.0, "orphan_leg_loss": 0.2}
 
 
 def test_shadow_execution_completes_both_simulated_legs_without_real_orders(tmp_path):
@@ -15,6 +15,7 @@ def test_shadow_execution_completes_both_simulated_legs_without_real_orders(tmp_
     assert [row["state"] for row in rows] == ["PRECHECK", "LEG1_SUBMITTED", "LEG1_FILLED", "LEG2_SUBMITTED", "COMPLETE"]
     assert all(row["real_order_submitted"] is False for row in rows)
     assert machine.process(opportunity()) is False
+    assert rows[-1]["event_id"] == "stable-opportunity"
 
 
 def test_shadow_execution_records_orphan_action(tmp_path):

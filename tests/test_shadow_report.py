@@ -70,3 +70,17 @@ def test_shadow_report_quarantines_future_clock_records(tmp_path):
 
     assert report["evaluations"] == 0
     assert report["future_events"] == 1
+
+
+def test_shadow_report_deduplicates_stable_evaluation_ids(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    row = {"ts": time.time(), "event_id": "1:1:m1:7", "event_type": "shadow_eval",
+           "market_id": "m1", "decision": "REJECT", "reason": "no_edge", "fok": True}
+    path.write_text("\n".join([json.dumps(row), json.dumps(row)]), encoding="utf-8")
+
+    report = build_report(path)
+
+    assert report["evaluations"] == 1
+    assert report["duplicate_events"] == 1
+    assert report["rejected_evaluations"] == 1
+    assert report["accepted_evaluations"] == 0

@@ -64,7 +64,9 @@ def _performance(opportunities, execution_path):
 
 def build_report(path: Path, execution_path: Path = None):
     reasons = Counter()
-    evaluations = accepts = fok_passed = invalid = future = 0
+    evaluations = accepts = fok_passed = invalid = future = duplicates = 0
+    accepted_evaluations = rejected_evaluations = 0
+    seen_event_ids = set()
     durations = []
     source_ages = []
     markets = set()
@@ -76,16 +78,26 @@ def build_report(path: Path, execution_path: Path = None):
             if float(row.get("ts", 0)) > time.time() + 300:
                 future += 1
                 continue
+            event_id = row.get("event_id")
+            if event_id and event_id in seen_event_ids:
+                duplicates += 1
+                continue
+            if event_id:
+                seen_event_ids.add(event_id)
             markets.add(row.get("market_id"))
             if row.get("event_type") == "shadow_eval":
                 evaluations += 1
                 fok_passed += int(bool(row.get("fok")))
-                reasons[row.get("reason", "unknown")] += 1
+                accepted = row.get("decision") == "ACCEPT"
+                accepted_evaluations += int(accepted)
+                rejected_evaluations += int(not accepted)
+                if not accepted:
+                    reasons[row.get("reason", "unknown")] += 1
                 if row.get("source_age_ms") is not None:
                     source_ages.append(float(row["source_age_ms"]))
             elif row.get("event_type") == "shadow_opportunity":
                 accepts += 1
-                event_id = f'{row.get("market_id")}:{row.get("ts")}'
+                event_id = row.get("event_id") or f'{row.get("market_id")}:{row.get("ts")}'
                 opportunities[event_id] = row
                 if row.get("duration_ms") is not None:
                     durations.append(float(row["duration_ms"]))
@@ -96,6 +108,9 @@ def build_report(path: Path, execution_path: Path = None):
         "accepts": accepts,
         "invalid_json": invalid,
         "future_events": future,
+        "duplicate_events": duplicates,
+        "accepted_evaluations": accepted_evaluations,
+        "rejected_evaluations": rejected_evaluations,
         "rejection_reasons": dict(reasons),
         "opportunity_duration_ms": {"p50": percentile(durations, 0.5), "p95": percentile(durations, 0.95), "max": max(durations) if durations else None},
         "source_age_ms": {"latest": source_ages[-1] if source_ages else None,

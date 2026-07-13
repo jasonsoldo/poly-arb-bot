@@ -37,6 +37,13 @@ def test_shadow_loop_scans_all_supported_timeframes():
     assert deploy.count("--intervals 5m,15m,1h,4h") >= 2
 
 
+def test_shadow_loop_enforces_scan_deadline_without_replacing_old_markets():
+    assert 'scan_deadline_seconds="${SCAN_DEADLINE_SECONDS:-45}"' in SCRIPT
+    assert 'timeout --signal=TERM "$scan_deadline_seconds"' in SCRIPT
+    assert "SHADOW_LOOP scan_deadline_or_error" in SCRIPT
+    assert "use_retained_markets" in SCRIPT
+
+
 def test_systemd_requires_ntp_and_logrotate_retains_thirty_days():
     service = Path("deploy/poly-arb-bot.service").read_text(encoding="utf-8")
     ntp = Path("scripts/check_ntp.sh").read_text(encoding="utf-8")
