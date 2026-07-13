@@ -7,7 +7,7 @@ from .http_utils import HttpClient
 
 class PolymarketDataClient:
     def __init__(self, http: HttpClient = None, base_url: str = "https://gamma-api.polymarket.com"):
-        self.http = http or HttpClient(timeout=10.0)
+        self.http = http or HttpClient(timeout=10.0, user_agent="Mozilla/5.0 poly-arb-bot/0.1")
         self.base_url = base_url
 
     def events(self, limit: int = 100, offset: int = 0, active: bool = True) -> List[Dict[str, Any]]:
