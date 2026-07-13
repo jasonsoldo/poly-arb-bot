@@ -3,6 +3,7 @@
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -22,15 +23,18 @@
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
+namespace http = beast::http;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
 using ssl_socket = asio::ssl::stream<tcp::socket>;
 using boost::property_tree::ptree;
 
-struct Book { std::map<double, double> bids, asks; };
+struct Book { std::map<double, double> bids, asks; bool initialized = false; };
 struct Market {
     std::string up, down, last_reason;
     double size = 10, fee = .07, active_since = 0, last_audit = 0;
+    Market() = default;
+    Market(const std::string& up_token, const std::string& down_token) : up(up_token), down(down_token) {}
 };
 
 double now_seconds() { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); }
@@ -62,12 +66,46 @@ std::pair<double, double> buy_vwap(const Book& book, double size) {
     return {filled, filled ? notional / filled : 0};
 }
 
+bool fetch_book(asio::io_context& io, asio::ssl::context& ssl, const std::string& token, Book& book) {
+    const std::string host = "clob.polymarket.com";
+    try {
+        tcp::resolver resolver(io);
+        beast::ssl_stream<beast::tcp_stream> stream(io, ssl);
+        if (!SSL_set_tlsext_host_name(stream.native_handle(), host.c_str())) throw std::runtime_error("SNI failed");
+        const auto endpoints = resolver.resolve(host, "443");
+        beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(5));
+        beast::get_lowest_layer(stream).connect(endpoints);
+        stream.handshake(asio::ssl::stream_base::client);
+        http::request<http::empty_body> request{http::verb::get, "/book?token_id=" + token, 11};
+        request.set(http::field::host, host);
+        request.set(http::field::user_agent, "poly-arb-bot/0.1");
+        http::write(stream, request);
+        beast::flat_buffer buffer;
+        http::response<http::string_body> response;
+        http::read(stream, buffer, response);
+        if (response.result() != http::status::ok) throw std::runtime_error("HTTP " + std::to_string(response.result_int()));
+        ptree payload;
+        std::istringstream input(response.body());
+        boost::property_tree::read_json(input, payload);
+        if (auto bids = payload.get_child_optional("bids")) set_levels(book, *bids, true, true);
+        if (auto asks = payload.get_child_optional("asks")) set_levels(book, *asks, false, true);
+        book.initialized = true;
+        beast::error_code ignored;
+        stream.shutdown(ignored);
+        std::cerr << "BOOK_BOOTSTRAP token=" << token << " bids=" << book.bids.size() << " asks=" << book.asks.size() << "\n";
+        return true;
+    } catch (const std::exception& error) {
+        std::cerr << "BOOK_BOOTSTRAP_ERROR token=" << token << " message=" << error.what() << "\n";
+        return false;
+    }
+}
+
 class MarketWsSession : public std::enable_shared_from_this<MarketWsSession> {
 public:
-    MarketWsSession(asio::io_context& io, asio::ssl::context& ssl, std::map<std::string, Market> markets, double size, double fee)
-        : resolver_(io), ws_(io, ssl), timer_(io), markets_(std::move(markets)), size_(size), fee_(fee), last_activity_(now_seconds()) {
-        for (const auto& item : markets_) { books_[item.second.up]; books_[item.second.down]; }
-    }
+    MarketWsSession(asio::io_context& io, asio::ssl::context& ssl, std::map<std::string, Market> markets,
+                    std::map<std::string, Book> books, double size, double fee)
+        : resolver_(io), ws_(io, ssl), timer_(io), markets_(std::move(markets)), books_(std::move(books)),
+          size_(size), fee_(fee), last_activity_(now_seconds()) {}
 
     void run() {
         resolver_.async_resolve(host_, "443", beast::bind_front_handler(&MarketWsSession::on_resolve, shared_from_this()));
@@ -128,6 +166,7 @@ private:
         if (type == "book" && books_.count(asset)) {
             if (auto bids = message.get_child_optional("bids")) set_levels(books_[asset], *bids, true, true);
             if (auto asks = message.get_child_optional("asks")) set_levels(books_[asset], *asks, false, true);
+            books_[asset].initialized = true;
             ++book_events_;
         } else if (type == "price_change") {
             auto changes = message.get_child_optional("price_changes");
@@ -146,6 +185,15 @@ private:
 
     void evaluate() {
         for (auto& item : markets_) {
+            if (!books_[item.second.up].initialized || !books_[item.second.down].initialized) {
+                const double timestamp = now_seconds();
+                if (item.second.last_reason != "book_uninitialized" || timestamp - item.second.last_audit >= 5) {
+                    std::cout << "SHADOW_EVAL\tmarket=" << item.first << "\treason=book_uninitialized\tfok=0\n" << std::flush;
+                    item.second.last_reason = "book_uninitialized";
+                    item.second.last_audit = timestamp;
+                }
+                continue;
+            }
             auto up = buy_vwap(books_[item.second.up], size_), down = buy_vwap(books_[item.second.down], size_);
             const bool fok = up.first >= size_ && down.first >= size_;
             const double up_fee = up.first * fee_ * up.second * (1 - up.second), down_fee = down.first * fee_ * down.second * (1 - down.second);
@@ -237,7 +285,12 @@ int main(int argc, char** argv) {
         for (;;) {
             asio::io_context io; asio::ssl::context ssl(asio::ssl::context::tls_client);
             ssl.set_default_verify_paths(); ssl.set_verify_mode(asio::ssl::verify_peer);
-            auto session = std::make_shared<MarketWsSession>(io, ssl, markets, size, fee);
+            std::map<std::string, Book> books;
+            for (const auto& item : markets) { books[item.second.up]; books[item.second.down]; }
+            size_t initialized = 0;
+            for (auto& item : books) if (fetch_book(io, ssl, item.first, item.second)) ++initialized;
+            std::cerr << "BOOK_BOOTSTRAP_SUMMARY initialized=" << initialized << " tokens=" << books.size() << "\n";
+            auto session = std::make_shared<MarketWsSession>(io, ssl, markets, std::move(books), size, fee);
             session->run(); io.run();
             std::cerr << "WS_RECONNECT delay_s=2\n";
             std::this_thread::sleep_for(std::chrono::seconds(2));
