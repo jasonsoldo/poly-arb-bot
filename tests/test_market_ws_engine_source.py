@@ -24,7 +24,7 @@ def test_ws_engine_reconnects_and_audits_rejected_shadow_evaluations():
     assert '"SHADOW_OPPORTUNITY\\tmarket="' in SOURCE
     assert '"up_depth"' in SOURCE
     assert '"down_depth"' in SOURCE
-    assert '"no_edge"' in SOURCE
+    assert '"net_cost_above_threshold"' in SOURCE
 
 
 def test_ws_engine_bootstraps_rest_books_before_ws_deltas():
@@ -38,3 +38,12 @@ def test_ws_engine_writes_structured_shadow_audit():
     assert '\\"event_type\\":\\"shadow_eval\\"' in SOURCE
     assert '\\"event_type\\":\\"shadow_opportunity\\"' in SOURCE
     assert 'logs/shadow-audit.jsonl' in SOURCE
+
+
+def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
+    assert "ws_snapshot" in SOURCE
+    assert "books_not_synced" in SOURCE
+    assert "buffer_per_share_" in SOURCE
+    assert "min_profit_" in SOURCE
+    assert '\\"strategy\\":\\"paired_lock\\"' in SOURCE
+    assert '\\"decision\\":\\"' in SOURCE

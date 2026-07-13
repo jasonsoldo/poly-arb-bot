@@ -29,6 +29,19 @@ def test_scanner_builds_live_market_spec_from_gamma_market():
     assert spec.up_token_id == "111"
     assert spec.down_token_id == "222"
     assert spec.symbol == "BTCUSDT"
+    assert spec.fee_rate == 0.07
+
+
+def test_scanner_reads_market_fee_schedule():
+    market = {
+        "conditionId": "0xcondition",
+        "question": "Bitcoin Up or Down - July 11, 9:25PM-9:30PM ET",
+        "outcomes": ["Up", "Down"],
+        "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-11T13:30:00Z",
+        "feeSchedule": {"rate": "0.05"},
+    }
+    assert MarketScanner().spec_from_market(market).fee_rate == 0.05
 
 
 def test_scanner_reads_open_price_from_event_metadata():

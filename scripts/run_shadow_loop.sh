@@ -7,6 +7,8 @@ mkdir -p data logs state
 refresh_seconds="${MARKET_REFRESH_SECONDS:-60}"
 size="${SHADOW_SIZE:-10}"
 fee_rate="${SHADOW_FEE_RATE:-0.07}"
+buffer_per_share="${SHADOW_BUFFER_PER_SHARE:-0.002}"
+min_profit="${SHADOW_MIN_PROFIT:-0.01}"
 
 while true; do
   python -m poly_arb_bot.cli scan-updown \
@@ -23,7 +25,7 @@ while true; do
 
   echo "SHADOW_LOOP start markets=$market_count refresh_s=$refresh_seconds"
   timeout --signal=TERM "$refresh_seconds" \
-    ./build/market_ws_engine data/live_markets.json "$size" "$fee_rate" logs/shadow-audit.jsonl || status=$?
+    ./build/market_ws_engine data/live_markets.json "$size" "$fee_rate" logs/shadow-audit.jsonl "$buffer_per_share" "$min_profit" || status=$?
   status="${status:-0}"
   if [[ "$status" -ne 0 && "$status" -ne 124 && "$status" -ne 143 ]]; then
     echo "SHADOW_LOOP engine_exit=$status retry_s=2"
