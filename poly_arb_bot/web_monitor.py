@@ -61,6 +61,12 @@ def build_status(data_dir, log_file, state_file):
     for item in shadow_events:
         latest_shadow.setdefault(item.get("market_id"), item)
     state = _json(state_file, {"client_order_ids": {}})
+    reference_prices = _json(data_dir / "venue-status.json", {})
+    reference_age_ms = time.time() * 1000 - reference_prices.get("updated_at_ms", 0)
+    reference_prices["stale"] = reference_age_ms > 10_000
+    if reference_prices["stale"]:
+        for key in ("binance_btcusdt", "chainlink_btcusd", "divergence_usd", "divergence_bps"):
+            reference_prices[key] = None
     decisions = list(state.get("client_order_ids", {}).values())
     decision_records = [item for item in decisions if isinstance(item, dict)]
     config = StrategyConfig()
@@ -85,6 +91,7 @@ def build_status(data_dir, log_file, state_file):
             "shadow_opportunities": sum(item.get("event_type") == "shadow_opportunity" for item in shadow_events),
         },
         "shadow_markets": list(latest_shadow.values()),
+        "reference_prices": reference_prices,
         "blocked_reasons": dict(blocked),
         "risk_limits": {"max_seconds_to_close": config.max_seconds_to_close, "min_liquidity": config.min_liquidity},
         "latency_ms": {"polymarket": None, "binance": None, "chainlink": None, "engine": None},

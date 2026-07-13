@@ -39,7 +39,9 @@ done
   done
 ) &
 scanner_pid=$!
-trap 'kill "$scanner_pid" 2>/dev/null || true' EXIT INT TERM
+./build/reference_price_engine data/venue-status.json &
+reference_pid=$!
+trap 'kill "$scanner_pid" "$reference_pid" 2>/dev/null || true' EXIT INT TERM
 
 echo "SHADOW_LOOP engine_start dynamic_reload_s=5 market_scan_s=$refresh_seconds"
 ./build/market_ws_engine data/live_markets.json "$size" "$fee_rate" logs/shadow-audit.jsonl \

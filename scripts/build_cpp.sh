@@ -17,6 +17,9 @@ if command -v pkg-config >/dev/null && pkg-config --exists openssl; then
   g++ -std=c++17 -O3 -Wall -Wextra cpp/market_ws_engine/market_ws_engine.cpp \
     -o build/market_ws_engine -lboost_system -lssl -lcrypto -lpthread
   echo "built build/market_ws_engine"
+  g++ -std=c++17 -O3 -Wall -Wextra cpp/reference_price_engine/reference_price_engine.cpp \
+    -o build/reference_price_engine -lboost_system -lssl -lcrypto -lpthread
+  echo "built build/reference_price_engine"
 else
   echo "skip market_ws_engine: install libboost-system-dev libssl-dev"
 fi

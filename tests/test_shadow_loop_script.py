@@ -21,6 +21,11 @@ def test_shadow_loop_uses_project_virtualenv_under_systemd():
     assert "PYTHON_NOT_EXECUTABLE" in SCRIPT
 
 
+def test_shadow_loop_starts_cpp_reference_price_engine():
+    assert "./build/reference_price_engine data/venue-status.json" in SCRIPT
+    assert 'kill "$scanner_pid" "$reference_pid"' in SCRIPT
+
+
 def test_systemd_requires_ntp_and_logrotate_retains_thirty_days():
     service = Path("deploy/poly-arb-bot.service").read_text(encoding="utf-8")
     ntp = Path("scripts/check_ntp.sh").read_text(encoding="utf-8")

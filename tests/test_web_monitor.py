@@ -1,4 +1,5 @@
 import json
+import time
 
 from poly_arb_bot.web_monitor import build_status
 
@@ -84,3 +85,26 @@ def test_web_status_prefers_canonical_cpp_audit_over_legacy_order_log(tmp_path):
 
     assert status["counts"]["shadow_evaluations"] == 1
     assert status["shadow_markets"][0]["market_id"] == "m1"
+
+
+def test_web_status_exposes_cpp_reference_prices(tmp_path):
+    (tmp_path / "live_snapshot.json").write_text(json.dumps({"signals": []}), encoding="utf-8")
+    (tmp_path / "live_markets.json").write_text(json.dumps({"markets": []}), encoding="utf-8")
+    (tmp_path / "venue-status.json").write_text(
+        json.dumps({"updated_at_ms": time.time() * 1000, "binance_btcusdt": 65000, "chainlink_btcusd": 64998, "divergence_bps": 0.3077}),
+        encoding="utf-8",
+    )
+    status = build_status(tmp_path, tmp_path / "orders.jsonl", tmp_path / "state.json")
+    assert status["reference_prices"]["binance_btcusdt"] == 65000
+    assert status["reference_prices"]["chainlink_btcusd"] == 64998
+
+
+def test_web_status_hides_stale_reference_prices(tmp_path):
+    (tmp_path / "live_snapshot.json").write_text(json.dumps({"signals": []}), encoding="utf-8")
+    (tmp_path / "live_markets.json").write_text(json.dumps({"markets": []}), encoding="utf-8")
+    (tmp_path / "venue-status.json").write_text(
+        json.dumps({"updated_at_ms": 1, "binance_btcusdt": 65000, "chainlink_btcusd": 64998}), encoding="utf-8"
+    )
+    status = build_status(tmp_path, tmp_path / "orders.jsonl", tmp_path / "state.json")
+    assert status["reference_prices"]["stale"] is True
+    assert status["reference_prices"]["binance_btcusdt"] is None
