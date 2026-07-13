@@ -235,3 +235,49 @@ def test_web_status_does_not_display_future_clock_events(tmp_path):
     assert status["events"] == []
     assert status["shadow_markets"] == []
     assert status["shadow_report"]["future_events"] == 1
+
+
+def test_rejected_pair_blocks_validation_and_exposes_auditable_cost_chain(tmp_path):
+    now = time.time()
+    (tmp_path / "live_markets.json").write_text(json.dumps({"markets": [{"market_id": "m1"}]}), encoding="utf-8")
+    log = tmp_path / "audit.jsonl"
+    log.write_text(json.dumps({
+        "ts": now, "event_type": "shadow_eval", "market_id": "m1", "decision": "REJECT",
+        "reason": "net_cost_above_threshold", "fok": True, "size": 10,
+        "up_fill": 10, "down_fill": 10, "up_vwap": .1, "down_vwap": .92,
+        "gross_cost": 10.2, "up_fee": .04, "down_fee": .05, "buffer": .02,
+        "net_cost": 10.31, "guaranteed_payout": 10, "locked_profit": -.31,
+        "expected_execution_value": -.31, "books_synced": True,
+        "source_age_ms": 20, "up_book_age_ms": 10, "down_book_age_ms": 12,
+        "leg_1_fill_probability": 1, "leg_2_fill_probability": .8,
+    }), encoding="utf-8")
+
+    status = build_status(tmp_path, log, tmp_path / "state.json")
+
+    assert status["pipeline_steps"]["validate"] == "BLOCKED"
+    assert status["strategy_score"]["total"] == 0
+    assert status["strategy_score"]["metrics"]["expected_execution_value"] == -.31
+    assert status["strategy_score"]["checks"]["depth"] == "PASS"
+    assert status["strategy_score"]["checks"]["book_sync"] == "PASS"
+    assert status["current_pair"]["net_cost"] == 10.31
+    assert status["current_pair"]["decision"] == "REJECT"
+
+
+def test_status_explains_ready_gap_and_initializes_resyncs(tmp_path):
+    now = time.time()
+    (tmp_path / "live_markets.json").write_text(json.dumps({"markets": [
+        {"market_id": "a", "asset": "BTC", "interval": "5m"},
+        {"market_id": "b", "asset": "BTC", "interval": "15m"},
+    ]}), encoding="utf-8")
+    (tmp_path / "shadow-health.json").write_text(json.dumps({
+        "updated_at": now, "ws_connected": True, "ready_markets": 1,
+        "full_resyncs": 0, "waiting_up_snapshot": 1, "waiting_down_snapshot": 0,
+    }), encoding="utf-8")
+
+    status = build_status(tmp_path, tmp_path / "missing.jsonl", tmp_path / "state.json")
+
+    assert status["clob_readiness"] == {
+        "discovered_markets": 2, "paired_markets_ready": 1, "not_ready": 1,
+        "waiting_up_snapshot": 1, "waiting_down_snapshot": 0,
+    }
+    assert status["shadow_health"]["resyncs"] == 0

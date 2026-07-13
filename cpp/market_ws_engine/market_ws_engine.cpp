@@ -341,9 +341,14 @@ private:
     }
 
     void write_health(bool connected) {
-        size_t ready = 0;
-        for (const auto& item : markets_)
-            if (books_[item.second.up].ws_snapshot && books_[item.second.down].ws_snapshot) ++ready;
+        size_t ready = 0, waiting_up = 0, waiting_down = 0;
+        for (const auto& item : markets_) {
+            const bool up_ready = books_[item.second.up].ws_snapshot;
+            const bool down_ready = books_[item.second.down].ws_snapshot;
+            if (up_ready && down_ready) ++ready;
+            if (!up_ready) ++waiting_up;
+            if (!down_ready) ++waiting_down;
+        }
         const std::string temporary = health_path_ + ".tmp";
         std::ofstream out(temporary, std::ios::trunc);
         out << std::setprecision(15);
@@ -351,6 +356,7 @@ private:
             << ",\"ws_session_id\":" << ws_session_id_ << ",\"subscription_generation\":" << generation_
             << ",\"document_version\":" << document_version_ << ",\"markets\":" << markets_.size()
             << ",\"tokens\":" << books_.size() << ",\"ready_markets\":" << ready
+            << ",\"waiting_up_snapshot\":" << waiting_up << ",\"waiting_down_snapshot\":" << waiting_down
             << ",\"last_market_data_at\":" << last_activity_ << ",\"full_resyncs\":" << full_resync_count_
             << ",\"book_events\":" << book_events_ << ",\"price_changes\":" << price_changes_ << "}\n";
         out.close();

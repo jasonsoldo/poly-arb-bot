@@ -53,7 +53,7 @@ def test_shadow_report_keeps_empty_performance_empty(tmp_path):
     report = build_report(path, tmp_path / "missing-execution.jsonl")
 
     assert report["performance"] == {
-        "completed": 0, "wins": 0, "losses": 0, "simulated_pnl": 0.0,
+        "completed": 0, "wins": 0, "losses": 0, "simulated_pnl": None,
         "win_rate": None, "sharpe": None, "sharpe_samples": 0,
     }
     assert report["equity_curve"] == []

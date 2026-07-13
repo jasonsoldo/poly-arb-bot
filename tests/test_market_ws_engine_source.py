@@ -86,3 +86,8 @@ def test_static_books_stay_usable_while_websocket_feed_is_live():
 
 def test_audit_stream_preserves_unix_timestamp_precision():
     assert "audit_ << std::setprecision(15);" in SOURCE
+
+
+def test_health_explains_paired_market_readiness_gap():
+    assert '\\\"waiting_up_snapshot\\\":' in SOURCE
+    assert '\\\"waiting_down_snapshot\\\":' in SOURCE

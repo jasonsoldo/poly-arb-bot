@@ -54,7 +54,7 @@ def _performance(opportunities, execution_path):
         sharpe = statistics.mean(samples) / statistics.stdev(samples) * math.sqrt(24 * 365)
     return {
         "performance": {"completed": len(ledger), "wins": wins, "losses": len(ledger) - wins,
-                        "simulated_pnl": round(equity, 12),
+                        "simulated_pnl": round(equity, 12) if ledger else None,
                         "win_rate": wins / len(ledger) if ledger else None,
                         "sharpe": sharpe, "sharpe_samples": len(samples)},
         "equity_curve": curve,
@@ -98,7 +98,10 @@ def build_report(path: Path, execution_path: Path = None):
         "future_events": future,
         "rejection_reasons": dict(reasons),
         "opportunity_duration_ms": {"p50": percentile(durations, 0.5), "p95": percentile(durations, 0.95), "max": max(durations) if durations else None},
-        "source_age_ms": {"p50": percentile(source_ages, 0.5), "p95": percentile(source_ages, 0.95), "max": max(source_ages) if source_ages else None},
+        "source_age_ms": {"latest": source_ages[-1] if source_ages else None,
+                          "p50": percentile(source_ages, 0.5), "p95": percentile(source_ages, 0.95),
+                          "p99": percentile(source_ages, 0.99), "max": max(source_ages) if source_ages else None,
+                          "samples": len(source_ages)},
     }
     result.update(_performance(opportunities, execution_path))
     return result

@@ -108,6 +108,9 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         asset, interval = candidates[series_slug]
         series_id = str(series.get("id"))
         series_by_id[series_id] = (asset, interval, series_slug)
+    for slug, (asset, interval) in candidates.items():
+        if slug not in matched_slugs:
+            print(f"DISCOVERY asset={asset} interval={interval} series={slug} status=SERIES_NOT_FOUND", flush=True)
     event_candidates = {}
     for series_id, (asset, interval, series_slug) in series_by_id.items():
         seconds = INTERVAL_SECONDS[interval]
@@ -148,6 +151,11 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     for series_id, (asset, interval, series_slug) in series_by_id.items():
         horizon = INTERVAL_SECONDS[interval] * 2
         selected = current_series_events(grouped_events[series_id], now_ts, limit=2, horizon_seconds=horizon)
+        print(
+            f"DISCOVERY asset={asset} interval={interval} series={series_slug} "
+            f"events_found={len(grouped_events[series_id])} candidates={len(selected)}",
+            flush=True,
+        )
         if not selected:
             missing_events += 1
         for event in selected:

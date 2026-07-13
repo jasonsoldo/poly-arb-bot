@@ -35,8 +35,9 @@ def build_report_empty():
         "markets_seen": 0, "evaluations": 0, "fok_passed": 0, "accepts": 0,
         "invalid_json": 0, "rejection_reasons": {},
         "opportunity_duration_ms": {"p50": None, "p95": None, "max": None},
-        "source_age_ms": {"p50": None, "p95": None, "max": None},
-        "performance": {"completed": 0, "wins": 0, "losses": 0, "simulated_pnl": 0.0,
+        "source_age_ms": {"latest": None, "p50": None, "p95": None, "p99": None,
+                          "max": None, "samples": 0},
+        "performance": {"completed": 0, "wins": 0, "losses": 0, "simulated_pnl": None,
                         "win_rate": None, "sharpe": None, "sharpe_samples": 0},
         "equity_curve": [], "trade_ledger": [],
     }
@@ -88,19 +89,34 @@ def _signal_block_reason(signal, config):
 def _strategy_score(event):
     blockers = {"books_not_synced", "up_depth", "down_depth", "fee_schedule_unavailable",
                 "net_cost_above_threshold", "execution_value_below_threshold", "closing_window"}
-    if not event or event.get("reason") in blockers or event.get("event_type") != "shadow_opportunity":
-        return {"total": 0, "blocked": True, "components": {}}
+    if not event:
+        return {"total": 0, "blocked": True, "components": {}, "metrics": {}, "checks": {}}
     size = max(float(event.get("size", 0)), 1e-9)
-    eev = max(0.0, min(1.0, float(event.get("expected_execution_value", 0)) / 0.01))
+    expected_value = event.get("expected_execution_value")
+    eev = max(0.0, min(1.0, float(expected_value or 0) / 0.01))
     depth = max(0.0, min(1.0, min(float(event.get("up_fill", 0)), float(event.get("down_fill", 0))) / size))
     freshness = max(0.0, min(1.0, 1 - float(event.get("source_age_ms", 1000)) / 1000))
-    skew = max(0.0, min(1.0, 1 - float(event.get("book_skew_ms", 500)) / 500))
+    book_skew_ms = abs(float(event.get("up_book_age_ms", 500)) - float(event.get("down_book_age_ms", 0)))
+    skew = max(0.0, min(1.0, 1 - book_skew_ms / 500))
     leg_risk = max(0.0, min(1.0, float(event.get("leg_1_fill_probability", 0)) *
                             float(event.get("leg_2_fill_probability", 0)) *
                             (1 - min(1.0, float(event.get("orphan_leg_loss", 1))))))
     components = {"eev": eev, "depth": depth, "freshness": freshness, "book_skew": skew, "leg_risk": leg_risk}
     total = 100 * (0.35 * eev + 0.20 * depth + 0.15 * freshness + 0.15 * skew + 0.15 * leg_risk)
-    return {"total": round(total, 2), "blocked": False, "components": components}
+    blocked = event.get("reason") in blockers or event.get("decision") != "ACCEPT"
+    checks = {
+        "depth": "PASS" if event.get("fok") and depth >= 1 else "FAIL",
+        "freshness": "PASS" if event.get("source_age_ms") is not None and freshness > 0 else "FAIL",
+        "book_sync": "PASS" if event.get("books_synced") is True else "FAIL",
+        "leg_risk": "PASS" if event.get("leg_1_fill_probability") is not None and event.get("leg_2_fill_probability") is not None else "N/A",
+        "net_cost": "PASS" if float(event.get("locked_profit", 0)) > 0 else "FAIL",
+    }
+    metrics = {"expected_execution_value": expected_value, "depth_ratio": depth,
+               "source_age_ms": event.get("source_age_ms"), "book_skew_ms": book_skew_ms,
+               "leg_1_fill_probability": event.get("leg_1_fill_probability"),
+               "leg_2_fill_probability": event.get("leg_2_fill_probability")}
+    return {"total": 0 if blocked else round(total, 2), "blocked": blocked,
+            "components": components, "metrics": metrics, "checks": checks}
 
 
 def build_status(data_dir, log_file, state_file):
@@ -145,6 +161,7 @@ def build_status(data_dir, log_file, state_file):
     shadow_health = _json(data_dir / "shadow-health.json", {})
     shadow_health_age = time.time() - shadow_health.get("updated_at", 0)
     shadow_health["stale"] = shadow_health_age > 5
+    shadow_health["resyncs"] = int(shadow_health.get("full_resyncs", 0))
     if not shadow_health or shadow_health["stale"] or not shadow_health.get("ws_connected"):
         system_status = "BLOCKED"
     elif reference_prices["stale"]:
@@ -171,13 +188,35 @@ def build_status(data_dir, log_file, state_file):
             cell["count"] += 1
     latest_event = next(iter(latest_shadow.values()), None)
     strategy_score = _strategy_score(latest_event)
+    ready_markets = int(shadow_health.get("ready_markets", 0))
+    clob_readiness = {
+        "discovered_markets": len(markets), "paired_markets_ready": ready_markets,
+        "not_ready": max(0, len(markets) - ready_markets),
+        "waiting_up_snapshot": int(shadow_health.get("waiting_up_snapshot", 0)),
+        "waiting_down_snapshot": int(shadow_health.get("waiting_down_snapshot", 0)),
+    }
+    pair_fields = ("market_id", "up_vwap", "down_vwap", "gross_cost", "up_fee", "down_fee",
+                   "buffer", "net_cost", "guaranteed_payout", "locked_profit",
+                   "expected_execution_value", "decision", "reason")
+    current_pair = {key: latest_event.get(key) for key in pair_fields} if latest_event else {}
     engine_latency = reference_prices.get("engine_latency_us")
+    def age_snapshot(source):
+        values = sorted(float(item[f"{source}_source_age_ms"]) + max(reference_age_ms, 0)
+                        for item in reference_prices.get("assets", {}).values()
+                        if item.get(f"{source}_source_age_ms", -1) >= 0)
+        return {"latest": values[-1] if values else None,
+                "p50": values[len(values) // 2] if values else None,
+                "p95": values[min(len(values) - 1, round((len(values) - 1) * .95))] if values else None,
+                "p99": values[-1] if values else None, "samples": len(values), "unit": "ms",
+                "metric": "message_age"}
+    clob_age = dict(report["source_age_ms"])
+    clob_age.update({"unit": "ms", "metric": "message_age"})
     latency_rankings = {
-        "polymarket": {"latest": None, "p50": None, "p95": None, "p99": None, "samples": 0, "unit": "ms"},
-        "binance": {"latest": None, "p50": None, "p95": None, "p99": None, "samples": 0, "unit": "ms"},
-        "chainlink": {"latest": None, "p50": None, "p95": None, "p99": None, "samples": 0, "unit": "ms"},
+        "polymarket": clob_age,
+        "binance": age_snapshot("binance"),
+        "chainlink": age_snapshot("chainlink"),
         "engine": {"latest": engine_latency, "p50": None, "p95": None, "p99": None,
-                   "samples": int(engine_latency is not None), "unit": "us"},
+                   "samples": int(engine_latency is not None), "unit": "us", "metric": "processing_time"},
     }
     return {
         "ts": int(time.time()),
@@ -210,12 +249,14 @@ def build_status(data_dir, log_file, state_file):
         "trade_ledger": report["trade_ledger"],
         "pnl_meter": {"simulated_pnl": report["performance"]["simulated_pnl"], "realized_pnl": 0.0},
         "strategy_score": strategy_score,
+        "current_pair": current_pair,
+        "clob_readiness": clob_readiness,
         "pipeline_steps": {
             "ingest": "PASS" if markets else "BLOCKED",
             "clob_snap": "PASS" if shadow_health.get("ready_markets", 0) else "BLOCKED",
             "replay": "PASS" if report["evaluations"] else "N/A",
             "backtest": "N/A",
-            "validate": "PASS" if latest_event else "N/A",
+            "validate": "PASS" if latest_event and latest_event.get("decision") == "ACCEPT" else "BLOCKED" if latest_event else "N/A",
             "approve": "PASS" if latest_event and latest_event.get("event_type") == "shadow_opportunity" else "BLOCKED",
             "deploy": "BLOCKED",
         },

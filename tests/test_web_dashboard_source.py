@@ -37,3 +37,17 @@ def test_dashboard_renders_binance_and_chainlink_independently():
     assert "chainlink_stale" in source
     assert "BINANCE" in source
     assert "CHAINLINK" in source
+
+
+def test_dashboard_uses_consistent_pair_audit_and_status_labels():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    for label in (
+        "GROSS COST", "FEES", "BUFFER", "NET COST", "GUARANTEED PAYOUT",
+        "LOCKED PROFIT", "COMPLETED TRADES", "PAIRED MARKETS READY",
+        "NOT READY", "MESSAGE AGE", "REFERENCE ONLY",
+    ):
+        assert label in source
+    assert "current_pair" in source
+    assert "expected_execution_value" in source
+    assert "h.resyncs" in source
+    assert "h.resync_count" not in source
