@@ -14,6 +14,7 @@ ASSET_SYMBOLS = {
     "XRP": "XRPUSDT",
     "Dogecoin": "DOGEUSDT",
     "BNB": "BNBUSDT",
+    "Hyperliquid": "HYPEUSDT",
 }
 
 ASSET_SLUGS = {
@@ -23,6 +24,12 @@ ASSET_SLUGS = {
     "XRP": "xrp",
     "Dogecoin": "doge",
     "BNB": "bnb",
+    "Hyperliquid": "hype",
+}
+
+ASSET_CODES = {
+    "Bitcoin": "BTC", "Ethereum": "ETH", "Solana": "SOL", "XRP": "XRP",
+    "Dogecoin": "DOGE", "BNB": "BNB", "Hyperliquid": "HYPE",
 }
 
 INTERVAL_SECONDS = {
@@ -42,7 +49,9 @@ class MarketScanner:
         for event in events:
             candidates = event.get("markets") or [event]
             for market in candidates:
-                spec = self.spec_from_market(market, event)
+                spec = self.spec_from_market(
+                    market, event, interval=event.get("_interval"), series_id=event.get("_series_id")
+                )
                 if spec is not None:
                     specs.append(spec)
         return specs
@@ -56,7 +65,10 @@ class MarketScanner:
                     candidates.append(market)
         return candidates
 
-    def spec_from_market(self, market: Dict[str, Any], event: Dict[str, Any] = None) -> Optional[LiveMarketSpec]:
+    def spec_from_market(
+        self, market: Dict[str, Any], event: Dict[str, Any] = None,
+        interval: str = None, series_id: str = None,
+    ) -> Optional[LiveMarketSpec]:
         event = event or {}
         title = str(first_present(market, ("question", "title", "slug")) or first_present(event, ("title", "slug")) or "")
         asset = self._asset_from_title(title)
@@ -82,12 +94,14 @@ class MarketScanner:
         return LiveMarketSpec(
             market_id=condition_id,
             title=title,
-            asset=asset,
+            asset=ASSET_CODES[asset],
             symbol=self.assets[asset],
             open_price=open_price,
             close_ts=close_ts,
             up_token_id=up_token_id,
             down_token_id=down_token_id,
+            interval=interval,
+            series_id=series_id,
             fee_rate=self._fee_rate(market),
         )
 
@@ -169,8 +183,16 @@ class MarketScanner:
                     slugs.append(f"{prefix}-updown-{interval}-{start}")
         return slugs
 
-    def updown_series_slugs(self, intervals: Iterable[str]) -> List[str]:
-        return [f"btc-up-or-down-{interval}" for interval in intervals]
+    def updown_series_slugs(self, intervals: Iterable[str]):
+        rows = []
+        for asset, prefix in ASSET_SLUGS.items():
+            if asset not in self.assets:
+                continue
+            for interval in intervals:
+                if interval not in INTERVAL_SECONDS:
+                    raise ValueError(f"unsupported interval: {interval}")
+                rows.append((ASSET_CODES[asset], interval, f"{prefix}-up-or-down-{interval}"))
+        return rows
 
     def _open_price(self, market: Dict[str, Any], event: Dict[str, Any]) -> Optional[float]:
         direct = first_present(

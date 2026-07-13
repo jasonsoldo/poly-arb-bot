@@ -12,7 +12,7 @@ from .cpp_bridge import score_positions_cpp
 from .execution_engine import ExecutionEngine
 from .live_signals import LiveMarketSpec, LiveSignalBuilder
 from .logger import JsonlLogger
-from .market_scanner import MarketScanner
+from .market_scanner import INTERVAL_SECONDS, MarketScanner
 from .models import MarketSignal, PositionCurve
 from .polymarket_data import PolymarketDataClient, parse_jsonish, parse_timestamp_seconds
 from .position_manager import PositionManager
@@ -73,15 +73,36 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     now_ts = int(base_ts or time.time())
     series_slugs = scanner.updown_series_slugs(interval_list)
     events = []
-    for series_slug in series_slugs:
+    missing_series = 0
+    missing_events = 0
+    for asset, interval, series_slug in series_slugs:
+        found_series = False
         for series in client.series_by_slug(series_slug):
-            series_events = client.events_by_series_window(str(series.get("id")), now_ts, now_ts + 3600)
-            for event in current_series_events(series_events, now_ts, limit=2):
+            found_series = True
+            series_id = str(series.get("id"))
+            horizon = INTERVAL_SECONDS[interval] * 2
+            series_events = client.events_by_series_window(series_id, now_ts, now_ts + horizon)
+            selected = current_series_events(series_events, now_ts, limit=2, horizon_seconds=horizon)
+            if not selected:
+                missing_events += 1
+            for event in selected:
+                event["_asset"] = asset
+                event["_interval"] = interval
+                event["_series_id"] = series_id
                 event["markets"] = tradable_markets(event.get("markets") or [])
                 if event["markets"]:
                     events.append(event)
+        if not found_series:
+            missing_series += 1
     specs = scanner.specs_from_events(events)
-    unique = {spec.market_id: spec for spec in specs}
+    unique = {}
+    used_tokens = set()
+    for spec in specs:
+        tokens = {spec.up_token_id, spec.down_token_id}
+        if spec.market_id in unique or len(tokens) != 2 or used_tokens.intersection(tokens):
+            continue
+        unique[spec.market_id] = spec
+        used_tokens.update(tokens)
     clob = PolymarketClobClient()
     diagnostics = {}
     examples = []
@@ -93,10 +114,13 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     print(f"CLOB_VALID markets={len(unique)} rejected={rejected} {detail}".rstrip())
     for example in examples[:5]:
         print(f"CLOB_REJECT market_id={example[0]} token_id={example[1]} reason={example[2]}")
-    print(f"GAMMA_SERIES series_checked={len(series_slugs)} current_events={len(events)} parsed_markets={len(specs)}")
+    print(
+        f"GAMMA_SERIES series_checked={len(series_slugs)} series_not_found={missing_series} "
+        f"event_not_found={missing_events} current_events={len(events)} parsed_markets={len(specs)}"
+    )
     print(f"{'WROTE' if unique else 'KEPT'} {output_path} markets={len(unique)}")
     if not unique and not rejected:
-        print("NO_CURRENT_UPDOWN_MARKETS no current event in official 5m/15m recurring series")
+        print("NO_CURRENT_UPDOWN_MARKETS no current event in configured official recurring series")
     return 0 if unique else 3
 
 
@@ -112,12 +136,12 @@ def write_market_payload_atomic(output_path: Path, payload, generated_at: int) -
     os.replace(temporary, output_path)
 
 
-def current_series_events(events, now_ts, limit=None):
+def current_series_events(events, now_ts, limit=None, horizon_seconds=3600):
     current = [
         event for event in events
         if event.get("active") and not event.get("closed")
         and (close_ts := parse_timestamp_seconds(event.get("endDate"))) is not None
-        and now_ts < close_ts <= now_ts + 3600
+        and now_ts < close_ts <= now_ts + horizon_seconds
     ]
     current.sort(key=lambda event: parse_timestamp_seconds(event.get("endDate")))
     return current[:limit] if limit is not None else current

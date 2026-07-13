@@ -143,4 +143,32 @@ def test_tradable_markets_requires_orderbook_and_accepting_orders():
 
 def test_scanner_generates_official_recurring_series_slugs():
     slugs = MarketScanner().updown_series_slugs(["5m", "15m"])
-    assert slugs == ["btc-up-or-down-5m", "btc-up-or-down-15m"]
+    assert len(slugs) == 14
+    assert ("BTC", "5m", "btc-up-or-down-5m") in slugs
+    assert ("HYPE", "15m", "hype-up-or-down-15m") in slugs
+
+
+def test_scanner_generates_seven_asset_four_timeframe_matrix():
+    rows = MarketScanner().updown_series_slugs(["5m", "15m", "1h", "4h"])
+    assert len(rows) == 28
+    assert ("BTC", "5m", "btc-up-or-down-5m") in rows
+    assert ("HYPE", "4h", "hype-up-or-down-4h") in rows
+
+
+def test_scanner_spec_carries_canonical_asset_interval_and_series():
+    market = {
+        "conditionId": "0xcondition", "question": "XRP Up or Down - July 13, 4AM-8AM ET",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-13T12:00:00Z",
+    }
+    spec = MarketScanner().spec_from_market(market, interval="4h", series_id="42")
+    assert (spec.asset, spec.interval, spec.series_id) == ("XRP", "4h", "42")
+
+
+def test_current_series_events_supports_two_four_hour_windows():
+    now = 1783857600
+    events = [
+        {"id": "current", "endDate": "2026-07-12T16:00:00Z", "active": True, "closed": False},
+        {"id": "next", "endDate": "2026-07-12T20:00:00Z", "active": True, "closed": False},
+    ]
+    assert [x["id"] for x in current_series_events(events, now, limit=2, horizon_seconds=28800)] == ["current", "next"]
