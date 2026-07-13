@@ -18,6 +18,7 @@ class ClobBook:
     asks: List[ClobLevel]
     latency_ms: int
     timestamp_ms: int
+    fee_rate: Optional[float] = None
 
     @property
     def best_bid(self) -> Optional[float]:
@@ -46,7 +47,7 @@ class ClobBook:
 
 class PolymarketClobClient:
     def __init__(self, http: HttpClient = None, base_url: str = "https://clob.polymarket.com"):
-        self.http = http or HttpClient(timeout=1.5)
+        self.http = http or HttpClient(timeout=15.0)
         self.base_url = base_url
 
     def get_book(self, token_id: str) -> ClobBook:
@@ -63,6 +64,24 @@ class PolymarketClobClient:
             latency_ms=response.elapsed_ms,
             timestamp_ms=int(time.time() * 1000),
         )
+
+    def get_books(self, token_ids: List[str]) -> Dict[str, ClobBook]:
+        response = self.http.post_json(self.base_url, "/books", [{"token_id": token_id} for token_id in token_ids])
+        books = {}
+        for data in response.data if isinstance(response.data, list) else []:
+            token_id = str(data.get("asset_id") or "")
+            schedule = data.get("fee_schedule") if isinstance(data.get("fee_schedule"), dict) else {}
+            fee_value = schedule.get("rate", data.get("taker_base_fee"))
+            try:
+                fee_rate = float(fee_value) if fee_value is not None else None
+            except (TypeError, ValueError):
+                fee_rate = None
+            books[token_id] = ClobBook(
+                token_id, self._levels(data.get("bids", []), reverse=True),
+                self._levels(data.get("asks", []), reverse=False), response.elapsed_ms,
+                int(time.time() * 1000), fee_rate,
+            )
+        return books
 
     def get_market_price(self, token_id: str, side: str = "BUY") -> float:
         response = self.http.get_json(self.base_url, "/price", {"token_id": token_id, "side": side})

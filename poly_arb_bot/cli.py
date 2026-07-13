@@ -75,6 +75,9 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     series_slugs = scanner.updown_series_slugs(interval_list)
     events = []
     candidates = {slug: (asset, interval) for asset, interval, slug in series_slugs}
+    gamma_request_count = 0
+    stage_started = time.monotonic()
+    print(f"GAMMA_SERIES_START candidates={len(candidates)} active_workers=4", flush=True)
 
     def fetch_series(slugs):
         try:
@@ -83,12 +86,17 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
             return [], 1
 
     series_batches = [list(candidates)[index:index + 7] for index in range(0, len(candidates), 7)]
+    gamma_request_count += len(series_batches)
     matching_series = []
     series_errors = 0
     with ThreadPoolExecutor(max_workers=4) as executor:
         for rows, errors in executor.map(fetch_series, series_batches):
             matching_series.extend(rows)
             series_errors += errors
+    print(
+        f"GAMMA_SERIES_DONE elapsed_ms={int((time.monotonic() - stage_started) * 1000)} "
+        f"gamma_request_count={gamma_request_count} matched={len(matching_series)} errors={series_errors}", flush=True,
+    )
     matched_slugs = set()
     missing_events = 0
     series_by_id = {}
@@ -116,13 +124,22 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
 
         event_slugs = list(event_candidates)
         event_batches = [event_slugs[index:index + 20] for index in range(0, len(event_slugs), 20)]
+        stage_started = time.monotonic()
+        gamma_request_count += len(event_batches)
+        print(f"GAMMA_EVENTS_START candidates={len(event_slugs)} active_workers=4", flush=True)
         window_events = []
         with ThreadPoolExecutor(max_workers=4) as executor:
             for rows, errors in executor.map(fetch_events, event_batches):
                 window_events.extend(rows)
                 series_errors += errors
+        print(
+            f"GAMMA_EVENTS_DONE elapsed_ms={int((time.monotonic() - stage_started) * 1000)} "
+            f"gamma_request_count={gamma_request_count} events={len(window_events)} errors={series_errors}", flush=True,
+        )
     else:
         window_events = []
+        print(f"GAMMA_EVENTS_START candidates=0 active_workers=0", flush=True)
+        print(f"GAMMA_EVENTS_DONE elapsed_ms=0 gamma_request_count={gamma_request_count} events=0 errors={series_errors}", flush=True)
     grouped_events = {series_id: [] for series_id in series_by_id}
     for event in window_events:
         series_id = event_candidates.get(str(event.get("slug") or ""))
@@ -150,18 +167,28 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
             continue
         unique[spec.market_id] = spec
         used_tokens.update(tokens)
-    print(
-        f"GAMMA_DISCOVERY series={len(series_by_id)} event_candidates={len(event_candidates)} "
-        f"events={len(events)} unique_markets={len(unique)}",
-        flush=True,
-    )
+    print(f"MARKET_PARSE_DONE candidates={len(specs)} unique_markets={len(unique)}", flush=True)
     clob = PolymarketClobClient()
     diagnostics = {}
     examples = []
+    stage_started = time.monotonic()
+    print(
+        f"CLOB_VALIDATE_START candidates={len(unique)} active_workers={min(8, len(unique))} "
+        f"clob_request_count={1 if unique else 0}", flush=True,
+    )
     valid, rejected = filter_specs_with_orderbooks(list(unique.values()), clob, diagnostics, examples)
+    print(
+        f"CLOB_VALIDATE_DONE elapsed_ms={int((time.monotonic() - stage_started) * 1000)} "
+        f"completed_workers={len(unique)} valid={len(valid)} rejected={rejected}", flush=True,
+    )
     unique = {spec.market_id: spec for spec in valid}
     if unique:
+        print(f"WRITE_START path={output_path} markets={len(unique)}", flush=True)
         write_market_payload_atomic(output_path, scanner.to_payload(unique.values()), now_ts)
+        print(f"WRITE_DONE path={output_path} markets={len(unique)}", flush=True)
+    else:
+        print(f"WRITE_START path={output_path} markets=0", flush=True)
+        print(f"WRITE_DONE path={output_path} markets=0 kept=true", flush=True)
     detail = " ".join(f"{key}={value}" for key, value in sorted(diagnostics.items()))
     print(f"CLOB_VALID markets={len(unique)} rejected={rejected} {detail}".rstrip())
     for example in examples[:5]:
@@ -207,6 +234,29 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
     valid = []
     diagnostics = diagnostics if diagnostics is not None else {}
     examples = examples if examples is not None else []
+
+    if hasattr(clob, "get_books"):
+        try:
+            books = clob.get_books([token for spec in specs for token in (spec.up_token_id, spec.down_token_id)])
+        except Exception as exc:
+            diagnostics["http_error"] = len(specs)
+            examples.append(("", "", str(exc)[:240]))
+            return [], len(specs)
+        for spec in specs:
+            up_book = books.get(spec.up_token_id)
+            down_book = books.get(spec.down_token_id)
+            if up_book is None or down_book is None:
+                diagnostics["no_orderbook"] = diagnostics.get("no_orderbook", 0) + 1
+                continue
+            fee_rate = up_book.fee_rate or down_book.fee_rate or spec.fee_rate
+            if fee_rate is None or fee_rate <= 0:
+                diagnostics["fee_schedule_unavailable"] = diagnostics.get("fee_schedule_unavailable", 0) + 1
+                continue
+            if not up_book.asks or not down_book.asks:
+                diagnostics["empty_asks"] = diagnostics.get("empty_asks", 0) + 1
+                continue
+            valid.append(replace(spec, fee_rate=fee_rate))
+        return valid, len(specs) - len(valid)
 
     def validate(spec):
         try:

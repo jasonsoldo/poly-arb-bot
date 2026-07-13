@@ -26,14 +26,17 @@ class HttpClient:
             url = f"{url}?{query}"
         return self._json_request("GET", url)
 
-    def post_json(self, base_url: str, path: str, payload: Dict[str, Any]) -> HttpResponse:
+    def post_json(self, base_url: str, path: str, payload: Any) -> HttpResponse:
         url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
         body = json.dumps(payload).encode("utf-8")
         return self._json_request("POST", url, body)
 
     def _json_request(self, method: str, url: str, body: Optional[bytes] = None) -> HttpResponse:
         started = time.monotonic()
-        headers = {"Accept": "application/json", "User-Agent": self.user_agent}
+        headers = {
+            "Accept": "application/json", "User-Agent": self.user_agent,
+            "Accept-Encoding": "identity", "Connection": "close",
+        }
         if body is not None:
             headers["Content-Type"] = "application/json"
         request = Request(url, data=body, headers=headers, method=method)

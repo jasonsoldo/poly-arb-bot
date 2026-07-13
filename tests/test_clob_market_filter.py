@@ -90,3 +90,22 @@ def test_invalid_token_is_not_reported_as_missing_orderbook():
     assert not valid
     assert rejected == 1
     assert diagnostics == {"invalid_token": 1}
+
+
+def test_filter_uses_one_batch_book_request_when_available():
+    class BatchClob:
+        def __init__(self):
+            self.calls = []
+
+        def get_books(self, token_ids):
+            self.calls.append(token_ids)
+            return {
+                "gamma-up": ClobBook("gamma-up", [], [ClobLevel(0.4, 10)], 1, 1, 0.07),
+                "gamma-down": ClobBook("gamma-down", [], [ClobLevel(0.5, 10)], 1, 1, 0.07),
+            }
+
+    clob = BatchClob()
+    valid, rejected = filter_specs_with_orderbooks([spec()], clob)
+    assert rejected == 0
+    assert valid[0].fee_rate == 0.07
+    assert clob.calls == [["gamma-up", "gamma-down"]]
