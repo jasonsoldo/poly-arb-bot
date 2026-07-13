@@ -64,3 +64,23 @@ def test_web_status_summarizes_cpp_shadow_audit(tmp_path):
     assert status["counts"]["fok_passed"] == 1
     assert status["counts"]["shadow_opportunities"] == 1
     assert status["shadow_markets"][0]["event_type"] == "shadow_opportunity"
+
+
+def test_web_status_prefers_canonical_cpp_audit_over_legacy_order_log(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir()
+    logs.mkdir()
+    (data / "live_snapshot.json").write_text(json.dumps({"signals": []}), encoding="utf-8")
+    (data / "live_markets.json").write_text(json.dumps({"markets": [{"market_id": "m1"}]}), encoding="utf-8")
+    legacy = logs / "orders.jsonl"
+    legacy.write_text(json.dumps({"event_type": "order_decision"}), encoding="utf-8")
+    (logs / "shadow-audit.jsonl").write_text(
+        json.dumps({"event_type": "shadow_eval", "market_id": "m1", "reason": "no_edge", "fok": True}),
+        encoding="utf-8",
+    )
+
+    status = build_status(data, legacy, tmp_path / "state.json")
+
+    assert status["counts"]["shadow_evaluations"] == 1
+    assert status["shadow_markets"][0]["market_id"] == "m1"

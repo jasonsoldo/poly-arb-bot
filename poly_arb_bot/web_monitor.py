@@ -54,7 +54,8 @@ def build_status(data_dir, log_file, state_file):
     snapshot = _json(data_dir / "live_snapshot.json", {"signals": [], "positions": []})
     market_ids = {item.get("market_id") for item in _json(data_dir / "live_markets.json", {"markets": []}).get("markets", [])}
     signals = [item for item in snapshot.get("signals", []) if item.get("market_id") in market_ids]
-    events = _jsonl(log_file, limit=1000)
+    shadow_log = data_dir.parent / "logs" / "shadow-audit.jsonl"
+    events = _jsonl(shadow_log if shadow_log.exists() else log_file, limit=1000)
     shadow_events = [item for item in events if item.get("event_type") in {"shadow_eval", "shadow_opportunity"}]
     latest_shadow = {}
     for item in shadow_events:
