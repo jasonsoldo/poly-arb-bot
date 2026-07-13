@@ -63,3 +63,10 @@ def test_rtds_subscription_contains_only_officially_supported_crypto_symbols():
         assert symbol in subscription
     for unsupported in ("bnbusdt", "dogeusdt", "hypeusdt", "doge/usd"):
         assert unsupported not in subscription
+
+
+def test_rtds_sends_documented_heartbeat_and_logs_unmatched_frame_shape():
+    assert 'std::string("PING")' in SOURCE
+    assert "REFERENCE_UNMATCHED" in SOURCE
+    for field in ("topic=", "type=", "symbol="):
+        assert field in SOURCE

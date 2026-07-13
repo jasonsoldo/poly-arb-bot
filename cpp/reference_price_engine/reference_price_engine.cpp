@@ -252,6 +252,7 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
             set_connected(shared, source, true);
             if (!linked_source.empty()) set_connected(shared, linked_source, true);
             std::cerr << "REFERENCE_CONNECTED source=" << source << "\n";
+            double last_ping = now_ms();
             for (;;) {
                 beast::flat_buffer buffer;
                 ws.read(buffer);
@@ -259,6 +260,10 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
                 if (raw == "PONG") continue;
                 try { handler(raw); }
                 catch (...) { std::lock_guard<std::mutex> lock(shared.mutex); ++shared.unmatched_messages; }
+                if (!linked_source.empty() && now_ms() - last_ping >= 5000) {
+                    ws.write(asio::buffer(std::string("PING")));
+                    last_ping = now_ms();
+                }
             }
         } catch (const std::exception& error) {
             set_connected(shared, source, false);
@@ -305,7 +310,13 @@ int main(int argc, char** argv) {
                 if (topic == "crypto_prices_chainlink" && symbol == config.chainlink)
                     return publish(shared, config.asset, "chainlink", row.get<double>("payload.value"), 0, 0, row.get<std::string>("payload.timestamp", ""));
             }
-            std::lock_guard<std::mutex> lock(shared.mutex); ++shared.unmatched_messages;
+            std::lock_guard<std::mutex> lock(shared.mutex);
+            ++shared.unmatched_messages;
+            if (shared.unmatched_messages <= 20) {
+                std::cerr << "REFERENCE_UNMATCHED source=rtds topic=" << topic
+                          << " type=" << row.get<std::string>("type", "")
+                          << " symbol=" << symbol << " raw=" << raw.substr(0, 500) << "\n";
+            }
         });
     });
     std::thread coinbase([&] {
