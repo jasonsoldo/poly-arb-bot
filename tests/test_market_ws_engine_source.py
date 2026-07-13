@@ -82,3 +82,7 @@ def test_static_books_stay_usable_while_websocket_feed_is_live():
     assert "up_age_ms <= 2000" not in SOURCE
     assert '\\\"up_book_age_ms\\\":' in SOURCE
     assert '\\\"down_book_age_ms\\\":' in SOURCE
+
+
+def test_audit_stream_preserves_unix_timestamp_precision():
+    assert "audit_ << std::setprecision(15);" in SOURCE

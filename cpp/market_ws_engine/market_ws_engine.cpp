@@ -158,6 +158,7 @@ public:
           orphan_loss_per_share_(orphan_loss_per_share), min_expected_value_(min_expected_value),
           last_activity_(now_seconds()), audit_(audit_path, std::ios::app), markets_path_(markets_path), health_path_(health_path),
           document_version_(document_version), generation_(1), ws_session_id_(++next_session_id_) {
+        audit_ << std::setprecision(15);
         for (auto& item : books_) item.second.generation = generation_;
     }
 
