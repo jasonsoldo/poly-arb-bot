@@ -14,6 +14,7 @@
 #include <cmath>
 #include <deque>
 #include <fstream>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -150,12 +151,12 @@ public:
                     std::map<std::string, Book> books, double size, double fee, double buffer_per_share,
                     double min_profit, double leg_interval_us, double execution_half_life_us,
                     double orphan_loss_per_share, double min_expected_value, const std::string& audit_path,
-                    const std::string& markets_path, unsigned long long document_version)
+                    const std::string& markets_path, unsigned long long document_version, const std::string& health_path)
         : io_(io), ssl_(ssl), resolver_(io), ws_(io, ssl), timer_(io), reload_timer_(io), markets_(std::move(markets)), books_(std::move(books)),
           size_(size), fallback_fee_(fee), buffer_per_share_(buffer_per_share), min_profit_(min_profit),
           leg_interval_us_(leg_interval_us), execution_half_life_us_(execution_half_life_us),
           orphan_loss_per_share_(orphan_loss_per_share), min_expected_value_(min_expected_value),
-          last_activity_(now_seconds()), audit_(audit_path, std::ios::app), markets_path_(markets_path),
+          last_activity_(now_seconds()), audit_(audit_path, std::ios::app), markets_path_(markets_path), health_path_(health_path),
           document_version_(document_version), generation_(1), ws_session_id_(++next_session_id_) {
         for (auto& item : books_) item.second.generation = generation_;
     }
@@ -196,6 +197,7 @@ private:
         schedule_reload();
         do_read();
         std::cout << "connected tokens=" << assets.size() << "\n" << std::flush;
+        write_health(true);
     }
 
     void do_read() { ws_.async_read(buffer_, beast::bind_front_handler(&MarketWsSession::on_read, shared_from_this())); }
@@ -333,6 +335,25 @@ private:
                                        << ",\"fee_rate\":" << rate << ",\"fees\":" << up_fee + down_fee << ",\"net_cost\":" << net_cost << ",\"locked_profit\":" << profit
                                        << ",\"fok\":true,\"duration_ms\":" << (timestamp - item.second.active_since) * 1000 << "}\n" << std::flush;
         }
+        if (now_seconds() - last_health_write_ >= 1) write_health(true);
+    }
+
+    void write_health(bool connected) {
+        size_t ready = 0;
+        for (const auto& item : markets_)
+            if (books_[item.second.up].ws_snapshot && books_[item.second.down].ws_snapshot) ++ready;
+        const std::string temporary = health_path_ + ".tmp";
+        std::ofstream out(temporary, std::ios::trunc);
+        out << std::setprecision(15);
+        out << "{\"updated_at\":" << now_seconds() << ",\"ws_connected\":" << (connected ? "true" : "false")
+            << ",\"ws_session_id\":" << ws_session_id_ << ",\"subscription_generation\":" << generation_
+            << ",\"document_version\":" << document_version_ << ",\"markets\":" << markets_.size()
+            << ",\"tokens\":" << books_.size() << ",\"ready_markets\":" << ready
+            << ",\"last_market_data_at\":" << last_activity_ << ",\"full_resyncs\":" << full_resync_count_
+            << ",\"book_events\":" << book_events_ << ",\"price_changes\":" << price_changes_ << "}\n";
+        out.close();
+        std::filesystem::rename(temporary, health_path_);
+        last_health_write_ = now_seconds();
     }
 
     void schedule_ping() {
@@ -431,6 +452,7 @@ private:
     void fail(const char* stage, beast::error_code ec) {
         if (stopped_) return;
         stopped_ = true; timer_.cancel(); reload_timer_.cancel();
+        write_health(false);
         std::cerr << "WS_ERROR stage=" << stage << " code=" << ec.value() << " message=" << ec.message() << "\n";
     }
 
@@ -450,7 +472,8 @@ private:
     unsigned long long book_events_ = 0, price_changes_ = 0;
     bool stopped_ = false;
     std::ofstream audit_;
-    std::string markets_path_;
+    std::string markets_path_, health_path_;
+    double last_health_write_ = 0;
     unsigned long long document_version_, generation_, ws_session_id_, full_resync_count_ = 0;
     static std::atomic<unsigned long long> next_session_id_;
 };
@@ -458,7 +481,7 @@ private:
 std::atomic<unsigned long long> MarketWsSession::next_session_id_{0};
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::cerr << "usage: market_ws_engine <markets.json> [size] [fallback_fee_rate] [audit.jsonl] [buffer_per_share] [min_profit] [leg_interval_us] [execution_half_life_us] [orphan_loss_per_share] [min_expected_value]\n"; return 2; }
+    if (argc < 2) { std::cerr << "usage: market_ws_engine <markets.json> [size] [fallback_fee_rate] [audit.jsonl] [buffer_per_share] [min_profit] [leg_interval_us] [execution_half_life_us] [orphan_loss_per_share] [min_expected_value] [health.json]\n"; return 2; }
     try {
         unsigned long long document_version = 0;
         std::map<std::string, Market> markets = load_markets(argv[1], &document_version);
@@ -471,6 +494,7 @@ int main(int argc, char** argv) {
         const double execution_half_life_us = argc > 8 ? std::stod(argv[8]) : 250000;
         const double orphan_loss_per_share = argc > 9 ? std::stod(argv[9]) : .02;
         const double min_expected_value = argc > 10 ? std::stod(argv[10]) : .01;
+        const std::string health_path = argc > 11 ? argv[11] : "data/shadow-health.json";
         for (;;) {
             asio::io_context io; asio::ssl::context ssl(asio::ssl::context::tls_client);
             ssl.set_default_verify_paths(); ssl.set_verify_mode(asio::ssl::verify_peer);
@@ -481,7 +505,7 @@ int main(int argc, char** argv) {
             std::cerr << "BOOK_BOOTSTRAP_SUMMARY initialized=" << initialized << " tokens=" << books.size() << "\n";
             auto session = std::make_shared<MarketWsSession>(io, ssl, markets, std::move(books), size, fee, buffer_per_share,
                 min_profit, leg_interval_us, execution_half_life_us, orphan_loss_per_share, min_expected_value,
-                audit_path, argv[1], document_version);
+                audit_path, argv[1], document_version, health_path);
             session->run(); io.run();
             std::cerr << "WS_RECONNECT delay_s=2\n";
             std::this_thread::sleep_for(std::chrono::seconds(2));

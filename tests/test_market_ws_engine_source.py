@@ -65,3 +65,7 @@ def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
     assert "clock_skew_ms" in SOURCE
     assert "source_age_ms" in SOURCE
     assert '\\"fee_rate\\":' in SOURCE
+    assert "shadow-health.json" in SOURCE
+    assert "ready_markets" in SOURCE
+    assert "write_health(false)" in SOURCE
+    assert "std::setprecision(15)" in SOURCE

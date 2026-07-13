@@ -46,4 +46,4 @@ trap 'kill "$scanner_pid" "$reference_pid" 2>/dev/null || true' EXIT INT TERM
 echo "SHADOW_LOOP engine_start dynamic_reload_s=5 market_scan_s=$refresh_seconds"
 ./build/market_ws_engine data/live_markets.json "$size" "$fee_rate" logs/shadow-audit.jsonl \
   "$buffer_per_share" "$min_profit" "$leg_interval_us" "$execution_half_life_us" \
-  "$orphan_loss_per_share" "$min_expected_value"
+  "$orphan_loss_per_share" "$min_expected_value" data/shadow-health.json

@@ -17,3 +17,4 @@ def test_reference_engine_writes_atomic_status_and_reconnects():
     assert "divergence_bps" in SOURCE
     assert "engine_latency_us" in SOURCE
     assert "REFERENCE_ERROR" in SOURCE
+    assert "std::setprecision(15)" in SOURCE

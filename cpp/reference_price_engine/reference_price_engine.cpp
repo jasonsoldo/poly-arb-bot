@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -34,6 +35,7 @@ struct PriceState {
 void write_status(const std::string& path, const PriceState& state) {
     const std::string temporary = path + ".tmp";
     std::ofstream out(temporary, std::ios::trunc);
+    out << std::setprecision(15);
     const double timestamp = now_ms();
     out << "{\"updated_at_ms\":" << timestamp;
     if (state.binance) out << ",\"binance_btcusdt\":" << state.binance; else out << ",\"binance_btcusdt\":null";

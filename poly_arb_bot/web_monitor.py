@@ -1,7 +1,7 @@
 import json
 import mimetypes
 import time
-from collections import Counter
+from collections import Counter, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -19,7 +19,8 @@ def _jsonl(path, limit=100):
     if not path.exists():
         return []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+        with path.open(encoding="utf-8") as handle:
+            lines = deque(handle, maxlen=limit)
     except OSError:
         return []
     rows = []
@@ -59,7 +60,8 @@ def build_status(data_dir, log_file, state_file):
     shadow_events = [item for item in events if item.get("event_type") in {"shadow_eval", "shadow_opportunity"}]
     latest_shadow = {}
     for item in shadow_events:
-        latest_shadow.setdefault(item.get("market_id"), item)
+        if item.get("market_id") in market_ids:
+            latest_shadow.setdefault(item.get("market_id"), item)
     state = _json(state_file, {"client_order_ids": {}})
     reference_prices = _json(data_dir / "venue-status.json", {})
     reference_age_ms = time.time() * 1000 - reference_prices.get("updated_at_ms", 0)
@@ -67,6 +69,18 @@ def build_status(data_dir, log_file, state_file):
     if reference_prices["stale"]:
         for key in ("binance_btcusdt", "chainlink_btcusd", "divergence_usd", "divergence_bps"):
             reference_prices[key] = None
+    shadow_health = _json(data_dir / "shadow-health.json", {})
+    shadow_health_age = time.time() - shadow_health.get("updated_at", 0)
+    shadow_health["stale"] = shadow_health_age > 5
+    if not shadow_health or shadow_health["stale"] or not shadow_health.get("ws_connected"):
+        system_status = "BLOCKED"
+    elif reference_prices["stale"]:
+        system_status = "DEGRADED"
+    else:
+        system_status = "ONLINE"
+    rejection_reasons = Counter(
+        item.get("reason", "unknown") for item in shadow_events if item.get("decision") == "REJECT"
+    )
     decisions = list(state.get("client_order_ids", {}).values())
     decision_records = [item for item in decisions if isinstance(item, dict)]
     config = StrategyConfig()
@@ -92,6 +106,9 @@ def build_status(data_dir, log_file, state_file):
         },
         "shadow_markets": list(latest_shadow.values()),
         "reference_prices": reference_prices,
+        "shadow_health": shadow_health,
+        "system_status": system_status,
+        "rejection_reasons": dict(rejection_reasons),
         "blocked_reasons": dict(blocked),
         "risk_limits": {"max_seconds_to_close": config.max_seconds_to_close, "min_liquidity": config.min_liquidity},
         "latency_ms": {"polymarket": None, "binance": None, "chainlink": None, "engine": None},

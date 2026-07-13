@@ -108,3 +108,16 @@ def test_web_status_hides_stale_reference_prices(tmp_path):
     status = build_status(tmp_path, tmp_path / "orders.jsonl", tmp_path / "state.json")
     assert status["reference_prices"]["stale"] is True
     assert status["reference_prices"]["binance_btcusdt"] is None
+
+
+def test_web_status_combines_fresh_clob_and_reference_health(tmp_path):
+    now = time.time()
+    (tmp_path / "live_snapshot.json").write_text(json.dumps({"signals": []}), encoding="utf-8")
+    (tmp_path / "live_markets.json").write_text(json.dumps({"markets": [{"market_id": "m1"}]}), encoding="utf-8")
+    (tmp_path / "venue-status.json").write_text(json.dumps({"updated_at_ms": now * 1000}), encoding="utf-8")
+    (tmp_path / "shadow-health.json").write_text(
+        json.dumps({"updated_at": now, "ws_connected": True, "ready_markets": 1}), encoding="utf-8"
+    )
+    status = build_status(tmp_path, tmp_path / "orders.jsonl", tmp_path / "state.json")
+    assert status["system_status"] == "ONLINE"
+    assert status["shadow_health"]["ready_markets"] == 1
