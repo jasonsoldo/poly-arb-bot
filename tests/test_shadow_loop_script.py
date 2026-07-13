@@ -26,6 +26,11 @@ def test_shadow_loop_starts_cpp_reference_price_engine():
     assert 'kill "$scanner_pid" "$reference_pid"' in SCRIPT
 
 
+def test_shadow_loop_starts_shadow_execution_state_machine():
+    assert '"$python_bin" -m poly_arb_bot.shadow_execution' in SCRIPT
+    assert '"$execution_pid"' in SCRIPT
+
+
 def test_systemd_requires_ntp_and_logrotate_retains_thirty_days():
     service = Path("deploy/poly-arb-bot.service").read_text(encoding="utf-8")
     ntp = Path("scripts/check_ntp.sh").read_text(encoding="utf-8")

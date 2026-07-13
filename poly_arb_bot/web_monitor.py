@@ -5,7 +5,33 @@ from collections import Counter, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .shadow_report import build_report
 from .strategy_config import StrategyConfig
+
+
+_REPORT_CACHE = {}
+
+
+def _cached_report(path):
+    if not path.exists():
+        return build_report_empty()
+    stat = path.stat()
+    key = (stat.st_size, stat.st_mtime_ns)
+    cached = _REPORT_CACHE.get(str(path))
+    if cached and cached[0] == key:
+        return cached[1]
+    report = build_report(path)
+    _REPORT_CACHE[str(path)] = (key, report)
+    return report
+
+
+def build_report_empty():
+    return {
+        "markets_seen": 0, "evaluations": 0, "fok_passed": 0, "accepts": 0,
+        "invalid_json": 0, "rejection_reasons": {},
+        "opportunity_duration_ms": {"p50": None, "p95": None, "max": None},
+        "source_age_ms": {"p50": None, "p95": None, "max": None},
+    }
 
 
 def _json(path, default):
@@ -56,13 +82,20 @@ def build_status(data_dir, log_file, state_file):
     market_ids = {item.get("market_id") for item in _json(data_dir / "live_markets.json", {"markets": []}).get("markets", [])}
     signals = [item for item in snapshot.get("signals", []) if item.get("market_id") in market_ids]
     shadow_log = data_dir.parent / "logs" / "shadow-audit.jsonl"
-    events = _jsonl(shadow_log if shadow_log.exists() else log_file, limit=1000)
+    selected_log = shadow_log if shadow_log.exists() else log_file
+    events = _jsonl(selected_log, limit=1000)
+    report = _cached_report(selected_log)
     shadow_events = [item for item in events if item.get("event_type") in {"shadow_eval", "shadow_opportunity"}]
     latest_shadow = {}
     for item in shadow_events:
         if item.get("market_id") in market_ids:
             latest_shadow.setdefault(item.get("market_id"), item)
     state = _json(state_file, {"client_order_ids": {}})
+    shadow_execution = _json(
+        data_dir.parent / "state" / "shadow-execution.json",
+        {"state": "IDLE", "processed": [], "audit_offset": 0},
+    )
+    shadow_execution["real_order_submissions"] = 0
     reference_prices = _json(data_dir / "venue-status.json", {})
     reference_age_ms = time.time() * 1000 - reference_prices.get("updated_at_ms", 0)
     reference_prices["stale"] = reference_age_ms > 10_000
@@ -100,15 +133,17 @@ def build_status(data_dir, log_file, state_file):
             "executed_orders": sum(item.get("status") in {"filled", "partially_filled", "submitted"} for item in decision_records),
             "risk_decisions": len(decisions),
             "shadow_attempts": sum(item.get("status") == "dry_run" for item in decision_records),
-            "shadow_evaluations": sum(item.get("event_type") == "shadow_eval" for item in shadow_events),
-            "fok_passed": sum(item.get("event_type") == "shadow_eval" and item.get("fok") for item in shadow_events),
-            "shadow_opportunities": sum(item.get("event_type") == "shadow_opportunity" for item in shadow_events),
+            "shadow_evaluations": report["evaluations"],
+            "fok_passed": report["fok_passed"],
+            "shadow_opportunities": report["accepts"],
         },
         "shadow_markets": list(latest_shadow.values()),
         "reference_prices": reference_prices,
         "shadow_health": shadow_health,
+        "shadow_execution": shadow_execution,
         "system_status": system_status,
-        "rejection_reasons": dict(rejection_reasons),
+        "rejection_reasons": report["rejection_reasons"] or dict(rejection_reasons),
+        "shadow_report": report,
         "blocked_reasons": dict(blocked),
         "risk_limits": {"max_seconds_to_close": config.max_seconds_to_close, "min_liquidity": config.min_liquidity},
         "latency_ms": {"polymarket": None, "binance": None, "chainlink": None, "engine": None},

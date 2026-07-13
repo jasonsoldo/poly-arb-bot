@@ -121,3 +121,32 @@ def test_web_status_combines_fresh_clob_and_reference_health(tmp_path):
     status = build_status(tmp_path, tmp_path / "orders.jsonl", tmp_path / "state.json")
     assert status["system_status"] == "ONLINE"
     assert status["shadow_health"]["ready_markets"] == 1
+
+
+def test_web_status_exposes_shadow_execution_state(tmp_path):
+    data_dir = tmp_path / "data"
+    state_dir = tmp_path / "state"
+    data_dir.mkdir()
+    state_dir.mkdir()
+    (state_dir / "shadow-execution.json").write_text(
+        json.dumps({"state": "ORPHAN_HOLD", "market_id": "m1", "updated_at": 123}),
+        encoding="utf-8",
+    )
+
+    status = build_status(data_dir, tmp_path / "missing.jsonl", state_dir / "orders.json")
+
+    assert status["shadow_execution"]["state"] == "ORPHAN_HOLD"
+    assert status["shadow_execution"]["real_order_submissions"] == 0
+
+
+def test_web_status_uses_full_audit_counts_not_recent_display_window(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (data / "live_snapshot.json").write_text(json.dumps({"signals": []}), encoding="utf-8")
+    (data / "live_markets.json").write_text(json.dumps({"markets": [{"market_id": "m1"}]}), encoding="utf-8")
+    rows = [json.dumps({"event_type": "shadow_eval", "market_id": "m1", "reason": "no_edge", "fok": True})] * 1005
+    (logs / "shadow-audit.jsonl").write_text("\n".join(rows), encoding="utf-8")
+    status = build_status(data, logs / "orders.jsonl", tmp_path / "state.json")
+    assert status["counts"]["shadow_evaluations"] == 1005
+    assert status["counts"]["fok_passed"] == 1005
