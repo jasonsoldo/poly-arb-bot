@@ -8,6 +8,9 @@ def evaluate_status(status):
     readiness = status.get("clob_readiness", {})
     shadow = status.get("shadow_report", {})
     reasons = shadow.get("rejection_reasons", {})
+    strategy_counts = status.get("strategy_counts", {})
+    strategy_names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+    strategy_rows = [strategy_counts.get(name, {}) for name in strategy_names]
     checks = [
         {"name": "market_data_present", "passed": readiness.get("discovered_markets", 0) > 0},
         {"name": "audit_data_present", "passed": shadow.get("evaluations", 0) > 0},
@@ -21,11 +24,18 @@ def evaluate_status(status):
          "passed": status.get("counts", {}).get("executed_orders", 0) == 0 and
                    status.get("shadow_execution", {}).get("real_order_submissions", 0) == 0},
         {"name": "event_deduplication", "passed": shadow.get("duplicate_events", 0) == 0},
+        {"name": "three_strategy_evaluations",
+         "passed": all(row.get("evaluations", 0) > 0 for row in strategy_rows)},
+        {"name": "three_strategy_decisions",
+         "passed": all(row.get("accepts", 0) + row.get("rejections", 0) == row.get("evaluations", 0)
+                       for row in strategy_rows)},
     ]
     return {"passed": all(item["passed"] for item in checks), "checks": checks,
             "metrics": {"discovered": readiness.get("discovered_markets", 0),
                         "ready": readiness.get("paired_markets_ready", 0),
                         "evaluations": shadow.get("evaluations", 0),
+                        "strategy_evaluations": {name: strategy_counts.get(name, {}).get("evaluations", 0)
+                                                 for name in strategy_names},
                         "duplicates": shadow.get("duplicate_events", 0)}}
 
 

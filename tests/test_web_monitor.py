@@ -296,3 +296,44 @@ def test_status_explains_ready_gap_and_initializes_resyncs(tmp_path):
         "waiting_up_snapshot": 1, "waiting_down_snapshot": 0,
     }
     assert status["shadow_health"]["resyncs"] == 0
+
+
+def test_web_status_keeps_three_strategy_statistics_separate(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (data / "live_markets.json").write_text(json.dumps({"markets": [{"market_id": "m1"}]}), encoding="utf-8")
+    (logs / "shadow-audit.jsonl").write_text(json.dumps({
+        "ts": time.time(), "event_id": "p1", "event_type": "shadow_eval", "strategy": "paired_lock",
+        "market_id": "m1", "decision": "REJECT", "reason": "net_cost_above_threshold",
+    }), encoding="utf-8")
+    (logs / "strategy-audit.jsonl").write_text("\n".join([
+        json.dumps({"ts": time.time(), "event_id": "d1", "event_type": "shadow_eval", "strategy": "late_window_directional_ev", "market_id": "m1", "decision": "ACCEPT", "reason": "positive_net_ev"}),
+        json.dumps({"ts": time.time(), "event_id": "l1", "event_type": "shadow_eval", "strategy": "low_price_lottery_ev", "market_id": "m1", "decision": "REJECT", "reason": "entry_price_above_limit"}),
+    ]), encoding="utf-8")
+
+    status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
+
+    assert status["strategy_counts"]["paired_lock"] == {"evaluations": 1, "accepts": 0, "rejections": 1}
+    assert status["strategy_counts"]["late_window_directional_ev"] == {"evaluations": 1, "accepts": 1, "rejections": 0}
+    assert status["strategy_counts"]["low_price_lottery_ev"] == {"evaluations": 1, "accepts": 0, "rejections": 1}
+    assert status["current_pair"]["reason"] == "net_cost_above_threshold"
+
+
+def test_web_status_ages_each_normalized_reference_source(tmp_path):
+    now_ms = time.time() * 1000
+    (tmp_path / "venue-status.json").write_text(json.dumps({
+        "updated_at_ms": now_ms,
+        "assets": {"BTC": {"sources": {
+            "coinbase": {"price": 100, "message_age_ms": 5, "status": "FRESH"},
+            "kraken": {"price": None, "message_age_ms": None, "status": "NOT_RECEIVED"},
+        }}},
+    }), encoding="utf-8")
+
+    status = build_status(tmp_path, tmp_path / "missing.jsonl", tmp_path / "state.json")
+
+    btc = status["reference_prices"]["assets"]["BTC"]["sources"]
+    assert btc["coinbase"]["status"] == "FRESH"
+    assert btc["kraken"]["status"] == "NOT_RECEIVED"
+    assert status["latency_rankings"]["coinbase"]["samples"] == 1
+    assert status["latency_rankings"]["kraken"]["samples"] == 0

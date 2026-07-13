@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p data logs state
 touch logs/shadow-audit.jsonl
+touch logs/strategy-audit.jsonl
 python_bin="${PYTHON_BIN:-$PWD/.venv/bin/python}"
 if [[ ! -x "$python_bin" ]]; then
   echo "PYTHON_NOT_EXECUTABLE path=$python_bin" >&2
@@ -48,7 +49,9 @@ scanner_pid=$!
 reference_pid=$!
 "$python_bin" -m poly_arb_bot.shadow_execution &
 execution_pid=$!
-trap 'kill "$scanner_pid" "$reference_pid" "$execution_pid" 2>/dev/null || true' EXIT INT TERM
+"$python_bin" -m poly_arb_bot.ev_shadow &
+ev_pid=$!
+trap 'kill "$scanner_pid" "$reference_pid" "$execution_pid" "$ev_pid" 2>/dev/null || true' EXIT INT TERM
 
 echo "SHADOW_LOOP engine_start dynamic_reload_s=5 market_scan_s=$refresh_seconds"
 ./build/market_ws_engine data/live_markets.json "$size" "$fee_rate" logs/shadow-audit.jsonl \

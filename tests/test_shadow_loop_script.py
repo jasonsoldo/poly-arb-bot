@@ -31,6 +31,12 @@ def test_shadow_loop_starts_shadow_execution_state_machine():
     assert '"$execution_pid"' in SCRIPT
 
 
+def test_shadow_loop_starts_independent_ev_shadow_evaluator():
+    assert '"$python_bin" -m poly_arb_bot.ev_shadow' in SCRIPT
+    assert 'ev_pid=$!' in SCRIPT
+    assert '"$ev_pid"' in SCRIPT
+
+
 def test_shadow_loop_scans_all_supported_timeframes():
     assert "--intervals 5m,15m,1h,4h" in SCRIPT
     deploy = Path("deploy/VPS_DEPLOY.md").read_text(encoding="utf-8")

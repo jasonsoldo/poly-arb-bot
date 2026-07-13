@@ -35,3 +35,23 @@ def test_reference_engine_distinguishes_not_received_from_stale():
     assert r'\"binance_status\":\"' in SOURCE
     assert "matched_messages" in SOURCE
     assert "unmatched_messages" in SOURCE
+
+
+def test_reference_engine_subscribes_to_coinbase_and_kraken_spot_tickers():
+    assert 'ws-feed.exchange.coinbase.com' in SOURCE
+    assert '"type":"subscribe","product_ids"' in SOURCE
+    assert '"channel":"ticker"' in SOURCE
+    assert 'ws.kraken.com' in SOURCE
+    for source in ("binance", "coinbase", "kraken", "chainlink"):
+        assert f'"{source}"' in SOURCE
+
+
+def test_reference_engine_emits_normalized_source_and_quorum_state():
+    for field in (
+        "market_type", "quote_currency", "price", "bid", "ask",
+        "source_timestamp", "received_at", "message_age_ms", "status",
+        "fresh_exchange_source_count", "fresh_usd_spot_source_count",
+        "consensus_price", "fast_price", "settlement_reference",
+        "cross_source_divergence_bps", "reference_quorum_met", "reference_state",
+    ):
+        assert field in SOURCE

@@ -17,7 +17,7 @@ class DirectionalInput:
     outcome: str
     market_price: float
     expected_fill_price: float
-    estimated_probability: float
+    estimated_probability: Optional[float]
     seconds_to_close: int
     price_to_beat: Optional[float]
     reference: ReferenceState
@@ -35,8 +35,8 @@ class DirectionalInput:
 @dataclass(frozen=True)
 class EvDecision:
     strategy: str
-    gross_edge: float
-    net_ev: float
+    gross_edge: Optional[float]
+    net_ev: Optional[float]
     decision: str
     reason: str
     completed: bool = False
@@ -44,6 +44,8 @@ class EvDecision:
 
 
 def _common_rejection(row):
+    if row.estimated_probability is None:
+        return "probability_model_unavailable"
     if row.price_to_beat is None:
         return "price_to_beat_missing"
     if not row.settlement_source_verified:
@@ -62,9 +64,9 @@ def evaluate_directional(row, min_net_ev=.015):
     window = DIRECTIONAL_WINDOWS.get(row.timeframe)
     if reason is None and (not window or not window[0] <= row.seconds_to_close <= window[1]):
         reason = "outside_time_window"
-    gross = row.estimated_probability - row.expected_fill_price
-    net = gross - row.fee_per_share - row.slippage_per_share - row.latency_risk_buffer - row.settlement_risk_buffer
-    if reason is None and net < min_net_ev:
+    gross = row.estimated_probability - row.expected_fill_price if row.estimated_probability is not None else None
+    net = gross - row.fee_per_share - row.slippage_per_share - row.latency_risk_buffer - row.settlement_risk_buffer if gross is not None else None
+    if reason is None and net is not None and net < min_net_ev:
         reason = "net_ev_below_threshold"
     return EvDecision("late_window_directional_ev", gross, net,
                       "REJECT" if reason else "ACCEPT", reason or "positive_net_ev")
@@ -74,9 +76,9 @@ def evaluate_lottery(row, min_price=.01, max_price=.05, min_net_ev=.015):
     reason = _common_rejection(row)
     if reason is None and not min_price <= row.expected_fill_price <= max_price:
         reason = "entry_price_above_limit" if row.expected_fill_price > max_price else "entry_price_below_limit"
-    gross = row.estimated_probability - row.expected_fill_price
-    net = gross - row.fee_per_share - row.slippage_per_share - row.model_uncertainty_buffer - row.execution_risk_buffer
-    if reason is None and net < min_net_ev:
+    gross = row.estimated_probability - row.expected_fill_price if row.estimated_probability is not None else None
+    net = gross - row.fee_per_share - row.slippage_per_share - row.model_uncertainty_buffer - row.execution_risk_buffer if gross is not None else None
+    if reason is None and net is not None and net < min_net_ev:
         reason = "net_ev_below_threshold"
     return EvDecision("low_price_lottery_ev", gross, net,
                       "REJECT" if reason else "ACCEPT", reason or "positive_net_ev")
@@ -85,7 +87,7 @@ def evaluate_lottery(row, min_price=.01, max_price=.05, min_net_ev=.015):
 def decision_audit(row, result, event_id, generation, session, evaluation_sequence, timestamp):
     reference_price = row.reference.consensus_price
     return {
-        "event_id": event_id, "event_type": "shadow_eval", "strategy": result.strategy,
+        "ts": timestamp, "event_id": event_id, "event_type": "shadow_eval", "strategy": result.strategy,
         "market_id": row.market_id, "condition_id": row.condition_id, "asset": row.asset,
         "timeframe": row.timeframe, "window": "current", "generation": generation,
         "session": session, "evaluation_sequence": evaluation_sequence, "timestamp": timestamp,

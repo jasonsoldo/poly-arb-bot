@@ -1,4 +1,4 @@
-/opt/poly-arb-bot/logs/shadow-audit.jsonl {
+/opt/poly-arb-bot/logs/shadow-audit.jsonl /opt/poly-arb-bot/logs/strategy-audit.jsonl /opt/poly-arb-bot/logs/shadow-execution.jsonl {
     daily
     rotate 30
     compress

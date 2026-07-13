@@ -33,10 +33,10 @@ def test_dashboard_contains_real_analytics_modules_without_static_equity():
 
 def test_dashboard_renders_binance_and_chainlink_independently():
     source = Path("web/index.html").read_text(encoding="utf-8")
-    assert "binance_stale" in source
-    assert "chainlink_stale" in source
-    assert "BINANCE" in source
-    assert "CHAINLINK" in source
+    assert "sourceState" in source
+    assert "v.sources" in source
+    for name in ("BINANCE", "COINBASE", "KRAKEN", "CHAINLINK"):
+        assert name in source
     assert "NOT RECEIVED" in source
 
 
@@ -52,3 +52,13 @@ def test_dashboard_uses_consistent_pair_audit_and_status_labels():
     assert "expected_execution_value" in source
     assert "h.resyncs" in source
     assert "h.resync_count" not in source
+
+
+def test_dashboard_renders_three_strategies_without_combining_acceptance():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    for strategy in ("DIRECTIONAL EV", "LOW-PRICE LOTTERY", "PAIRED LOCK"):
+        assert strategy in source
+    assert "strategy_counts" in source
+    assert "strategy_latest" in source
+    for element_id in ("directionalCard", "lotteryCard", "pairedCard"):
+        assert f'id="{element_id}"' in source

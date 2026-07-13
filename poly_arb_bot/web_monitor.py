@@ -67,6 +67,43 @@ def _jsonl(path, limit=100):
     return list(reversed(rows))
 
 
+def _strategy_counts(paths):
+    names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+    counts = {name: {"evaluations": 0, "accepts": 0, "rejections": 0} for name in names}
+    seen = set()
+    for path in paths:
+        for row in _rows_for_counts(path):
+            if row.get("event_type") != "shadow_eval" or row.get("strategy") not in counts:
+                continue
+            event_id = row.get("event_id")
+            if event_id and event_id in seen:
+                continue
+            if event_id:
+                seen.add(event_id)
+            bucket = counts[row["strategy"]]
+            bucket["evaluations"] += 1
+            accepted = row.get("decision") == "ACCEPT"
+            bucket["accepts"] += int(accepted)
+            bucket["rejections"] += int(not accepted)
+    return counts
+
+
+def _rows_for_counts(path):
+    if not path.exists():
+        return
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if float(row.get("ts", 0)) <= time.time() + 300:
+                    yield row
+    except OSError:
+        return
+
+
 def _signal_block_reason(signal, config):
     if not signal.get("settlement_source_ok", False):
         return "settlement_source"
@@ -127,12 +164,16 @@ def build_status(data_dir, log_file, state_file):
     shadow_log = data_dir.parent / "logs" / "shadow-audit.jsonl"
     selected_log = shadow_log if shadow_log.exists() else log_file
     events = _jsonl(selected_log, limit=1000)
+    strategy_log = data_dir.parent / "logs" / "strategy-audit.jsonl"
+    events.extend(_jsonl(strategy_log, limit=1000))
+    events.sort(key=lambda item: float(item.get("ts", 0)), reverse=True)
     events = [item for item in events if float(item.get("ts", 0)) <= time.time() + 300]
     execution_log = data_dir.parent / "logs" / "shadow-execution.jsonl"
     report = _cached_report(selected_log, execution_log)
     shadow_events = [item for item in events if item.get("event_type") in {"shadow_eval", "shadow_opportunity"}]
+    paired_events = [item for item in shadow_events if item.get("strategy", "paired_lock") == "paired_lock"]
     latest_shadow = {}
-    for item in shadow_events:
+    for item in paired_events:
         if item.get("market_id") in market_ids:
             latest_shadow.setdefault(item.get("market_id"), item)
     state = _json(state_file, {"client_order_ids": {}})
@@ -164,6 +205,15 @@ def build_status(data_dir, log_file, state_file):
         asset["stale"] = asset["binance_stale"] and asset["chainlink_stale"]
         if asset.get("binance") is None or asset.get("chainlink") is None:
             asset["divergence_bps"] = None
+        for source in asset.get("sources", {}).values():
+            reported = source.get("status", "NOT_RECEIVED")
+            age = source.get("message_age_ms")
+            if age is not None:
+                source["message_age_ms"] = max(0, float(age) + file_age)
+            if reported == "FRESH" and (age is None or float(age) + file_age > 10_000):
+                source["status"] = "STALE"
+            if source.get("status") != "FRESH":
+                source["price"] = None
     if reference_prices["stale"]:
         for key in ("binance_btcusdt", "chainlink_btcusd", "divergence_usd", "divergence_bps"):
             reference_prices[key] = None
@@ -197,6 +247,11 @@ def build_status(data_dir, log_file, state_file):
             cell["count"] += 1
     latest_event = next(iter(latest_shadow.values()), None)
     strategy_score = _strategy_score(latest_event)
+    strategy_counts = _strategy_counts((selected_log, strategy_log))
+    strategy_latest = {}
+    for item in shadow_events:
+        strategy = item.get("strategy", "paired_lock")
+        strategy_latest.setdefault(strategy, item)
     ready_markets = int(shadow_health.get("ready_markets", 0))
     clob_readiness = {
         "discovered_markets": len(markets), "paired_markets_ready": ready_markets,
@@ -210,9 +265,14 @@ def build_status(data_dir, log_file, state_file):
     current_pair = {key: latest_event.get(key) for key in pair_fields} if latest_event else {}
     engine_latency = reference_prices.get("engine_latency_us")
     def age_snapshot(source):
-        values = sorted(float(item[f"{source}_source_age_ms"]) + max(reference_age_ms, 0)
-                        for item in reference_prices.get("assets", {}).values()
-                        if item.get(f"{source}_source_age_ms", -1) >= 0)
+        values = []
+        for item in reference_prices.get("assets", {}).values():
+            normalized = item.get("sources", {}).get(source, {})
+            if normalized.get("message_age_ms") is not None:
+                values.append(float(normalized["message_age_ms"]))
+            elif item.get(f"{source}_source_age_ms", -1) >= 0:
+                values.append(float(item[f"{source}_source_age_ms"]) + max(reference_age_ms, 0))
+        values.sort()
         return {"latest": values[-1] if values else None,
                 "p50": values[len(values) // 2] if values else None,
                 "p95": values[min(len(values) - 1, round((len(values) - 1) * .95))] if values else None,
@@ -223,6 +283,8 @@ def build_status(data_dir, log_file, state_file):
     latency_rankings = {
         "polymarket": clob_age,
         "binance": age_snapshot("binance"),
+        "coinbase": age_snapshot("coinbase"),
+        "kraken": age_snapshot("kraken"),
         "chainlink": age_snapshot("chainlink"),
         "engine": {"latest": engine_latency, "p50": None, "p95": None, "p99": None,
                    "samples": int(engine_latency is not None), "unit": "us", "metric": "processing_time"},
@@ -246,6 +308,8 @@ def build_status(data_dir, log_file, state_file):
             "simulated_complete": report["performance"]["completed"],
         },
         "shadow_markets": list(latest_shadow.values()),
+        "strategy_counts": strategy_counts,
+        "strategy_latest": strategy_latest,
         "reference_prices": reference_prices,
         "shadow_health": shadow_health,
         "shadow_execution": shadow_execution,
