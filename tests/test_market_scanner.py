@@ -53,7 +53,7 @@ def test_scanner_generates_updown_slugs_for_interval_boundaries():
     assert "eth-updown-5m-1783405500" in slugs
 
 
-def test_scanner_skips_market_without_open_price():
+def test_scanner_keeps_orderbook_market_without_directional_open_price():
     market = {
         "conditionId": "0xcondition",
         "question": "Bitcoin Up or Down - July 11, 9:25PM-9:30PM ET",
@@ -62,7 +62,7 @@ def test_scanner_skips_market_without_open_price():
         "endDate": "2026-07-11T13:30:00Z",
     }
 
-    assert MarketScanner().spec_from_market(market) is None
+    assert MarketScanner().spec_from_market(market).open_price is None
 
 
 def test_scanner_falls_back_to_tokens_objects_when_clob_ids_are_empty():

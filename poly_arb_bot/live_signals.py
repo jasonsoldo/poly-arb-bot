@@ -1,7 +1,7 @@
 import math
 import time
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from .binance_source import BinanceSource
 from .clob_client import PolymarketClobClient
@@ -14,7 +14,7 @@ class LiveMarketSpec:
     title: str
     asset: str
     symbol: str
-    open_price: float
+    open_price: Optional[float]
     close_ts: int
     up_token_id: str
     down_token_id: str
@@ -37,6 +37,8 @@ class LiveSignalBuilder:
     def build(self, markets: Iterable[LiveMarketSpec]) -> List[MarketSignal]:
         signals = []
         for market in markets:
+            if market.open_price is None:
+                continue
             ticker = self.binance.ticker(market.symbol)
             seconds_to_close = int(market.close_ts - time.time())
             distance = ticker.price - market.open_price

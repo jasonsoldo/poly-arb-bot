@@ -75,13 +75,10 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     events = []
     for series_slug in series_slugs:
         for series in client.series_by_slug(series_slug):
-            for event in current_series_events(series.get("events") or [], now_ts):
-                full_event = client.event_by_id(str(event.get("id")))
-                if full_event:
-                    full_event["eventMetadata"] = event.get("eventMetadata") or {}
-                    full_event["markets"] = tradable_markets(full_event.get("markets") or [])
-                    if full_event["markets"]:
-                        events.append(full_event)
+            for event in client.events_by_series_window(str(series.get("id")), now_ts, now_ts + 3600):
+                event["markets"] = tradable_markets(event.get("markets") or [])
+                if event["markets"]:
+                    events.append(event)
     specs = scanner.specs_from_events(events)
     unique = {spec.market_id: spec for spec in specs}
     clob = PolymarketClobClient()

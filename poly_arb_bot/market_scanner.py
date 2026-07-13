@@ -76,7 +76,7 @@ class MarketScanner:
         condition_id = str(first_present(market, ("conditionId", "condition_id", "id")) or "")
         open_price = self._open_price(market, event)
         close_ts = parse_timestamp_seconds(first_present(market, ("endDate", "endDateIso", "end_date", "closeTime")))
-        if not condition_id or open_price is None or close_ts is None:
+        if not condition_id or close_ts is None:
             return None
 
         return LiveMarketSpec(

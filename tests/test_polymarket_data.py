@@ -81,3 +81,13 @@ def test_series_and_event_use_official_gamma_endpoints():
         ("/series", {"slug": "btc-up-or-down-5m", "closed": "false", "exclude_events": "false"}),
         ("/events/693216", None),
     ]
+
+
+def test_events_by_series_window_uses_official_time_filters():
+    http = WindowHttp()
+    PolymarketDataClient(http=http).events_by_series_window("10684", 1783900800, 1783904400)
+    params = http.params[0]
+    assert params["series_id"] == "10684"
+    assert params["end_date_min"] == "2026-07-13T00:00:00Z"
+    assert params["end_date_max"] == "2026-07-13T01:00:00Z"
+    assert params["order"] == "endDate"

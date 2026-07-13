@@ -29,6 +29,19 @@ class PolymarketDataClient:
         )
         return _as_list(response.data)
 
+    def events_by_series_window(self, series_id: str, start_ts: int, end_ts: int) -> List[Dict[str, Any]]:
+        params = {
+            "series_id": series_id,
+            "active": "true",
+            "closed": "false",
+            "end_date_min": datetime.fromtimestamp(start_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+            "end_date_max": datetime.fromtimestamp(end_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+            "order": "endDate",
+            "ascending": "true",
+            "limit": 100,
+        }
+        return _as_list(self.http.get_json(self.base_url, "/events", params).data)
+
     def events_keyset(self, limit: int = 1000, active: bool = True) -> List[Dict[str, Any]]:
         return self._keyset("/events/keyset", "events", limit, active)
 
