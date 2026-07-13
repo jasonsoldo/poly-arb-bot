@@ -10,6 +10,8 @@ from .strategy_config import StrategyConfig
 
 
 _REPORT_CACHE = {}
+ASSETS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE")
+INTERVALS = ("5m", "15m", "1h", "4h")
 
 
 def _cached_report(path):
@@ -79,7 +81,8 @@ def _signal_block_reason(signal, config):
 
 def build_status(data_dir, log_file, state_file):
     snapshot = _json(data_dir / "live_snapshot.json", {"signals": [], "positions": []})
-    market_ids = {item.get("market_id") for item in _json(data_dir / "live_markets.json", {"markets": []}).get("markets", [])}
+    markets = _json(data_dir / "live_markets.json", {"markets": []}).get("markets", [])
+    market_ids = {item.get("market_id") for item in markets}
     signals = [item for item in snapshot.get("signals", []) if item.get("market_id") in market_ids]
     shadow_log = data_dir.parent / "logs" / "shadow-audit.jsonl"
     selected_log = shadow_log if shadow_log.exists() else log_file
@@ -99,6 +102,16 @@ def build_status(data_dir, log_file, state_file):
     reference_prices = _json(data_dir / "venue-status.json", {})
     reference_age_ms = time.time() * 1000 - reference_prices.get("updated_at_ms", 0)
     reference_prices["stale"] = reference_age_ms > 10_000
+    for asset in reference_prices.get("assets", {}).values():
+        asset_stale = reference_age_ms > 10_000 or any(
+            asset.get(key, 10_001) + max(reference_age_ms, 0) > 10_000
+            for key in ("binance_source_age_ms", "chainlink_source_age_ms")
+            if asset.get(key, -1) >= 0
+        )
+        asset["stale"] = asset_stale
+        if asset_stale:
+            for key in ("binance", "chainlink", "divergence_bps"):
+                asset[key] = None
     if reference_prices["stale"]:
         for key in ("binance_btcusdt", "chainlink_btcusd", "divergence_usd", "divergence_bps"):
             reference_prices[key] = None
@@ -120,6 +133,15 @@ def build_status(data_dir, log_file, state_file):
     model_edges = [item for item in signals if item.get("model_probability", 0) - item.get("expected_fill_price", 1) > config.min_edge]
     blocked = Counter(reason for item in signals if (reason := _signal_block_reason(item, config)))
     risk_passed = [item for item in signals if _signal_block_reason(item, config) is None]
+    market_matrix = {asset: {interval: {"count": 0, "markets": []} for interval in INTERVALS} for asset in ASSETS}
+    for market in sorted(markets, key=lambda item: item.get("close_ts", 0)):
+        asset, interval = market.get("asset"), market.get("interval")
+        if asset in market_matrix and interval in market_matrix[asset]:
+            cell = market_matrix[asset][interval]
+            entry = dict(market)
+            entry["slot"] = "current" if cell["count"] == 0 else "next"
+            cell["markets"].append(entry)
+            cell["count"] += 1
     return {
         "ts": int(time.time()),
         "mode": "DRY RUN",
@@ -141,6 +163,7 @@ def build_status(data_dir, log_file, state_file):
         "reference_prices": reference_prices,
         "shadow_health": shadow_health,
         "shadow_execution": shadow_execution,
+        "market_matrix": market_matrix,
         "system_status": system_status,
         "rejection_reasons": report["rejection_reasons"] or dict(rejection_reasons),
         "shadow_report": report,

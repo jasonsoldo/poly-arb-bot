@@ -150,3 +150,36 @@ def test_web_status_uses_full_audit_counts_not_recent_display_window(tmp_path):
     status = build_status(data, logs / "orders.jsonl", tmp_path / "state.json")
     assert status["counts"]["shadow_evaluations"] == 1005
     assert status["counts"]["fok_passed"] == 1005
+
+
+def test_web_status_builds_seven_by_four_market_matrix(tmp_path):
+    now = time.time()
+    markets = [
+        {"market_id": "btc-now", "asset": "BTC", "interval": "5m", "close_ts": now + 100},
+        {"market_id": "btc-next", "asset": "BTC", "interval": "5m", "close_ts": now + 400},
+        {"market_id": "hype", "asset": "HYPE", "interval": "4h", "close_ts": now + 10000},
+    ]
+    (tmp_path / "live_markets.json").write_text(json.dumps({"markets": markets}), encoding="utf-8")
+    status = build_status(tmp_path, tmp_path / "missing.jsonl", tmp_path / "state.json")
+    assert set(status["market_matrix"]) == {"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"}
+    assert set(status["market_matrix"]["BTC"]) == {"5m", "15m", "1h", "4h"}
+    assert status["market_matrix"]["BTC"]["5m"]["count"] == 2
+    assert status["market_matrix"]["HYPE"]["4h"]["count"] == 1
+
+
+def test_web_status_marks_reference_assets_independently_stale(tmp_path):
+    now_ms = time.time() * 1000
+    (tmp_path / "venue-status.json").write_text(json.dumps({
+        "updated_at_ms": now_ms,
+        "assets": {
+            "BTC": {"supported": True, "binance": 65000, "chainlink": 64999,
+                    "binance_source_age_ms": 5, "chainlink_source_age_ms": 6},
+            "ETH": {"supported": True, "binance": 3000, "chainlink": 2999,
+                    "binance_source_age_ms": 20000, "chainlink_source_age_ms": 20000},
+            "HYPE": {"supported": False, "binance": None, "chainlink": None},
+        },
+    }), encoding="utf-8")
+    status = build_status(tmp_path, tmp_path / "missing.jsonl", tmp_path / "state.json")
+    assert status["reference_prices"]["assets"]["BTC"]["binance"] == 65000
+    assert status["reference_prices"]["assets"]["ETH"]["binance"] is None
+    assert status["reference_prices"]["assets"]["HYPE"]["supported"] is False

@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -32,23 +33,42 @@ struct PriceState {
     double engine_latency_us = 0;
 };
 
-void write_status(const std::string& path, const PriceState& state) {
+struct AssetConfig {
+    const char* asset;
+    const char* binance;
+    const char* chainlink;
+    bool supported;
+};
+
+const AssetConfig ASSETS[] = {
+    {"BTC", "btcusdt", "btc/usd", true}, {"ETH", "ethusdt", "eth/usd", true},
+    {"SOL", "solusdt", "sol/usd", true}, {"XRP", "xrpusdt", "xrp/usd", true},
+    {"BNB", "bnbusdt", "bnb/usd", false}, {"DOGE", "dogeusdt", "doge/usd", false},
+    {"HYPE", "hypeusdt", "hype/usd", false},
+};
+
+void write_status(const std::string& path, const std::map<std::string, PriceState>& states, double engine_latency_us) {
     const std::string temporary = path + ".tmp";
     std::ofstream out(temporary, std::ios::trunc);
     out << std::setprecision(15);
     const double timestamp = now_ms();
     out << "{\"updated_at_ms\":" << timestamp;
-    if (state.binance) out << ",\"binance_btcusdt\":" << state.binance; else out << ",\"binance_btcusdt\":null";
-    if (state.chainlink) out << ",\"chainlink_btcusd\":" << state.chainlink; else out << ",\"chainlink_btcusd\":null";
-    if (state.binance && state.chainlink) {
-        out << ",\"divergence_usd\":" << state.binance - state.chainlink
-            << ",\"divergence_bps\":" << (state.binance - state.chainlink) / state.chainlink * 10000;
-    } else {
-        out << ",\"divergence_usd\":null,\"divergence_bps\":null";
+    out << ",\"assets\":{";
+    bool first = true;
+    for (const auto& config : ASSETS) {
+        if (!first) out << ',';
+        first = false;
+        const auto& state = states.at(config.asset);
+        out << '\"' << config.asset << "\":{\"supported\":" << (config.supported ? "true" : "false");
+        if (state.binance) out << ",\"binance\":" << state.binance; else out << ",\"binance\":null";
+        if (state.chainlink) out << ",\"chainlink\":" << state.chainlink; else out << ",\"chainlink\":null";
+        if (state.binance && state.chainlink) {
+            out << ",\"divergence_bps\":" << (state.binance - state.chainlink) / state.chainlink * 10000;
+        } else out << ",\"divergence_bps\":null";
+        out << ",\"binance_source_age_ms\":" << (state.binance_source_ms ? timestamp - state.binance_source_ms : -1)
+            << ",\"chainlink_source_age_ms\":" << (state.chainlink_source_ms ? timestamp - state.chainlink_source_ms : -1) << '}';
     }
-    out << ",\"binance_source_age_ms\":" << (state.binance_source_ms ? timestamp - state.binance_source_ms : -1)
-        << ",\"chainlink_source_age_ms\":" << (state.chainlink_source_ms ? timestamp - state.chainlink_source_ms : -1)
-        << ",\"engine_latency_us\":" << state.engine_latency_us << "}\n";
+    out << "},\"engine_latency_us\":" << engine_latency_us << "}\n";
     out.flush();
     out.close();
     std::filesystem::rename(temporary, path);
@@ -66,10 +86,11 @@ void run(const std::string& output_path) {
     if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str())) throw std::runtime_error("SNI failed");
     ws.next_layer().handshake(asio::ssl::stream_base::client);
     ws.handshake(host, "/");
-    const std::string subscription = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices","type":"*","filters":""},{"topic":"crypto_prices_chainlink","type":"*","filters":"{\"symbol\":\"btc/usd\"}"}]})";
+    const std::string subscription = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices","type":"update","filters":"btcusdt,ethusdt,solusdt,xrpusdt"},{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
     ws.write(asio::buffer(subscription));
     std::cerr << "REFERENCE_CONNECTED sources=binance,chainlink\n";
-    PriceState state;
+    std::map<std::string, PriceState> states;
+    for (const auto& config : ASSETS) states.emplace(config.asset, PriceState{});
     double last_ping = now_ms();
     for (;;) {
         beast::flat_buffer buffer;
@@ -83,15 +104,19 @@ void run(const std::string& output_path) {
         const std::string topic = message.get<std::string>("topic", "");
         const double value = message.get<double>("payload.value", 0);
         const double source_ms = message.get<double>("payload.timestamp", message.get<double>("timestamp", 0));
-        if (topic == "crypto_prices" && message.get<std::string>("payload.symbol", "") == "btcusdt") {
-            state.binance = value; state.binance_source_ms = source_ms;
-        } else if (topic == "crypto_prices_chainlink" && message.get<std::string>("payload.symbol", "") == "btc/usd") {
-            state.chainlink = value; state.chainlink_source_ms = source_ms;
-        } else {
-            continue;
+        const std::string symbol = message.get<std::string>("payload.symbol", "");
+        bool matched = false;
+        for (const auto& config : ASSETS) {
+            auto& state = states.at(config.asset);
+            if (topic == "crypto_prices" && symbol == config.binance && config.supported) {
+                state.binance = value; state.binance_source_ms = source_ms; matched = true; break;
+            }
+            if (topic == "crypto_prices_chainlink" && symbol == config.chainlink && config.supported) {
+                state.chainlink = value; state.chainlink_source_ms = source_ms; matched = true; break;
+            }
         }
-        state.engine_latency_us = (now_ms() - received_ms) * 1000;
-        write_status(output_path, state);
+        if (!matched) continue;
+        write_status(output_path, states, (now_ms() - received_ms) * 1000);
         if (now_ms() - last_ping >= 5000) { ws.write(asio::buffer(std::string("PING"))); last_ping = now_ms(); }
     }
 }
