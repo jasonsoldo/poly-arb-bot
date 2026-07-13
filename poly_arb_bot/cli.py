@@ -75,7 +75,8 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     events = []
     for series_slug in series_slugs:
         for series in client.series_by_slug(series_slug):
-            for event in client.events_by_series_window(str(series.get("id")), now_ts, now_ts + 3600):
+            series_events = client.events_by_series_window(str(series.get("id")), now_ts, now_ts + 3600)
+            for event in current_series_events(series_events, now_ts, limit=2):
                 event["markets"] = tradable_markets(event.get("markets") or [])
                 if event["markets"]:
                     events.append(event)
@@ -99,13 +100,15 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     return 0
 
 
-def current_series_events(events, now_ts):
-    return [
+def current_series_events(events, now_ts, limit=None):
+    current = [
         event for event in events
         if event.get("active") and not event.get("closed")
         and (close_ts := parse_timestamp_seconds(event.get("endDate"))) is not None
         and now_ts < close_ts <= now_ts + 3600
     ]
+    current.sort(key=lambda event: parse_timestamp_seconds(event.get("endDate")))
+    return current[:limit] if limit is not None else current
 
 
 def tradable_markets(markets):

@@ -47,3 +47,12 @@ def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
     assert "min_profit_" in SOURCE
     assert '\\"strategy\\":\\"paired_lock\\"' in SOURCE
     assert '\\"decision\\":\\"' in SOURCE
+    assert "leg_1_fill_probability" in SOURCE
+    assert "leg_2_fill_probability" in SOURCE
+    assert "time_between_legs_us" in SOURCE
+    assert "orphan_leg_loss" in SOURCE
+    assert "expected_execution_value" in SOURCE
+    assert "execution_value_below_threshold" in SOURCE
+    assert 'subscription(added, "subscribe")' in SOURCE
+    assert 'subscription(removed, "unsubscribe")' in SOURCE
+    assert '"MARKET_RELOAD markets="' in SOURCE

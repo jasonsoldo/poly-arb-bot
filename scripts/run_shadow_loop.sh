@@ -9,27 +9,33 @@ size="${SHADOW_SIZE:-10}"
 fee_rate="${SHADOW_FEE_RATE:-0.07}"
 buffer_per_share="${SHADOW_BUFFER_PER_SHARE:-0.002}"
 min_profit="${SHADOW_MIN_PROFIT:-0.01}"
+leg_interval_us="${SHADOW_LEG_INTERVAL_US:-50000}"
+execution_half_life_us="${SHADOW_EXECUTION_HALF_LIFE_US:-250000}"
+orphan_loss_per_share="${SHADOW_ORPHAN_LOSS_PER_SHARE:-0.02}"
+min_expected_value="${SHADOW_MIN_EXPECTED_VALUE:-0.01}"
 
-while true; do
+scan_once() {
   python -m poly_arb_bot.cli scan-updown \
     --output data/live_markets.json \
     --intervals 5m,15m \
-    --slug-window previous,current,next
+    --slug-window current,next
+}
 
-  market_count="$(python -c 'import json; print(len(json.load(open("data/live_markets.json"))["markets"]))')"
-  if [[ "$market_count" -eq 0 ]]; then
-    echo "SHADOW_LOOP no_markets retry_s=$refresh_seconds"
-    sleep "$refresh_seconds"
-    continue
-  fi
-
-  echo "SHADOW_LOOP start markets=$market_count refresh_s=$refresh_seconds"
-  timeout --signal=TERM "$refresh_seconds" \
-    ./build/market_ws_engine data/live_markets.json "$size" "$fee_rate" logs/shadow-audit.jsonl "$buffer_per_share" "$min_profit" || status=$?
-  status="${status:-0}"
-  if [[ "$status" -ne 0 && "$status" -ne 124 && "$status" -ne 143 ]]; then
-    echo "SHADOW_LOOP engine_exit=$status retry_s=2"
-    sleep 2
-  fi
-  unset status
+until scan_once && [[ "$(python -c 'import json; print(len(json.load(open("data/live_markets.json"))["markets"]))')" -gt 0 ]]; do
+  echo "SHADOW_LOOP no_markets retry_s=$refresh_seconds"
+  sleep "$refresh_seconds"
 done
+
+(
+  while true; do
+    sleep "$refresh_seconds"
+    scan_once || echo "SHADOW_LOOP scan_error retry_s=$refresh_seconds"
+  done
+) &
+scanner_pid=$!
+trap 'kill "$scanner_pid" 2>/dev/null || true' EXIT INT TERM
+
+echo "SHADOW_LOOP engine_start dynamic_reload_s=5 market_scan_s=$refresh_seconds"
+./build/market_ws_engine data/live_markets.json "$size" "$fee_rate" logs/shadow-audit.jsonl \
+  "$buffer_per_share" "$min_profit" "$leg_interval_us" "$execution_half_life_us" \
+  "$orphan_loss_per_share" "$min_expected_value"

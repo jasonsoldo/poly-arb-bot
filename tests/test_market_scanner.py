@@ -123,6 +123,16 @@ def test_current_series_events_requires_active_current_event():
     assert [event["id"] for event in current_series_events(events, now)] == ["live"]
 
 
+def test_current_series_events_limits_each_series_to_current_and_next():
+    now = 1783857600
+    events = [
+        {"id": "third", "endDate": "2026-07-12T12:15:00Z", "active": True, "closed": False},
+        {"id": "current", "endDate": "2026-07-12T12:05:00Z", "active": True, "closed": False},
+        {"id": "next", "endDate": "2026-07-12T12:10:00Z", "active": True, "closed": False},
+    ]
+    assert [event["id"] for event in current_series_events(events, now, limit=2)] == ["current", "next"]
+
+
 def test_tradable_markets_requires_orderbook_and_accepting_orders():
     markets = [
         {"conditionId": "live", "enableOrderBook": True, "acceptingOrders": True},
