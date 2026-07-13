@@ -66,7 +66,7 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
         tokens[market.up] = true; tokens[market.down] = true;
         markets[row.get<std::string>("market_id")] = market;
     }
-    if (markets.size() > 4) throw std::runtime_error("market count exceeds current/next limit");
+    if (markets.size() > 56) throw std::runtime_error("market count exceeds configured asset/timeframe limit");
     if (version_out) *version_out = version;
     if (generated_at_out) *generated_at_out = generated_at;
     return markets;

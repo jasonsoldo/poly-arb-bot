@@ -4,6 +4,11 @@ from pathlib import Path
 SOURCE = Path("cpp/market_ws_engine/market_ws_engine.cpp").read_text(encoding="utf-8")
 
 
+def test_market_engine_accepts_seven_assets_current_and_next_across_four_timeframes():
+    assert "markets.size() > 56" in SOURCE
+    assert "markets.size() > 4" not in SOURCE
+
+
 def test_ws_engine_uses_async_read_and_serialized_heartbeat_writes():
     assert "async_read" in SOURCE
     assert "async_write" in SOURCE
