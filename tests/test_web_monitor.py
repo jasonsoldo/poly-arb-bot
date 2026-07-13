@@ -203,6 +203,21 @@ def test_web_status_does_not_erase_fresh_binance_when_chainlink_is_stale(tmp_pat
     assert btc["divergence_bps"] is None
 
 
+def test_web_status_preserves_not_received_reference_state(tmp_path):
+    now_ms = time.time() * 1000
+    (tmp_path / "venue-status.json").write_text(json.dumps({
+        "updated_at_ms": now_ms,
+        "assets": {"BTC": {"supported": True, "binance": None, "chainlink": 65000,
+                            "binance_status": "NOT_RECEIVED", "chainlink_status": "FRESH",
+                            "binance_source_age_ms": -1, "chainlink_source_age_ms": 5}},
+    }), encoding="utf-8")
+    status = build_status(tmp_path, tmp_path / "missing.jsonl", tmp_path / "state.json")
+    btc = status["reference_prices"]["assets"]["BTC"]
+    assert btc["binance_status"] == "NOT_RECEIVED"
+    assert btc["binance_stale"] is False
+    assert btc["chainlink_status"] == "FRESH"
+
+
 def test_web_status_includes_completed_shadow_analytics(tmp_path):
     data = tmp_path / "data"
     logs = tmp_path / "logs"

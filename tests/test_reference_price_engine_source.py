@@ -26,3 +26,12 @@ def test_reference_engine_writes_atomic_status_and_reconnects():
     assert "std::setprecision(15)" in SOURCE
     assert r'\"assets\"' in SOURCE
     assert r'\"supported\"' in SOURCE
+
+
+def test_reference_engine_distinguishes_not_received_from_stale():
+    assert "source_status(" in SOURCE
+    for status in ("NOT_RECEIVED", "FRESH", "STALE"):
+        assert f'"{status}"' in SOURCE
+    assert r'\"binance_status\":\"' in SOURCE
+    assert "matched_messages" in SOURCE
+    assert "unmatched_messages" in SOURCE

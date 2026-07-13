@@ -7,6 +7,8 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <chrono>
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -40,6 +42,11 @@ struct AssetConfig {
     bool supported;
 };
 
+const char* source_status(double source_ms, double timestamp) {
+    if (!source_ms) return "NOT_RECEIVED";
+    return timestamp - source_ms <= 10000 ? "FRESH" : "STALE";
+}
+
 const AssetConfig ASSETS[] = {
     {"BTC", "btcusdt", "btc/usd", true}, {"ETH", "ethusdt", "eth/usd", true},
     {"SOL", "solusdt", "sol/usd", true}, {"XRP", "xrpusdt", "xrp/usd", true},
@@ -47,7 +54,8 @@ const AssetConfig ASSETS[] = {
     {"HYPE", "hypeusdt", "hype/usd", false},
 };
 
-void write_status(const std::string& path, const std::map<std::string, PriceState>& states, double engine_latency_us) {
+void write_status(const std::string& path, const std::map<std::string, PriceState>& states, double engine_latency_us,
+                  unsigned long long matched_messages, unsigned long long unmatched_messages) {
     const std::string temporary = path + ".tmp";
     std::ofstream out(temporary, std::ios::trunc);
     out << std::setprecision(15);
@@ -62,13 +70,16 @@ void write_status(const std::string& path, const std::map<std::string, PriceStat
         out << '\"' << config.asset << "\":{\"supported\":" << (config.supported ? "true" : "false");
         if (state.binance) out << ",\"binance\":" << state.binance; else out << ",\"binance\":null";
         if (state.chainlink) out << ",\"chainlink\":" << state.chainlink; else out << ",\"chainlink\":null";
+        out << ",\"binance_status\":\"" << (config.supported ? source_status(state.binance_source_ms, timestamp) : "UNSUPPORTED")
+            << "\",\"chainlink_status\":\"" << (config.supported ? source_status(state.chainlink_source_ms, timestamp) : "UNSUPPORTED") << '"';
         if (state.binance && state.chainlink) {
             out << ",\"divergence_bps\":" << (state.binance - state.chainlink) / state.chainlink * 10000;
         } else out << ",\"divergence_bps\":null";
         out << ",\"binance_source_age_ms\":" << (state.binance_source_ms ? timestamp - state.binance_source_ms : -1)
             << ",\"chainlink_source_age_ms\":" << (state.chainlink_source_ms ? timestamp - state.chainlink_source_ms : -1) << '}';
     }
-    out << "},\"engine_latency_us\":" << engine_latency_us << "}\n";
+    out << "},\"engine_latency_us\":" << engine_latency_us
+        << ",\"matched_messages\":" << matched_messages << ",\"unmatched_messages\":" << unmatched_messages << "}\n";
     out.flush();
     out.close();
     std::filesystem::rename(temporary, path);
@@ -91,6 +102,8 @@ void run(const std::string& output_path) {
     std::cerr << "REFERENCE_CONNECTED sources=binance,chainlink\n";
     std::map<std::string, PriceState> states;
     for (const auto& config : ASSETS) states.emplace(config.asset, PriceState{});
+    unsigned long long matched_messages = 0, unmatched_messages = 0;
+    write_status(output_path, states, 0, matched_messages, unmatched_messages);
     double last_ping = now_ms();
     for (;;) {
         beast::flat_buffer buffer;
@@ -104,7 +117,8 @@ void run(const std::string& output_path) {
         const std::string topic = message.get<std::string>("topic", "");
         const double value = message.get<double>("payload.value", 0);
         const double source_ms = message.get<double>("payload.timestamp", message.get<double>("timestamp", 0));
-        const std::string symbol = message.get<std::string>("payload.symbol", "");
+        std::string symbol = message.get<std::string>("payload.symbol", "");
+        std::transform(symbol.begin(), symbol.end(), symbol.begin(), [](unsigned char c) { return std::tolower(c); });
         bool matched = false;
         for (const auto& config : ASSETS) {
             auto& state = states.at(config.asset);
@@ -115,8 +129,8 @@ void run(const std::string& output_path) {
                 state.chainlink = value; state.chainlink_source_ms = source_ms; matched = true; break;
             }
         }
-        if (!matched) continue;
-        write_status(output_path, states, (now_ms() - received_ms) * 1000);
+        if (matched) ++matched_messages; else ++unmatched_messages;
+        write_status(output_path, states, (now_ms() - received_ms) * 1000, matched_messages, unmatched_messages);
         if (now_ms() - last_ping >= 5000) { ws.write(asio::buffer(std::string("PING"))); last_ping = now_ms(); }
     }
 }

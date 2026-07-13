@@ -37,6 +37,7 @@ def test_dashboard_renders_binance_and_chainlink_independently():
     assert "chainlink_stale" in source
     assert "BINANCE" in source
     assert "CHAINLINK" in source
+    assert "NOT RECEIVED" in source
 
 
 def test_dashboard_uses_consistent_pair_audit_and_status_labels():

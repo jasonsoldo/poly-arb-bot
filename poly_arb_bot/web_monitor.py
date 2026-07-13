@@ -148,9 +148,18 @@ def build_status(data_dir, log_file, state_file):
         file_age = max(reference_age_ms, 0)
         for source in ("binance", "chainlink"):
             source_age = asset.get(f"{source}_source_age_ms", -1)
-            stale = reference_age_ms > 10_000 or source_age < 0 or source_age + file_age > 10_000
+            status_key = f"{source}_status"
+            reported = asset.get(status_key)
+            if asset.get("supported") is False:
+                status = "UNSUPPORTED"
+            elif reported in {"FRESH", "STALE", "DISCONNECTED", "NOT_RECEIVED", "UNSUPPORTED", "OUTLIER"}:
+                status = "STALE" if reported == "FRESH" and (reference_age_ms > 10_000 or source_age + file_age > 10_000) else reported
+            else:
+                status = "FRESH" if source_age >= 0 and reference_age_ms <= 10_000 and source_age + file_age <= 10_000 else "STALE"
+            asset[status_key] = status
+            stale = status == "STALE"
             asset[f"{source}_stale"] = stale
-            if stale:
+            if status != "FRESH":
                 asset[source] = None
         asset["stale"] = asset["binance_stale"] and asset["chainlink_stale"]
         if asset.get("binance") is None or asset.get("chainlink") is None:
