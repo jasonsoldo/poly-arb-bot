@@ -111,6 +111,7 @@ def build_status(data_dir, log_file, state_file):
     shadow_log = data_dir.parent / "logs" / "shadow-audit.jsonl"
     selected_log = shadow_log if shadow_log.exists() else log_file
     events = _jsonl(selected_log, limit=1000)
+    events = [item for item in events if float(item.get("ts", 0)) <= time.time() + 300]
     execution_log = data_dir.parent / "logs" / "shadow-execution.jsonl"
     report = _cached_report(selected_log, execution_log)
     shadow_events = [item for item in events if item.get("event_type") in {"shadow_eval", "shadow_opportunity"}]

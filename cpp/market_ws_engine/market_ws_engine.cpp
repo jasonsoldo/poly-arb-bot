@@ -278,8 +278,8 @@ private:
             }
             const double timestamp = now_seconds();
             const double up_age_ms = (timestamp - up_book.updated_at) * 1000, down_age_ms = (timestamp - down_book.updated_at) * 1000;
-            const bool books_fresh = up_age_ms <= 2000 && down_age_ms <= 2000;
-            const bool books_synced = books_fresh && std::abs(up_book.source_timestamp_ms - down_book.source_timestamp_ms) <= 2000;
+            const bool feed_fresh = timestamp - last_activity_ <= 30;
+            const bool books_synced = feed_fresh;
             const double seconds_to_close = item.second.close_ts - timestamp;
             const double source_age_ms = std::max(std::abs(timestamp * 1000 - up_book.source_timestamp_ms), std::abs(timestamp * 1000 - down_book.source_timestamp_ms));
             auto up = buy_vwap(up_book, size_), down = buy_vwap(down_book, size_);
@@ -310,6 +310,7 @@ private:
                                    << ",\"seconds_to_close\":" << seconds_to_close << ",\"size\":" << size_
                                    << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
                                    << ",\"clock_skew_ms\":null,\"source_age_ms\":" << source_age_ms
+                                   << ",\"up_book_age_ms\":" << up_age_ms << ",\"down_book_age_ms\":" << down_age_ms
                                    << ",\"up_fill\":" << up.first << ",\"down_fill\":" << down.first
                                    << ",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
                                    << ",\"up_fee\":" << up_fee << ",\"down_fee\":" << down_fee

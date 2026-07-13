@@ -1,4 +1,5 @@
 import json
+import time
 
 from poly_arb_bot.shadow_report import build_report
 
@@ -56,3 +57,16 @@ def test_shadow_report_keeps_empty_performance_empty(tmp_path):
         "win_rate": None, "sharpe": None, "sharpe_samples": 0,
     }
     assert report["equity_curve"] == []
+
+
+def test_shadow_report_quarantines_future_clock_records(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    path.write_text(json.dumps({
+        "ts": time.time() + 3600, "event_type": "shadow_eval", "market_id": "future",
+        "reason": "books_not_synced", "fok": True,
+    }), encoding="utf-8")
+
+    report = build_report(path)
+
+    assert report["evaluations"] == 0
+    assert report["future_events"] == 1

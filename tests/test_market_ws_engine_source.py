@@ -74,3 +74,11 @@ def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
     assert "ready_markets" in SOURCE
     assert "write_health(false)" in SOURCE
     assert "std::setprecision(15)" in SOURCE
+
+
+def test_static_books_stay_usable_while_websocket_feed_is_live():
+    assert "feed_fresh = timestamp - last_activity_ <= 30" in SOURCE
+    assert "books_synced = feed_fresh" in SOURCE
+    assert "up_age_ms <= 2000" not in SOURCE
+    assert '\\\"up_book_age_ms\\\":' in SOURCE
+    assert '\\\"down_book_age_ms\\\":' in SOURCE

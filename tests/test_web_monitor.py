@@ -221,3 +221,17 @@ def test_web_status_includes_completed_shadow_analytics(tmp_path):
     assert status["performance"]["completed"] == 1
     assert status["performance"]["simulated_pnl"] == 0.25
     assert status["counts"]["simulated_complete"] == 1
+
+
+def test_web_status_does_not_display_future_clock_events(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    log.write_text(json.dumps({
+        "ts": time.time() + 3600, "event_type": "shadow_eval", "market_id": "future",
+        "reason": "books_not_synced", "decision": "REJECT",
+    }), encoding="utf-8")
+
+    status = build_status(tmp_path, log, tmp_path / "state.json")
+
+    assert status["events"] == []
+    assert status["shadow_markets"] == []
+    assert status["shadow_report"]["future_events"] == 1

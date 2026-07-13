@@ -1,6 +1,7 @@
 import json
 import math
 import statistics
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -63,7 +64,7 @@ def _performance(opportunities, execution_path):
 
 def build_report(path: Path, execution_path: Path = None):
     reasons = Counter()
-    evaluations = accepts = fok_passed = invalid = 0
+    evaluations = accepts = fok_passed = invalid = future = 0
     durations = []
     source_ages = []
     markets = set()
@@ -71,6 +72,9 @@ def build_report(path: Path, execution_path: Path = None):
     for row in _rows(path):
             if row is None:
                 invalid += 1
+                continue
+            if float(row.get("ts", 0)) > time.time() + 300:
+                future += 1
                 continue
             markets.add(row.get("market_id"))
             if row.get("event_type") == "shadow_eval":
@@ -91,6 +95,7 @@ def build_report(path: Path, execution_path: Path = None):
         "fok_passed": fok_passed,
         "accepts": accepts,
         "invalid_json": invalid,
+        "future_events": future,
         "rejection_reasons": dict(reasons),
         "opportunity_duration_ms": {"p50": percentile(durations, 0.5), "p95": percentile(durations, 0.95), "max": max(durations) if durations else None},
         "source_age_ms": {"p50": percentile(source_ages, 0.5), "p95": percentile(source_ages, 0.95), "max": max(source_ages) if source_ages else None},
