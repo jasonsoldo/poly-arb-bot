@@ -49,3 +49,18 @@ def test_web_status_does_not_count_dry_run_attempt_as_executed(tmp_path):
 
     assert status["counts"]["executed_orders"] == 0
     assert status["counts"]["shadow_attempts"] == 1
+
+
+def test_web_status_summarizes_cpp_shadow_audit(tmp_path):
+    (tmp_path / "live_snapshot.json").write_text(json.dumps({"signals": []}), encoding="utf-8")
+    (tmp_path / "live_markets.json").write_text(json.dumps({"markets": [{"market_id": "m1"}]}), encoding="utf-8")
+    log = tmp_path / "shadow.jsonl"
+    log.write_text("\n".join([
+        json.dumps({"event_type": "shadow_eval", "market_id": "m1", "reason": "no_edge", "fok": True}),
+        json.dumps({"event_type": "shadow_opportunity", "market_id": "m1", "fok": True, "profit": 0.1}),
+    ]), encoding="utf-8")
+    status = build_status(tmp_path, log, tmp_path / "state.json")
+    assert status["counts"]["shadow_evaluations"] == 1
+    assert status["counts"]["fok_passed"] == 1
+    assert status["counts"]["shadow_opportunities"] == 1
+    assert status["shadow_markets"][0]["event_type"] == "shadow_opportunity"

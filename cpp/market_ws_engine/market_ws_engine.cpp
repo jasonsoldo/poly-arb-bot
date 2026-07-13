@@ -103,9 +103,9 @@ bool fetch_book(asio::io_context& io, asio::ssl::context& ssl, const std::string
 class MarketWsSession : public std::enable_shared_from_this<MarketWsSession> {
 public:
     MarketWsSession(asio::io_context& io, asio::ssl::context& ssl, std::map<std::string, Market> markets,
-                    std::map<std::string, Book> books, double size, double fee)
+                    std::map<std::string, Book> books, double size, double fee, const std::string& audit_path)
         : resolver_(io), ws_(io, ssl), timer_(io), markets_(std::move(markets)), books_(std::move(books)),
-          size_(size), fee_(fee), last_activity_(now_seconds()) {}
+          size_(size), fee_(fee), last_activity_(now_seconds()), audit_(audit_path, std::ios::app) {}
 
     void run() {
         resolver_.async_resolve(host_, "443", beast::bind_front_handler(&MarketWsSession::on_resolve, shared_from_this()));
@@ -207,12 +207,22 @@ private:
                           << "\tfok=" << (fok ? 1 : 0) << "\tup_fill=" << up.first << "\tdown_fill=" << down.first
                           << "\tup_vwap=" << up.second << "\tdown_vwap=" << down.second
                           << "\tfees=" << up_fee + down_fee << "\ttotal=" << total << "\tprofit=" << profit << "\n" << std::flush;
+                if (audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_type\":\"shadow_eval\",\"market_id\":\"" << item.first
+                                   << "\",\"reason\":\"" << reason << "\",\"fok\":" << (fok ? "true" : "false")
+                                   << ",\"up_fill\":" << up.first << ",\"down_fill\":" << down.first
+                                   << ",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
+                                   << ",\"fees\":" << up_fee + down_fee << ",\"total\":" << total
+                                   << ",\"profit\":" << profit << "}\n" << std::flush;
                 item.second.last_reason = reason;
                 item.second.last_audit = timestamp;
             }
             if (good) std::cout << "SHADOW_OPPORTUNITY\tmarket=" << item.first << "\tup_vwap=" << std::setprecision(12) << up.second
                                 << "\tdown_vwap=" << down.second << "\tfees=" << up_fee + down_fee << "\ttotal=" << total
                                 << "\tprofit=" << profit << "\tfok=1\tduration_ms=" << (timestamp - item.second.active_since) * 1000 << "\n" << std::flush;
+            if (good && audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_type\":\"shadow_opportunity\",\"market_id\":\"" << item.first
+                                       << "\",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
+                                       << ",\"fees\":" << up_fee + down_fee << ",\"total\":" << total << ",\"profit\":" << profit
+                                       << ",\"fok\":true,\"duration_ms\":" << (timestamp - item.second.active_since) * 1000 << "}\n" << std::flush;
         }
     }
 
@@ -269,10 +279,11 @@ private:
     double size_, fee_, last_activity_;
     unsigned long long book_events_ = 0, price_changes_ = 0;
     bool stopped_ = false;
+    std::ofstream audit_;
 };
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::cerr << "usage: market_ws_engine <markets.json> [size] [fee_rate]\n"; return 2; }
+    if (argc < 2) { std::cerr << "usage: market_ws_engine <markets.json> [size] [fee_rate] [audit.jsonl]\n"; return 2; }
     try {
         std::ifstream file(argv[1]); ptree root; boost::property_tree::read_json(file, root);
         std::map<std::string, Market> markets;
@@ -282,6 +293,7 @@ int main(int argc, char** argv) {
         }
         if (markets.empty()) { std::cerr << "NO_TOKENS live_markets.json contains no valid Up/Down tokens\n"; return 4; }
         const double size = argc > 2 ? std::stod(argv[2]) : 10, fee = argc > 3 ? std::stod(argv[3]) : .07;
+        const std::string audit_path = argc > 4 ? argv[4] : "logs/shadow-audit.jsonl";
         for (;;) {
             asio::io_context io; asio::ssl::context ssl(asio::ssl::context::tls_client);
             ssl.set_default_verify_paths(); ssl.set_verify_mode(asio::ssl::verify_peer);
@@ -290,7 +302,7 @@ int main(int argc, char** argv) {
             size_t initialized = 0;
             for (auto& item : books) if (fetch_book(io, ssl, item.first, item.second)) ++initialized;
             std::cerr << "BOOK_BOOTSTRAP_SUMMARY initialized=" << initialized << " tokens=" << books.size() << "\n";
-            auto session = std::make_shared<MarketWsSession>(io, ssl, markets, std::move(books), size, fee);
+            auto session = std::make_shared<MarketWsSession>(io, ssl, markets, std::move(books), size, fee, audit_path);
             session->run(); io.run();
             std::cerr << "WS_RECONNECT delay_s=2\n";
             std::this_thread::sleep_for(std::chrono::seconds(2));

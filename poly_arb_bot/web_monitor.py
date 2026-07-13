@@ -54,6 +54,11 @@ def build_status(data_dir, log_file, state_file):
     snapshot = _json(data_dir / "live_snapshot.json", {"signals": [], "positions": []})
     market_ids = {item.get("market_id") for item in _json(data_dir / "live_markets.json", {"markets": []}).get("markets", [])}
     signals = [item for item in snapshot.get("signals", []) if item.get("market_id") in market_ids]
+    events = _jsonl(log_file, limit=1000)
+    shadow_events = [item for item in events if item.get("event_type") in {"shadow_eval", "shadow_opportunity"}]
+    latest_shadow = {}
+    for item in shadow_events:
+        latest_shadow.setdefault(item.get("market_id"), item)
     state = _json(state_file, {"client_order_ids": {}})
     decisions = list(state.get("client_order_ids", {}).values())
     decision_records = [item for item in decisions if isinstance(item, dict)]
@@ -66,7 +71,7 @@ def build_status(data_dir, log_file, state_file):
         "mode": "DRY RUN",
         "snapshot": snapshot,
         "signals": signals,
-        "events": _jsonl(log_file),
+        "events": events[:100],
         "counts": {
             "raw_signals": len(signals),
             "model_edges": len(model_edges),
@@ -74,7 +79,11 @@ def build_status(data_dir, log_file, state_file):
             "executed_orders": sum(item.get("status") in {"filled", "partially_filled", "submitted"} for item in decision_records),
             "risk_decisions": len(decisions),
             "shadow_attempts": sum(item.get("status") == "dry_run" for item in decision_records),
+            "shadow_evaluations": sum(item.get("event_type") == "shadow_eval" for item in shadow_events),
+            "fok_passed": sum(item.get("event_type") == "shadow_eval" and item.get("fok") for item in shadow_events),
+            "shadow_opportunities": sum(item.get("event_type") == "shadow_opportunity" for item in shadow_events),
         },
+        "shadow_markets": list(latest_shadow.values()),
         "blocked_reasons": dict(blocked),
         "risk_limits": {"max_seconds_to_close": config.max_seconds_to_close, "min_liquidity": config.min_liquidity},
         "latency_ms": {"polymarket": None, "binance": None, "chainlink": None, "engine": None},

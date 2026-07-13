@@ -32,3 +32,9 @@ def test_ws_engine_bootstraps_rest_books_before_ws_deltas():
     assert 'book.initialized = true' in SOURCE
     assert '"BOOK_BOOTSTRAP_SUMMARY initialized="' in SOURCE
     assert '"book_uninitialized"' in SOURCE
+
+
+def test_ws_engine_writes_structured_shadow_audit():
+    assert '\\"event_type\\":\\"shadow_eval\\"' in SOURCE
+    assert '\\"event_type\\":\\"shadow_opportunity\\"' in SOURCE
+    assert 'logs/shadow-audit.jsonl' in SOURCE

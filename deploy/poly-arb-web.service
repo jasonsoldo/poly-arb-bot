@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/poly-arb-bot
-ExecStart=/opt/poly-arb-bot/.venv/bin/python -m poly_arb_bot.cli web-monitor --host 0.0.0.0 --port 8787 --log-file /opt/poly-arb-bot/logs/orders.jsonl --state-file /opt/poly-arb-bot/state/orders.json
+ExecStart=/opt/poly-arb-bot/.venv/bin/python -m poly_arb_bot.cli web-monitor --host 0.0.0.0 --port 8787 --log-file /opt/poly-arb-bot/logs/shadow-audit.jsonl --state-file /opt/poly-arb-bot/state/orders.json
 Restart=always
 RestartSec=5
 StandardOutput=append:/var/log/poly-arb-web.log
