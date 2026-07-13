@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 mkdir -p data logs state
+touch logs/shadow-audit.jsonl
 
 refresh_seconds="${MARKET_REFRESH_SECONDS:-60}"
 size="${SHADOW_SIZE:-10}"
