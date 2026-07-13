@@ -4,6 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p data logs state
 touch logs/shadow-audit.jsonl
+python_bin="${PYTHON_BIN:-$PWD/.venv/bin/python}"
+if [[ ! -x "$python_bin" ]]; then
+  echo "PYTHON_NOT_EXECUTABLE path=$python_bin" >&2
+  exit 1
+fi
 
 refresh_seconds="${MARKET_REFRESH_SECONDS:-60}"
 size="${SHADOW_SIZE:-10}"
@@ -16,13 +21,13 @@ orphan_loss_per_share="${SHADOW_ORPHAN_LOSS_PER_SHARE:-0.02}"
 min_expected_value="${SHADOW_MIN_EXPECTED_VALUE:-0.01}"
 
 scan_once() {
-  python -m poly_arb_bot.cli scan-updown \
+  "$python_bin" -m poly_arb_bot.cli scan-updown \
     --output data/live_markets.json \
     --intervals 5m,15m \
     --slug-window current,next
 }
 
-until scan_once && [[ "$(python -c 'import json; print(len(json.load(open("data/live_markets.json"))["markets"]))')" -gt 0 ]]; do
+until scan_once && [[ "$("$python_bin" -c 'import json; print(len(json.load(open("data/live_markets.json"))["markets"]))')" -gt 0 ]]; do
   echo "SHADOW_LOOP no_markets retry_s=$refresh_seconds"
   sleep "$refresh_seconds"
 done

@@ -15,6 +15,12 @@ def test_shadow_loop_runs_cpp_engine_with_structured_audit_path():
     assert "logs/shadow-audit.jsonl" in SCRIPT
 
 
+def test_shadow_loop_uses_project_virtualenv_under_systemd():
+    assert 'python_bin="${PYTHON_BIN:-$PWD/.venv/bin/python}"' in SCRIPT
+    assert '"$python_bin" -m poly_arb_bot.cli scan-updown' in SCRIPT
+    assert "PYTHON_NOT_EXECUTABLE" in SCRIPT
+
+
 def test_systemd_requires_ntp_and_logrotate_retains_thirty_days():
     service = Path("deploy/poly-arb-bot.service").read_text(encoding="utf-8")
     ntp = Path("scripts/check_ntp.sh").read_text(encoding="utf-8")
