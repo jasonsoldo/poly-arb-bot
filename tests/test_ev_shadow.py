@@ -125,7 +125,7 @@ def test_historical_backfill_requests_assets_concurrently(monkeypatch):
 
 
 def test_chainlink_start_anchor_uses_first_source_sample_at_or_after_start():
-    markets = {"m1": {"market_id": "m1", "asset": "BTC", "start_ts": 1000,
+    markets = {"m1": {"market_id": "m1", "condition_id": "c1", "asset": "BTC", "interval": "5m", "start_ts": 1000,
                        "settlement_source": "chainlink"}}
     venue_state = {"assets": {"BTC": {"chainlink_samples": [
         {"source_timestamp_ms": 999_900, "price": 99},
@@ -135,6 +135,48 @@ def test_chainlink_start_anchor_uses_first_source_sample_at_or_after_start():
     anchors = ev_shadow.capture_opening_prices(markets, venue_state, {}, now_ms=1_001_000)
     assert anchors["m1"]["price"] == 100
     assert anchors["m1"]["source_timestamp_ms"] == 1_000_100
+    assert anchors["m1"]["capture_mode"] == "live_boundary"
+
+
+def test_restart_backfill_derives_start_from_close_and_interval():
+    markets = {"m1": {"market_id": "m1", "condition_id": "c1", "asset": "BTC", "interval": "1h",
+                       "close_ts": 4600, "settlement_source": "binance"}}
+    venue_state = {"assets": {"BTC": {"binance_samples": [
+        {"source_timestamp_ms": 1_000_050, "price": 101},
+    ]}}}
+    anchors = ev_shadow.capture_opening_prices(markets, venue_state, {}, now_ms=2_000_000)
+    assert anchors["m1"]["start_ts"] == 1000
+    assert anchors["m1"]["price"] == 101
+    assert anchors["m1"]["capture_mode"] == "restart_backfill"
+
+
+def test_restart_backfill_does_not_use_current_price_outside_boundary():
+    markets = {"m1": {"market_id": "m1", "condition_id": "c1", "asset": "BTC", "interval": "1h",
+                       "close_ts": 4600, "settlement_source": "binance"}}
+    venue_state = {"assets": {"BTC": {"binance_samples": [
+        {"source_timestamp_ms": 1_020_000, "price": 105},
+    ]}}}
+    anchors = ev_shadow.capture_opening_prices(markets, venue_state, {}, now_ms=2_000_000)
+    assert anchors == {}
+
+
+def test_mismatched_persisted_anchor_is_replaced_by_current_market_anchor():
+    markets = {"m1": {"market_id": "m1", "condition_id": "new", "asset": "BTC", "interval": "5m",
+                       "start_ts": 1000, "settlement_source": "chainlink"}}
+    existing = {"m1": {"market_id": "m1", "condition_id": "old", "asset": "BTC", "interval": "5m",
+                       "start_ts": 1000, "price": 90, "source": "chainlink",
+                       "source_timestamp_ms": 1_000_100}}
+    venue_state = {"assets": {"BTC": {"chainlink_samples": [
+        {"source_timestamp_ms": 1_000_200, "price": 100},
+    ]}}}
+    anchors = ev_shadow.capture_opening_prices(markets, venue_state, existing, now_ms=1_001_000)
+    assert anchors["m1"]["condition_id"] == "new"
+    assert anchors["m1"]["price"] == 100
+
+
+def test_removed_market_anchor_is_pruned():
+    existing = {"old": {"market_id": "old", "price": 90}}
+    assert ev_shadow.capture_opening_prices({}, {}, existing, now_ms=1_001_000) == {}
 
 
 def test_missed_chainlink_start_anchor_fails_closed():
@@ -144,8 +186,20 @@ def test_missed_chainlink_start_anchor_fails_closed():
     assert all(item["reason"] == "price_to_beat_capture_missed" for item in rows)
 
 
+def test_stale_book_is_not_hidden_by_missing_price_to_beat():
+    row = market()
+    row.update(open_price=None, start_ts=900)
+    old_event = event()
+    old_event["source_age_ms"] = 10_000
+    rows = evaluate_market_event(old_event, row, venue(), now=1000.0, opening_prices={})
+    assert all(item["reason"] == "clob_book_stale" for item in rows)
+    assert all(item["blocking_reasons"][:2] == [
+        "clob_book_stale", "price_to_beat_capture_missed"
+    ] for item in rows)
+
+
 def test_binance_hourly_anchor_uses_binance_source_samples():
-    markets = {"m1": {"market_id": "m1", "asset": "BTC", "interval": "1h",
+    markets = {"m1": {"market_id": "m1", "condition_id": "c1", "asset": "BTC", "interval": "1h",
                        "settlement_source": "binance", "start_ts": 1000}}
     venue_state = {"assets": {"BTC": {
         "chainlink_samples": [{"source_timestamp_ms": 1_000_000, "price": 99}],

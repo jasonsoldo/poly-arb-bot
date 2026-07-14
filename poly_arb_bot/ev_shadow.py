@@ -23,6 +23,7 @@ BINANCE_SYMBOLS = {
     "XRP": "XRPUSDT", "BNB": "BNBUSDT", "DOGE": "DOGEUSDT",
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
+INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
 STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v2"
 
 
@@ -48,30 +49,104 @@ def strategy_config():
     return values, hashlib.sha256(encoded).hexdigest()
 
 
+def _market_start_ts(market):
+    start_ts = float(market.get("start_ts") or 0)
+    if start_ts > 0:
+        return start_ts
+    close_ts = float(market.get("close_ts") or 0)
+    duration = INTERVAL_SECONDS.get(market.get("interval"))
+    if close_ts > 0 and duration:
+        return close_ts - duration
+    return 0.0
+
+
+def _anchor_identity(market, start_ts=None):
+    return {
+        "market_id": market.get("market_id"),
+        "condition_id": market.get("condition_id", market.get("market_id")),
+        "asset": market.get("asset"),
+        "interval": market.get("interval"),
+        "start_ts": float(_market_start_ts(market) if start_ts is None else start_ts),
+        "settlement_source": market.get("settlement_source"),
+    }
+
+
+def _anchor_matches_market(anchor, market):
+    if not anchor or anchor.get("price") is None:
+        return False
+    identity = _anchor_identity(market)
+    # Legacy anchors were keyed by market_id only. Preserve them when they do
+    # not carry conflicting identity fields, then upgrade them on persistence.
+    for field, expected in identity.items():
+        actual = anchor.get(field)
+        if actual is not None and actual != expected:
+            return False
+    return True
+
+
+def _build_anchor(market, price, source, source_timestamp_ms, captured_at_ms, capture_mode):
+    anchor = _anchor_identity(market)
+    anchor.update({
+        "price": float(price),
+        "source": source,
+        "source_timestamp_ms": float(source_timestamp_ms),
+        "captured_at_ms": float(captured_at_ms),
+        "capture_mode": capture_mode,
+    })
+    return anchor
+
+
 def capture_opening_prices(markets, venue, existing, now_ms=None):
     now_ms = time.time() * 1000 if now_ms is None else now_ms
-    anchors = dict(existing)
+    anchors = {}
     for market_id, market in markets.items():
-        if market_id in anchors or market.get("open_price") is not None:
+        start_ts = _market_start_ts(market)
+        start_ms = start_ts * 1000
+        open_price = market.get("open_price")
+        if open_price is not None:
+            anchors[market_id] = _build_anchor(
+                market,
+                open_price,
+                "gamma",
+                market.get("open_price_source_timestamp_ms") or start_ms or now_ms,
+                now_ms,
+                "gamma",
+            )
             continue
-        start_ms = float(market.get("start_ts") or 0) * 1000
+        previous = existing.get(market_id)
+        if _anchor_matches_market(previous, market):
+            upgraded = _anchor_identity(market)
+            upgraded.update(previous)
+            upgraded.setdefault("capture_mode", "legacy_persisted")
+            anchors[market_id] = upgraded
+            continue
         if not start_ms or now_ms < start_ms:
             continue
         source = market.get("settlement_source")
         if source not in {"binance", "chainlink"}:
             continue
         samples = venue.get("assets", {}).get(market.get("asset"), {}).get(f"{source}_samples", [])
-        eligible = [row for row in samples
-                    if start_ms <= float(row.get("source_timestamp_ms", 0))
-                    <= start_ms + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS]
+        eligible = [
+            row for row in samples
+            if start_ms <= float(row.get("source_timestamp_ms", 0))
+            <= start_ms + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS
+            and row.get("price") is not None
+        ]
         if eligible:
             sample = min(eligible, key=lambda row: float(row["source_timestamp_ms"]))
-            anchors[market_id] = {
-                "price": float(sample["price"]),
-                "source_timestamp_ms": float(sample["source_timestamp_ms"]),
-                "captured_at_ms": now_ms,
-                "source": source,
-            }
+            capture_mode = (
+                "live_boundary"
+                if now_ms <= start_ms + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS
+                else "restart_backfill"
+            )
+            anchors[market_id] = _build_anchor(
+                market,
+                sample["price"],
+                source,
+                sample["source_timestamp_ms"],
+                now_ms,
+                capture_mode,
+            )
     return anchors
 
 
@@ -170,12 +245,20 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         if historical:
             model_asset = dict(asset, **historical)
             model_source = "binance_historical_1m"
-    anchor = (opening_prices or {}).get(market.get("market_id"), {})
+    raw_anchor = (opening_prices or {}).get(market.get("market_id"), {})
+    anchor = raw_anchor if _anchor_matches_market(raw_anchor, market) else {}
     price_to_beat = market.get("open_price")
     price_to_beat_source = "gamma" if price_to_beat is not None else None
+    price_to_beat_capture_mode = "gamma" if price_to_beat is not None else None
+    price_to_beat_source_timestamp_ms = (
+        market.get("open_price_source_timestamp_ms")
+        or (_market_start_ts(market) * 1000 if price_to_beat is not None else None)
+    )
     if price_to_beat is None and anchor.get("price") is not None:
         price_to_beat = float(anchor["price"])
         price_to_beat_source = f"{anchor.get('source')}_start_anchor"
+        price_to_beat_capture_mode = anchor.get("capture_mode")
+        price_to_beat_source_timestamp_ms = anchor.get("source_timestamp_ms")
     up_imbalance = event.get("up_book_imbalance")
     down_imbalance = event.get("down_book_imbalance")
     paired_imbalance = None
@@ -185,12 +268,15 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
     probability_block_reason = None
     if up_probability is None:
         if price_to_beat is None:
-            start_ts = float(market.get("start_ts") or 0)
-            probability_block_reason = (
-                "price_to_beat_capture_missed"
-                if start_ts and now * 1000 > start_ts * 1000 + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS
-                else "price_to_beat_pending"
-            )
+            start_ts = _market_start_ts(market)
+            if not start_ts:
+                probability_block_reason = "price_to_beat_start_time_unavailable"
+            else:
+                probability_block_reason = (
+                    "price_to_beat_capture_missed"
+                    if now * 1000 > start_ts * 1000 + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS
+                    else "price_to_beat_pending"
+                )
         elif not model_asset.get("volatility_per_sqrt_second"):
             probability_block_reason = "volatility_unavailable"
         elif int(model_asset.get("model_sample_count", 0)) < 20:
@@ -202,7 +288,6 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         else:
             probability_block_reason = "probability_model_unavailable"
     size = max(float(event.get("size", 0)), 1e-9)
-    settlement = asset.get("sources", {}).get(settlement_source, {})
     rows = []
     config_values, config_hash = strategy_config()
     for outcome, fill_key, ask_key, fee_key, depth_key, imbalance_key, probability in (
@@ -246,9 +331,14 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             target_depth_ok=float(event.get("up_fill" if outcome == "Up" else "down_fill", 0)) >= size,
             momentum_bps_30s=model_asset.get("momentum_bps_30s"),
             order_book_imbalance=event.get(imbalance_key), confidence=confidence,
-            settlement_source_verified=(settlement.get("status") == "FRESH" and
-                                        settlement.get("price") is not None),
+            settlement_source_verified=any(
+                quote.source == settlement_source
+                and quote.status == "FRESH"
+                and quote.price is not None
+                for quote in reference.sources
+            ),
             probability_block_reason=probability_block_reason,
+            settlement_source=settlement_source or "",
         )
         for strategy, evaluator in (
             ("late_window_directional_ev", evaluate_directional),
@@ -274,7 +364,8 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             audit["model_sample_count"] = int(model_asset.get("model_sample_count", 0))
             audit["model_source"] = model_source if up_probability is not None else None
             audit["price_to_beat_source"] = price_to_beat_source
-            audit["price_to_beat_source_timestamp_ms"] = anchor.get("source_timestamp_ms")
+            audit["price_to_beat_capture_mode"] = price_to_beat_capture_mode
+            audit["price_to_beat_source_timestamp_ms"] = price_to_beat_source_timestamp_ms
             audit["target_size"] = size
             audit["window"] = market.get("window", "current")
             audit["config_version"] = STRATEGY_CONFIG_VERSION
