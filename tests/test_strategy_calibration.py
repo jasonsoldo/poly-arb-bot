@@ -56,6 +56,17 @@ def test_incomplete_legacy_trade_is_excluded_from_model_metrics(tmp_path):
     assert report["by_strategy"]["late_window_directional_ev"]["brier_score"] is None
 
 
+def test_missing_config_hash_is_json_serializable(tmp_path):
+    path = tmp_path / "execution.jsonl"
+    path.write_text(json.dumps({
+        "event_type": "shadow_complete", "event_id": "legacy", "ts": 1,
+        "strategy": "late_window_directional_ev",
+    }), encoding="utf-8")
+    report = build_calibration(path, "latest")
+    assert report["config_hash_counts"] == {"<missing>": 1}
+    json.dumps(report, sort_keys=True)
+
+
 def test_official_winner_requires_closed_binary_resolution():
     rows = [
         {"conditionId": "c1", "closed": True,

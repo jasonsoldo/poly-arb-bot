@@ -148,7 +148,9 @@ def build_calibration(path, config_hash=None, resolved_outcomes=None):
         "official_resolution_verified": official_verified,
         "official_resolution_mismatches": official_mismatches,
         "by_strategy": by_strategy,
-        "config_hash_counts": dict(Counter(row.get("strategy_config_hash") for row in all_rows)),
+        "config_hash_counts": dict(Counter(
+            row.get("strategy_config_hash") or "<missing>" for row in all_rows
+        )),
         "trades": [{field: row.get(field) for field in evidence_fields} for row in rows],
     }
 
