@@ -1,6 +1,8 @@
 import json
+import threading
 import time
 
+import poly_arb_bot.web_monitor as web_monitor
 from poly_arb_bot.web_monitor import _jsonl, _strategy_counts, build_status
 
 
@@ -275,6 +277,42 @@ def test_web_status_exposes_latest_completed_pnl_per_asset(tmp_path):
     }
     assert status["asset_latest_pnl"]["ETH"]["pnl"] == 0.12
     assert status["asset_latest_pnl"]["SOL"] is None
+
+
+def test_web_status_does_not_block_on_initial_large_strategy_audit(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (data / "shadow-health.json").write_text(json.dumps({
+        "updated_at": time.time(), "ws_connected": True,
+    }), encoding="utf-8")
+    (data / "venue-status.json").write_text(json.dumps({
+        "updated_at_ms": time.time() * 1000, "assets": {},
+    }), encoding="utf-8")
+    (logs / "strategy-audit.jsonl").write_text("{}\n", encoding="utf-8")
+    release = threading.Event()
+
+    def slow_counts(paths):
+        release.wait(1)
+        return {
+            name: {"evaluations": 0, "accepts": 0, "rejections": 0,
+                   "model_evaluations": 0, "latest_model_evaluated": False,
+                   "unique_opportunities": 0, "active_opportunities": 0}
+            for name in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+        }
+
+    monkeypatch.setattr(web_monitor, "STRATEGY_ASYNC_THRESHOLD_BYTES", 1)
+    monkeypatch.setattr(web_monitor, "_strategy_counts", slow_counts)
+    threading.Timer(0.2, release.set).start()
+
+    started = time.perf_counter()
+    status = build_status(data, logs / "missing.jsonl", tmp_path / "state.json")
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.15
+    assert status["analytics_refreshing"] is True
+    assert status["system_status"] == "DEGRADED"
+    release.wait(1)
 
 
 def test_web_status_exposes_open_strategy_shadow_positions(tmp_path):

@@ -70,3 +70,9 @@ def test_dashboard_renders_latest_asset_pnl_from_completed_shadow_data():
     assert "asset_latest_pnl" in source
     assert "assetPnlCell" in source
     assert "NO COMPLETED SHADOW TRADE" in source
+
+
+def test_dashboard_shows_unknown_analytics_while_background_refresh_runs():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    assert "analytics_refreshing" in source
+    assert "ANALYTICS REFRESHING" in source

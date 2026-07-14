@@ -14,6 +14,10 @@ _REPORT_CACHE = {}
 _REPORT_LOCK = threading.Lock()
 _STRATEGY_COUNT_CACHE = {}
 _STRATEGY_COUNT_LOCK = threading.Lock()
+_STRATEGY_COUNT_JOBS = {}
+_STRATEGY_COUNT_RESULTS = {}
+_STRATEGY_JOB_LOCK = threading.Lock()
+STRATEGY_ASYNC_THRESHOLD_BYTES = 10 * 1024 * 1024
 ASSETS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE")
 INTERVALS = ("5m", "15m", "1h", "4h")
 
@@ -91,11 +95,18 @@ def _jsonl(path, limit=100):
     return list(reversed(rows))
 
 
+def _empty_strategy_counts():
+    return {
+        name: {"evaluations": 0, "accepts": 0, "rejections": 0,
+               "model_evaluations": 0, "latest_model_evaluated": False,
+               "unique_opportunities": 0, "active_opportunities": 0}
+        for name in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+    }
+
+
 def _strategy_counts(paths):
     names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
-    total = {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
-                    "model_evaluations": 0, "latest_model_evaluated": False,
-                    "unique_opportunities": 0, "active_opportunities": 0} for name in names}
+    total = _empty_strategy_counts()
     with _STRATEGY_COUNT_LOCK:
         for path in paths:
             key = str(path.resolve())
@@ -161,6 +172,36 @@ def _strategy_counts(paths):
                 total[name]["active_opportunities"] += len(state["active"][name])
                 total[name]["latest_model_evaluated"] = state["counts"][name]["latest_model_evaluated"]
     return total
+
+
+def _strategy_counts_worker(key, paths):
+    try:
+        result = _strategy_counts(paths)
+        with _STRATEGY_JOB_LOCK:
+            _STRATEGY_COUNT_RESULTS[key] = result
+    finally:
+        with _STRATEGY_JOB_LOCK:
+            _STRATEGY_COUNT_JOBS.pop(key, None)
+
+
+def _strategy_counts_for_status(paths):
+    paths = tuple(paths)
+    key = tuple(str(path.resolve()) for path in paths)
+    size = sum(path.stat().st_size for path in paths if path.exists())
+    initialized = all(not path.exists() or str(path.resolve()) in _STRATEGY_COUNT_CACHE for path in paths)
+    with _STRATEGY_JOB_LOCK:
+        job = _STRATEGY_COUNT_JOBS.get(key)
+        if job and job.is_alive():
+            return _STRATEGY_COUNT_RESULTS.get(key, _empty_strategy_counts()), True
+        if not initialized and size >= STRATEGY_ASYNC_THRESHOLD_BYTES:
+            job = threading.Thread(target=_strategy_counts_worker, args=(key, paths), daemon=True)
+            _STRATEGY_COUNT_JOBS[key] = job
+            job.start()
+            return _STRATEGY_COUNT_RESULTS.get(key, _empty_strategy_counts()), True
+    result = _strategy_counts(paths)
+    with _STRATEGY_JOB_LOCK:
+        _STRATEGY_COUNT_RESULTS[key] = result
+    return result, False
 
 
 def _signal_block_reason(signal, config):
@@ -310,7 +351,9 @@ def build_status(data_dir, log_file, state_file):
             cell["count"] += 1
     latest_event = next(iter(latest_shadow.values()), None)
     strategy_score = _strategy_score(latest_event)
-    strategy_counts = _strategy_counts((selected_log, strategy_log))
+    strategy_counts, analytics_refreshing = _strategy_counts_for_status((selected_log, strategy_log))
+    if analytics_refreshing and system_status == "ONLINE":
+        system_status = "DEGRADED"
     strategy_evaluations = sum(row["evaluations"] for row in strategy_counts.values())
     strategy_accepts = sum(row["accepts"] for row in strategy_counts.values())
     unique_opportunities = sum(row["unique_opportunities"] for row in strategy_counts.values())
@@ -419,6 +462,7 @@ def build_status(data_dir, log_file, state_file):
         },
         "market_matrix": market_matrix,
         "asset_latest_pnl": asset_latest_pnl,
+        "analytics_refreshing": analytics_refreshing,
         "system_status": system_status,
         "rejection_reasons": report["rejection_reasons"] or dict(rejection_reasons),
         "shadow_report": report,
