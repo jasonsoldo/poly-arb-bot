@@ -89,14 +89,14 @@ def _jsonl(path, limit=100):
 def _strategy_counts(paths):
     names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
     total = {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
-                    "model_evaluations": 0} for name in names}
+                    "model_evaluations": 0, "latest_model_evaluated": False} for name in names}
     with _STRATEGY_COUNT_LOCK:
         for path in paths:
             key = str(path.resolve())
             state = _STRATEGY_COUNT_CACHE.setdefault(key, {
                 "offset": 0, "size": 0, "seen": set(),
                 "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
-                                  "model_evaluations": 0} for name in names},
+                                  "model_evaluations": 0, "latest_model_evaluated": False} for name in names},
             })
             try:
                 size = path.stat().st_size
@@ -106,7 +106,7 @@ def _strategy_counts(paths):
                 state.update({
                     "offset": 0, "size": 0, "seen": set(),
                     "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
-                                      "model_evaluations": 0} for name in names},
+                                      "model_evaluations": 0, "latest_model_evaluated": False} for name in names},
                 })
             if size > state["offset"]:
                 try:
@@ -133,6 +133,8 @@ def _strategy_counts(paths):
                             bucket["model_evaluations"] += int(
                                 strategy != "paired_lock" and row.get("estimated_probability") is not None
                             )
+                            if strategy != "paired_lock":
+                                bucket["latest_model_evaluated"] = row.get("estimated_probability") is not None
                         state["offset"] = handle.tell()
                 except OSError:
                     pass
@@ -140,6 +142,7 @@ def _strategy_counts(paths):
             for name in names:
                 for field in ("evaluations", "accepts", "rejections", "model_evaluations"):
                     total[name][field] += state["counts"][name][field]
+                total[name]["latest_model_evaluated"] = state["counts"][name]["latest_model_evaluated"]
     return total
 
 

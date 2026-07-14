@@ -46,7 +46,7 @@ class EvDecision:
 
 def _common_rejection(row):
     if row.price_to_beat is None:
-        return "price_to_beat_missing"
+        return row.probability_block_reason or "price_to_beat_missing"
     if row.estimated_probability is None:
         return row.probability_block_reason or "probability_model_unavailable"
     if not row.settlement_source_verified:

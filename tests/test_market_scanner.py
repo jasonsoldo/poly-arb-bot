@@ -44,6 +44,17 @@ def test_scanner_reads_market_fee_schedule():
     assert MarketScanner().spec_from_market(market).fee_rate == 0.05
 
 
+def test_scanner_reads_official_event_start_time_for_chainlink_anchor():
+    event = {"startTime": "2026-07-14T00:35:00Z"}
+    market = {
+        "conditionId": "0xcondition", "question": "Bitcoin Up or Down - test",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-14T00:40:00Z",
+    }
+    spec = MarketScanner().spec_from_market(market, event)
+    assert spec.start_ts == 1783989300
+
+
 def test_scanner_reads_open_price_from_event_metadata():
     event = {"eventMetadata": {"priceToBeat": 63048.3179}}
     market = {

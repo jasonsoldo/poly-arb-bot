@@ -45,6 +45,8 @@ struct SourceState {
     bool connected = false;
     bool supported = false;
     std::deque<std::pair<double, double>> samples;
+    struct AnchorSample { double source_timestamp_ms, received_at, price; };
+    std::deque<AnchorSample> anchor_samples;
 };
 
 struct AssetState { std::map<std::string, SourceState> sources; };
@@ -199,6 +201,16 @@ void write_status_locked(SharedState& shared, bool force = false) {
         if (fresh_spot.size() > 1) out << divergence; else out << "null";
         out << ",\"reference_quorum_met\":" << (quorum ? "true" : "false")
             << ",\"reference_state\":\"" << (quorum ? "REFERENCE_READY" : "REFERENCE_BLOCKED") << "\""
+            << ",\"chainlink_samples\":[";
+        bool first_anchor = true;
+        for (const auto& sample : chainlink.anchor_samples) {
+            if (!first_anchor) out << ',';
+            first_anchor = false;
+            out << "{\"source_timestamp_ms\":" << sample.source_timestamp_ms
+                << ",\"received_at\":" << sample.received_at
+                << ",\"price\":" << sample.price << '}';
+        }
+        out << ']'
             << ",\"volatility_per_sqrt_second\":"; write_number(out, median(volatilities));
         out << ",\"momentum_bps_30s\":";
         if (!momentums.empty()) out << median(momentums); else out << "null";
@@ -227,6 +239,16 @@ void publish(SharedState& shared, const std::string& asset, const std::string& s
     row.samples.emplace_back(received, price);
     while (!row.samples.empty() && received - row.samples.front().first > 300000) row.samples.pop_front();
     while (row.samples.size() > 512) row.samples.pop_front();
+    if (source == "chainlink" && !source_timestamp.empty()) {
+        try {
+            double source_timestamp_ms = std::stod(source_timestamp);
+            if (source_timestamp_ms > 0 && source_timestamp_ms < 1e12) source_timestamp_ms *= 1000;
+            if (source_timestamp_ms > 0) {
+                row.anchor_samples.push_back({source_timestamp_ms, received, price});
+                while (row.anchor_samples.size() > 128) row.anchor_samples.pop_front();
+            }
+        } catch (...) {}
+    }
     ++shared.matched_messages;
     shared.engine_latency_us = (now_ms() - received) * 1000;
     write_status_locked(shared);
@@ -287,10 +309,10 @@ ptree parse_json(const std::string& raw) {
 void initialize(SharedState& shared) {
     for (const auto& config : ASSETS) {
         auto& sources = shared.assets[config.asset].sources;
-        sources["binance"] = {config.binance, "spot", "USDT", "", 0, 0, 0, 0, false, std::string(config.binance).size() > 0, {}};
-        sources["coinbase"] = {config.coinbase, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.coinbase).size() > 0, {}};
-        sources["kraken"] = {config.kraken, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.kraken).size() > 0, {}};
-        sources["chainlink"] = {config.chainlink, "settlement", "USD", "", 0, 0, 0, 0, false, std::string(config.chainlink).size() > 0, {}};
+        sources["binance"] = {config.binance, "spot", "USDT", "", 0, 0, 0, 0, false, std::string(config.binance).size() > 0, {}, {}};
+        sources["coinbase"] = {config.coinbase, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.coinbase).size() > 0, {}, {}};
+        sources["kraken"] = {config.kraken, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.kraken).size() > 0, {}, {}};
+        sources["chainlink"] = {config.chainlink, "settlement", "USD", "", 0, 0, 0, 0, false, std::string(config.chainlink).size() > 0, {}, {}};
     }
 }
 

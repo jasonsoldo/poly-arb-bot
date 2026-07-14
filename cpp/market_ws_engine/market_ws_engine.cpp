@@ -159,6 +159,7 @@ public:
           leg_interval_us_(leg_interval_us), execution_half_life_us_(execution_half_life_us),
           orphan_loss_per_share_(orphan_loss_per_share), min_expected_value_(min_expected_value),
           last_activity_(now_seconds()), audit_(audit_path, std::ios::app), markets_path_(markets_path), health_path_(health_path),
+          run_id_(std::to_string(static_cast<unsigned long long>(now_seconds() * 1000000))),
           document_version_(document_version), generation_(1), ws_session_id_(++next_session_id_) {
         audit_ << std::setprecision(15);
         for (auto& item : books_) item.second.generation = generation_;
@@ -305,12 +306,12 @@ private:
             if (!good) item.second.active_since = 0;
             if (reason != item.second.last_reason || timestamp - item.second.last_audit >= 5) {
                 const unsigned long long evaluation_sequence = ++evaluation_sequence_;
-                const std::string evaluation_id = std::to_string(generation_) + ":" + std::to_string(ws_session_id_) + ":" + item.first + ":" + std::to_string(evaluation_sequence);
+                const std::string evaluation_id = run_id_ + ":" + std::to_string(generation_) + ":" + std::to_string(ws_session_id_) + ":" + item.first + ":" + std::to_string(evaluation_sequence);
                 std::cout << "SHADOW_EVAL\tmarket=" << item.first << "\treason=" << reason
                           << "\tfok=" << (fok ? 1 : 0) << "\tup_fill=" << up.first << "\tdown_fill=" << down.first
                           << "\tup_vwap=" << up.second << "\tdown_vwap=" << down.second
                           << "\tfees=" << up_fee + down_fee << "\tnet_cost=" << net_cost << "\tlocked_profit=" << profit << "\n" << std::flush;
-                if (audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_id\":\"" << evaluation_id << "\",\"evaluation_sequence\":" << evaluation_sequence << ",\"event_type\":\"shadow_eval\",\"strategy\":\"paired_lock\",\"market_id\":\"" << item.first
+                if (audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_id\":\"" << evaluation_id << "\",\"run_id\":\"" << run_id_ << "\",\"evaluation_sequence\":" << evaluation_sequence << ",\"event_type\":\"shadow_eval\",\"strategy\":\"paired_lock\",\"market_id\":\"" << item.first
                                    << "\",\"reason\":\"" << reason << "\",\"fok\":" << (fok ? "true" : "false")
                                    << ",\"seconds_to_close\":" << seconds_to_close << ",\"size\":" << size_
                                    << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
@@ -336,7 +337,7 @@ private:
             if (good) std::cout << "SHADOW_OPPORTUNITY\tmarket=" << item.first << "\tup_vwap=" << std::setprecision(12) << up.second
                                 << "\tdown_vwap=" << down.second << "\tfees=" << up_fee + down_fee << "\tnet_cost=" << net_cost
                                 << "\tprofit=" << profit << "\tfok=1\tduration_ms=" << (timestamp - item.second.active_since) * 1000 << "\n" << std::flush;
-            if (good && audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_id\":\"" << generation_ << ':' << ws_session_id_ << ':' << item.first << ":opportunity:" << ++opportunity_sequence_ << "\",\"event_type\":\"shadow_opportunity\",\"market_id\":\"" << item.first
+            if (good && audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':' << ws_session_id_ << ':' << item.first << ":opportunity:" << ++opportunity_sequence_ << "\",\"run_id\":\"" << run_id_ << "\",\"event_type\":\"shadow_opportunity\",\"market_id\":\"" << item.first
                                        << "\",\"strategy\":\"paired_lock\",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
                                        << ",\"fee_rate\":" << rate << ",\"fees\":" << up_fee + down_fee << ",\"net_cost\":" << net_cost << ",\"locked_profit\":" << profit
                                        << ",\"fok\":true,\"duration_ms\":" << (timestamp - item.second.active_since) * 1000 << "}\n" << std::flush;
@@ -484,7 +485,7 @@ private:
     unsigned long long book_events_ = 0, price_changes_ = 0;
     bool stopped_ = false;
     std::ofstream audit_;
-    std::string markets_path_, health_path_;
+    std::string markets_path_, health_path_, run_id_;
     double last_health_write_ = 0;
     unsigned long long document_version_, generation_, ws_session_id_, full_resync_count_ = 0;
     unsigned long long evaluation_sequence_ = 0, opportunity_sequence_ = 0;

@@ -31,7 +31,7 @@ def evaluate_status(status):
          "passed": all(row.get("accepts", 0) + row.get("rejections", 0) == row.get("evaluations", 0)
                        for row in strategy_rows)},
         {"name": "probability_models_evaluated",
-         "passed": all(row.get("model_evaluations", 0) > 0 for row in probability_rows)},
+         "passed": all(row.get("latest_model_evaluated") is True for row in probability_rows)},
     ]
     return {"passed": all(item["passed"] for item in checks), "checks": checks,
             "metrics": {"discovered": readiness.get("discovered_markets", 0),

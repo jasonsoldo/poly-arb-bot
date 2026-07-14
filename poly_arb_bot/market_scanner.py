@@ -87,6 +87,14 @@ class MarketScanner:
 
         condition_id = str(first_present(market, ("conditionId", "condition_id", "id")) or "")
         open_price = self._open_price(market, event)
+        start_ts = parse_timestamp_seconds(
+            first_present(event, ("startTime", "eventStartTime")) or
+            first_present(market, ("eventStartTime", "startTime"))
+        )
+        if start_ts is None:
+            slug = str(first_present(market, ("slug",)) or first_present(event, ("slug",)) or "")
+            match = re.search(r"-updown-(?:5m|15m|1h|4h)-(\d+)$", slug)
+            start_ts = int(match.group(1)) if match else None
         close_ts = parse_timestamp_seconds(first_present(market, ("endDate", "endDateIso", "end_date", "closeTime")))
         if not condition_id or close_ts is None:
             return None
@@ -100,6 +108,7 @@ class MarketScanner:
             close_ts=close_ts,
             up_token_id=up_token_id,
             down_token_id=down_token_id,
+            start_ts=start_ts,
             interval=interval,
             series_id=series_id,
             fee_rate=self._fee_rate(market),

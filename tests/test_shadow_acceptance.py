@@ -12,8 +12,8 @@ def valid_status():
         "shadow_execution": {"real_order_submissions": 0},
         "strategy_counts": {
             "paired_lock": {"evaluations": 10, "accepts": 2, "rejections": 8, "model_evaluations": 0},
-            "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19, "model_evaluations": 20},
-            "low_price_lottery_ev": {"evaluations": 20, "accepts": 0, "rejections": 20, "model_evaluations": 20},
+            "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19, "model_evaluations": 20, "latest_model_evaluated": True},
+            "low_price_lottery_ev": {"evaluations": 20, "accepts": 0, "rejections": 20, "model_evaluations": 20, "latest_model_evaluated": True},
         },
         "strategy_latest": {
             "late_window_directional_ev": {"estimated_probability": 0.6},
@@ -51,7 +51,7 @@ def test_acceptance_fails_when_an_independent_strategy_is_not_running():
 
 def test_acceptance_fails_when_probability_model_never_evaluated():
     status = valid_status()
-    status["strategy_counts"]["late_window_directional_ev"]["model_evaluations"] = 0
+    status["strategy_counts"]["late_window_directional_ev"]["latest_model_evaluated"] = False
     report = evaluate_status(status)
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert "probability_models_evaluated" in failed

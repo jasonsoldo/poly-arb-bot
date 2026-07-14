@@ -21,6 +21,30 @@ BINANCE_SYMBOLS = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
     "XRP": "XRPUSDT", "BNB": "BNBUSDT", "DOGE": "DOGEUSDT",
 }
+PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
+
+
+def capture_opening_prices(markets, venue, existing, now_ms=None):
+    now_ms = time.time() * 1000 if now_ms is None else now_ms
+    anchors = dict(existing)
+    for market_id, market in markets.items():
+        if market_id in anchors or market.get("open_price") is not None:
+            continue
+        start_ms = float(market.get("start_ts") or 0) * 1000
+        if not start_ms or now_ms < start_ms:
+            continue
+        samples = venue.get("assets", {}).get(market.get("asset"), {}).get("chainlink_samples", [])
+        eligible = [row for row in samples
+                    if start_ms <= float(row.get("source_timestamp_ms", 0))
+                    <= start_ms + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS]
+        if eligible:
+            sample = min(eligible, key=lambda row: float(row["source_timestamp_ms"]))
+            anchors[market_id] = {
+                "price": float(sample["price"]),
+                "source_timestamp_ms": float(sample["source_timestamp_ms"]),
+                "captured_at_ms": now_ms,
+            }
+    return anchors
 
 
 def _historical_volatility(rows):
@@ -94,7 +118,8 @@ def _up_probability(asset, price_to_beat, seconds_to_close):
     return min(.999, max(.001, .5 * (1 + math.erf(z / math.sqrt(2)))))
 
 
-def evaluate_market_event(event, market, venue, now=None, historical_models=None):
+def evaluate_market_event(event, market, venue, now=None, historical_models=None,
+                          opening_prices=None):
     now = time.time() if now is None else now
     asset = venue.get("assets", {}).get(market.get("asset"), {})
     reference = _reference_state(asset)
@@ -107,11 +132,22 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         if historical:
             model_asset = dict(asset, **historical)
             model_source = "binance_historical_1m"
-    up_probability = _up_probability(model_asset, market.get("open_price"), seconds_to_close)
+    anchor = (opening_prices or {}).get(market.get("market_id"), {})
+    price_to_beat = market.get("open_price")
+    price_to_beat_source = "gamma" if price_to_beat is not None else None
+    if price_to_beat is None and anchor.get("price") is not None:
+        price_to_beat = float(anchor["price"])
+        price_to_beat_source = "chainlink_rtds_start_anchor"
+    up_probability = _up_probability(model_asset, price_to_beat, seconds_to_close)
     probability_block_reason = None
     if up_probability is None:
-        if market.get("open_price") is None:
-            probability_block_reason = "price_to_beat_missing"
+        if price_to_beat is None:
+            start_ts = float(market.get("start_ts") or 0)
+            probability_block_reason = (
+                "price_to_beat_capture_missed"
+                if start_ts and now * 1000 > start_ts * 1000 + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS
+                else "price_to_beat_pending"
+            )
         elif not model_asset.get("volatility_per_sqrt_second"):
             probability_block_reason = "volatility_unavailable"
         elif int(model_asset.get("model_sample_count", 0)) < 20:
@@ -130,7 +166,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             market_id=market.get("market_id", ""), condition_id=market.get("market_id", ""),
             asset=market.get("asset", ""), timeframe=market.get("interval", ""), outcome=outcome,
             market_price=fill, expected_fill_price=fill, estimated_probability=probability,
-            seconds_to_close=seconds_to_close, price_to_beat=market.get("open_price"),
+            seconds_to_close=seconds_to_close, price_to_beat=price_to_beat,
             reference=reference, fee_per_share=float(event.get(fee_key, 0)) / size,
             slippage_per_share=0.0,
             latency_risk_buffer=float(os.getenv("DIRECTIONAL_LATENCY_BUFFER", "0.003")),
@@ -164,6 +200,8 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             audit["model_type"] = "configured_distributional_shadow"
             audit["model_sample_count"] = int(model_asset.get("model_sample_count", 0))
             audit["model_source"] = model_source if up_probability is not None else None
+            audit["price_to_beat_source"] = price_to_beat_source
+            audit["price_to_beat_source_timestamp_ms"] = anchor.get("source_timestamp_ms")
             audit["window"] = market.get("window", "current")
             rows.append(audit)
     return rows
@@ -182,6 +220,7 @@ def process_once(audit_path, market_path, venue_path, output_path, state_path,
     processed = set(state.get("processed", []))
     markets = {row.get("market_id"): row for row in _load(market_path, {"markets": []}).get("markets", [])}
     venue = _load(venue_path, {})
+    opening_prices = capture_opening_prices(markets, venue, state.get("opening_prices", {}))
     audit_path, output_path, state_path = Path(audit_path), Path(output_path), Path(state_path)
     if not audit_path.exists():
         return 0
@@ -202,12 +241,14 @@ def process_once(audit_path, market_path, venue_path, output_path, state_path,
             if not event_id or event_id in processed or not market:
                 continue
             for row in evaluate_market_event(event, market, venue,
-                                             historical_models=historical_models):
+                                             historical_models=historical_models,
+                                             opening_prices=opening_prices):
                 target.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
                 emitted += 1
             processed.add(event_id)
         state["offset"] = source.tell()
     state["processed"] = list(processed)[-20000:]
+    state["opening_prices"] = opening_prices
     temporary = state_path.with_suffix(state_path.suffix + ".tmp")
     temporary.parent.mkdir(parents=True, exist_ok=True)
     temporary.write_text(json.dumps(state), encoding="utf-8")

@@ -91,3 +91,22 @@ def test_historical_backfill_requests_assets_concurrently(monkeypatch):
     models = ev_shadow.load_historical_models()
     assert time.monotonic() - started < 0.2
     assert set(models) == set(ev_shadow.BINANCE_SYMBOLS)
+
+
+def test_chainlink_start_anchor_uses_first_source_sample_at_or_after_start():
+    markets = {"m1": {"market_id": "m1", "asset": "BTC", "start_ts": 1000}}
+    venue_state = {"assets": {"BTC": {"chainlink_samples": [
+        {"source_timestamp_ms": 999_900, "price": 99},
+        {"source_timestamp_ms": 1_000_100, "price": 100},
+        {"source_timestamp_ms": 1_000_200, "price": 101},
+    ]}}}
+    anchors = ev_shadow.capture_opening_prices(markets, venue_state, {}, now_ms=1_001_000)
+    assert anchors["m1"]["price"] == 100
+    assert anchors["m1"]["source_timestamp_ms"] == 1_000_100
+
+
+def test_missed_chainlink_start_anchor_fails_closed():
+    row = market()
+    row.update(open_price=None, start_ts=900)
+    rows = evaluate_market_event(event(), row, venue(), now=1000.0, opening_prices={})
+    assert all(item["reason"] == "price_to_beat_capture_missed" for item in rows)

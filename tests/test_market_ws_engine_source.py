@@ -99,6 +99,11 @@ def test_shadow_evaluations_have_stable_sequence_ids():
     assert '\\\"event_id\\\":\\\"' in SOURCE
 
 
+def test_shadow_event_ids_are_unique_across_process_restarts():
+    assert "run_id_" in SOURCE
+    assert "run_id" in SOURCE
+
+
 def test_engine_can_start_from_retained_config_during_gamma_outage():
     assert 'throw std::runtime_error("market document stale")' not in SOURCE
     assert 'market.close_ts <= now_seconds()' in SOURCE
