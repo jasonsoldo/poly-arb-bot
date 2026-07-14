@@ -105,6 +105,13 @@ def test_reference_status_file_is_rate_limited_below_tick_frequency():
     assert "force" in SOURCE
 
 
+def test_reference_model_samples_are_bucketed_by_second_and_publish_coverage():
+    assert "MODEL_SAMPLE_BUCKET_MS = 1000" in SOURCE
+    assert "same_model_bucket" in SOURCE
+    assert "row.samples.back().second = price" in SOURCE
+    assert "model_sample_span_seconds" in SOURCE
+
+
 def test_reference_engine_keeps_timestamped_settlement_anchor_samples():
     assert '"binance", "chainlink"' in SOURCE
     assert '"_samples\\":["' in SOURCE

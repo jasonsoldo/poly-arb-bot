@@ -35,7 +35,7 @@ def test_repeated_accepts_open_one_position(tmp_path):
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["entry_cost"] == 4.1
     assert position["real_order_submissions"] == 0
-    assert position["config_version"] == "shadow-portfolio-v2"
+    assert position["config_version"] == "shadow-portfolio-v3"
     assert len(position["config_hash"]) == 64
 
 
@@ -133,8 +133,20 @@ def test_directional_and_lottery_share_close_window_risk_limit(tmp_path):
     assert json.loads(log.read_text().splitlines()[-1])["reason"] == "combined_close_window_limit"
 
 
+def test_default_portfolio_limit_allows_one_directional_risk_per_close_window(tmp_path):
+    log = tmp_path / "complete.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    markets = {"m1": market(), "m2": dict(market(), market_id="m2", asset="ETH")}
+    assert lifecycle.consume(accepted(), markets) is True
+    second = accepted("l1", "low_price_lottery_ev")
+    second.update(market_id="m2", asset="ETH")
+    assert lifecycle.consume(second, markets) is False
+    assert json.loads(log.read_text().splitlines()[-1])["reason"] == "combined_close_window_limit"
+
+
 def test_lottery_close_window_and_total_notional_limits_are_enforced(tmp_path):
-    limits = replace(PortfolioLimits(), lottery_max_per_close_window=1,
+    limits = replace(PortfolioLimits(), combined_max_per_close_window=2,
+                     lottery_max_per_close_window=1,
                      lottery_max_open_notional=10.0)
     log = tmp_path / "complete.jsonl"
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log, limits)
@@ -261,6 +273,8 @@ def test_completed_event_preserves_entry_model_evidence(tmp_path):
                consensus_price=101, reference_state="REFERENCE_READY",
                volatility_per_sqrt_second=.001, up_final_model_z=.5,
                paired_book_imbalance=.2,
+               model_sample_span_seconds=120,
+               minimum_model_sample_span_seconds=60,
                confidence_type="input_quality_not_historical_accuracy")
     lifecycle.consume(row, {"m1": market()})
     venue = {"assets": {"BTC": {"chainlink_settlement_samples": [
@@ -274,6 +288,8 @@ def test_completed_event_preserves_entry_model_evidence(tmp_path):
     assert complete["volatility_per_sqrt_second"] == .001
     assert complete["up_final_model_z"] == .5
     assert complete["paired_book_imbalance"] == .2
+    assert complete["model_sample_span_seconds"] == 120
+    assert complete["minimum_model_sample_span_seconds"] == 60
 
 def test_opened_position_has_explicit_active_lifecycle_state(tmp_path):
     lifecycle = StrategyShadowLifecycle(

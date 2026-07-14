@@ -24,7 +24,7 @@ BINANCE_SYMBOLS = {
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
-STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v2"
+STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v3"
 
 
 def strategy_config():
@@ -44,6 +44,7 @@ def strategy_config():
         "maximum_clock_skew_ms": os.getenv("MAX_CLOCK_SKEW_MS", "250"),
         "momentum_z_per_bps": os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"),
         "imbalance_z": os.getenv("MODEL_IMBALANCE_Z", "0.25"),
+        "minimum_model_sample_span_seconds": os.getenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"),
     }
     encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
     return values, hashlib.sha256(encoded).hexdigest()
@@ -177,6 +178,7 @@ def _load_historical_model(asset, symbol, timeout):
     return asset, {
         "volatility_per_sqrt_second": volatility,
         "model_sample_count": samples,
+        "model_sample_span_seconds": samples * 60,
     }
 
 
@@ -217,14 +219,21 @@ def _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance
     reference = asset.get("consensus_price")
     volatility = asset.get("volatility_per_sqrt_second")
     samples = int(asset.get("model_sample_count", 0))
-    if not reference or not price_to_beat or not volatility or samples < 20 or seconds_to_close <= 0:
-        return None, {}
+    sample_span = float(asset.get("model_sample_span_seconds") or 0)
+    minimum_span = float(os.getenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"))
+    diagnostics = {
+        "model_sample_span_seconds": sample_span,
+        "minimum_model_sample_span_seconds": minimum_span,
+    }
+    if (not reference or not price_to_beat or not volatility or samples < 20 or
+            sample_span < minimum_span or seconds_to_close <= 0):
+        return None, diagnostics
     scale = float(volatility) * math.sqrt(seconds_to_close)
     if scale <= 0:
-        return None, {}
+        return None, diagnostics
     momentum = asset.get("momentum_bps_30s")
     if momentum is None or book_imbalance is None:
-        return None, {}
+        return None, diagnostics
     log_distance = math.log(float(reference) / float(price_to_beat))
     standardized_distance = log_distance / scale
     momentum_z = float(momentum) * float(os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"))
@@ -232,6 +241,7 @@ def _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance
     final_z = standardized_distance + momentum_z + imbalance_z
     probability = min(.999, max(.001, .5 * (1 + math.erf(final_z / math.sqrt(2)))))
     return probability, {
+        **diagnostics,
         "volatility_per_sqrt_second": float(volatility),
         "expected_move_log_std": scale,
         "reference_log_distance": log_distance,
@@ -260,8 +270,10 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
     seconds_to_close = max(0, int(float(market.get("close_ts", 0)) - now))
     model_asset = asset
     model_source = "live_multi_source"
+    minimum_model_span = float(os.getenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"))
     if (not asset.get("volatility_per_sqrt_second") or
-            int(asset.get("model_sample_count", 0)) < 20):
+            int(asset.get("model_sample_count", 0)) < 20 or
+            float(asset.get("model_sample_span_seconds") or 0) < minimum_model_span):
         historical = (historical_models or {}).get(market.get("asset"))
         if historical:
             model_asset = dict(asset, **historical)
@@ -312,6 +324,8 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             probability_block_reason = "volatility_unavailable"
         elif int(model_asset.get("model_sample_count", 0)) < 20:
             probability_block_reason = "insufficient_model_samples"
+        elif float(model_asset.get("model_sample_span_seconds") or 0) < minimum_model_span:
+            probability_block_reason = "model_sample_span_insufficient"
         elif model_asset.get("momentum_bps_30s") is None:
             probability_block_reason = "momentum_unavailable"
         elif paired_imbalance is None:

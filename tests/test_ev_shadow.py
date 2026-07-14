@@ -27,13 +27,14 @@ def event():
     }
 
 
-def venue(volatility=0.001):
+def venue(volatility=0.001, model_span_seconds=120):
     return {"updated_at_ms": 1_000_000, "assets": {"BTC": {
         "fast_price": 101.0, "consensus_price": 101.0, "settlement_reference": 100.8,
         "fresh_exchange_source_count": 3, "fresh_usd_spot_source_count": 2,
         "cross_source_divergence_bps": 5.0, "reference_quorum_met": True,
         "reference_state": "REFERENCE_READY", "volatility_per_sqrt_second": volatility,
-        "model_sample_count": 40, "momentum_bps_30s": 2.0, "clock_skew_ms": 10.0,
+        "model_sample_count": 40, "model_sample_span_seconds": model_span_seconds,
+        "momentum_bps_30s": 2.0, "clock_skew_ms": 10.0,
         "sources": {
             "coinbase": {"symbol": "BTC-USD", "market_type": "spot", "quote_currency": "USD", "price": 101.0, "bid": 100.9, "ask": 101.1, "source_timestamp": "x", "received_at": 999000, "message_age_ms": 10, "status": "FRESH"},
             "kraken": {"symbol": "BTC/USD", "market_type": "spot", "quote_currency": "USD", "price": 101.0, "bid": 100.9, "ask": 101.1, "source_timestamp": "x", "received_at": 999000, "message_age_ms": 10, "status": "FRESH"},
@@ -73,7 +74,7 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
     assert all(row["event_id"].startswith("paired-1:") for row in rows)
     assert all(row["real_order_submissions"] == 0 for row in rows)
     assert all(row["target_size"] == 10 for row in rows)
-    assert all(row["config_version"] == "shadow-buy-rules-v2" for row in rows)
+    assert all(row["config_version"] == "shadow-buy-rules-v3" for row in rows)
     assert all(len(row["config_hash"]) == 64 for row in rows)
     assert all(row["volatility_per_sqrt_second"] == .001 for row in rows)
     assert all(row["expected_move_log_std"] > 0 for row in rows)
@@ -90,6 +91,15 @@ def test_probability_model_fails_closed_without_volatility_samples():
     assert all(row["reason"] == "volatility_unavailable" for row in rows)
 
 
+def test_probability_model_fails_closed_without_minimum_time_coverage(monkeypatch):
+    monkeypatch.setenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60")
+    rows = evaluate_market_event(event(), market(), venue(model_span_seconds=10), now=1000.0)
+    assert all(row["estimated_probability"] is None for row in rows)
+    assert all(row["reason"] == "model_sample_span_insufficient" for row in rows)
+    assert all(row["model_sample_span_seconds"] == 10 for row in rows)
+    assert all(row["minimum_model_sample_span_seconds"] == 60 for row in rows)
+
+
 def test_binance_kline_closes_produce_per_second_volatility():
     rows = [
         [0, "0", "0", "0", "100", "0", 60_000],
@@ -102,7 +112,8 @@ def test_binance_kline_closes_produce_per_second_volatility():
 
 
 def test_historical_model_is_used_until_live_samples_are_ready():
-    model = {"BTC": {"volatility_per_sqrt_second": 0.001, "model_sample_count": 40}}
+    model = {"BTC": {"volatility_per_sqrt_second": 0.001, "model_sample_count": 40,
+                     "model_sample_span_seconds": 2400}}
     rows = evaluate_market_event(event(), market(), venue(volatility=None), now=1000.0,
                                  historical_models=model)
     assert all(row["estimated_probability"] is not None for row in rows)

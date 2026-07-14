@@ -16,7 +16,7 @@ DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS = 900
 
 @dataclass(frozen=True)
 class PortfolioLimits:
-    combined_max_per_close_window: int = 2
+    combined_max_per_close_window: int = 1
     directional_max_order_size: float = 250.0
     directional_max_open_positions: int = 8
     directional_max_per_close_window: int = 4
@@ -33,7 +33,7 @@ class PortfolioLimits:
     @classmethod
     def from_env(cls):
         return cls(
-            combined_max_per_close_window=int(os.getenv("COMBINED_MAX_PER_CLOSE_WINDOW", "2")),
+            combined_max_per_close_window=int(os.getenv("COMBINED_MAX_PER_CLOSE_WINDOW", "1")),
             directional_max_order_size=float(os.getenv("DIRECTIONAL_MAX_ORDER_SIZE", "250")),
             directional_max_open_positions=int(os.getenv("DIRECTIONAL_MAX_OPEN_POSITIONS", "8")),
             directional_max_per_close_window=int(os.getenv("DIRECTIONAL_MAX_PER_CLOSE_WINDOW", "4")),
@@ -63,7 +63,7 @@ class StrategyShadowLifecycle:
                 str(DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS),
             )
         )
-        self.config_version = "shadow-portfolio-v2"
+        self.config_version = "shadow-portfolio-v3"
         self.strategy_config_hash = strategy_config()[1]
         self.config_hash = hashlib.sha256(
             json.dumps(asdict(self.limits), sort_keys=True, separators=(",", ":")).encode()
@@ -269,6 +269,8 @@ class StrategyShadowLifecycle:
             "seconds_to_close": row.get("seconds_to_close"),
             "model_source": row.get("model_source"),
             "model_sample_count": row.get("model_sample_count"),
+            "model_sample_span_seconds": row.get("model_sample_span_seconds"),
+            "minimum_model_sample_span_seconds": row.get("minimum_model_sample_span_seconds"),
             "volatility_per_sqrt_second": row.get("volatility_per_sqrt_second"),
             "expected_move_log_std": row.get("expected_move_log_std"),
             "reference_log_distance": row.get("reference_log_distance"),

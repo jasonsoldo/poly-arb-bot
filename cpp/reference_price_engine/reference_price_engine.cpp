@@ -86,6 +86,7 @@ struct SharedState {
 constexpr double STATUS_WRITE_INTERVAL_MS = 100;
 constexpr double DEFAULT_REFERENCE_FRESHNESS_MS = 3000;
 constexpr double COINBASE_REFERENCE_FRESHNESS_MS = 10000;
+constexpr double MODEL_SAMPLE_BUCKET_MS = 1000;
 
 double source_freshness_limit_ms(const std::string& source_name) {
     return source_name == "coinbase"
@@ -131,6 +132,11 @@ double volatility_per_sqrt_second(const SourceState& source) {
     return count ? std::sqrt(sum_squares / count) : 0;
 }
 
+double model_sample_span_seconds(const SourceState& source) {
+    if (source.samples.size() < 2) return 0;
+    return std::max(0.0, (source.samples.back().first - source.samples.front().first) / 1000);
+}
+
 double momentum_bps(const SourceState& source, double timestamp, double horizon_ms = 30000) {
     if (source.samples.size() < 2 || source.samples.back().second <= 0) return 0;
     auto start = source.samples.begin();
@@ -170,7 +176,7 @@ void write_status_locked(SharedState& shared, bool force = false) {
         double clock_skew_upper_bound_ms = 0;
         int fresh_sources = 0, fresh_usd_sources = 0;
         std::vector<double> volatilities, momentums;
-        int model_sample_count = 0;
+        std::vector<double> model_sample_counts, model_sample_spans;
         for (const auto& item : asset.sources) {
             const auto& source = item.second;
             if (source_status(item.first, source, timestamp) != "FRESH" || !source.price) continue;
@@ -193,9 +199,12 @@ void write_status_locked(SharedState& shared, bool force = false) {
             if (source.quote_currency == "USD") { fresh_usd.push_back(source.price); ++fresh_usd_sources; }
             if (!fast_price && (item.first == "binance" || item.first == "bybit" || item.first == "okx")) fast_price = source.price;
             const double volatility = volatility_per_sqrt_second(source);
-            if (volatility > 0) volatilities.push_back(volatility);
+            if (volatility > 0) {
+                volatilities.push_back(volatility);
+                model_sample_counts.push_back(static_cast<double>(source.samples.size()));
+                model_sample_spans.push_back(model_sample_span_seconds(source));
+            }
             if (source.samples.size() >= 2) momentums.push_back(momentum_bps(source, timestamp));
-            model_sample_count = std::max(model_sample_count, static_cast<int>(source.samples.size()));
         }
         const double consensus = median(fresh_usd);
         double divergence = 0;
@@ -275,7 +284,10 @@ void write_status_locked(SharedState& shared, bool force = false) {
             << ",\"volatility_per_sqrt_second\":"; write_number(out, median(volatilities));
         out << ",\"momentum_bps_30s\":";
         if (!momentums.empty()) out << median(momentums); else out << "null";
-        out << ",\"model_sample_count\":" << model_sample_count << '}';
+        out << ",\"model_sample_count\":" << static_cast<int>(median(model_sample_counts));
+        out << ",\"model_sample_span_seconds\":";
+        write_number(out, median(model_sample_spans));
+        out << '}';
     }
     out << "},\"engine_latency_us\":" << shared.engine_latency_us
         << ",\"matched_messages\":" << shared.matched_messages
@@ -297,7 +309,15 @@ void publish(SharedState& shared, const std::string& asset, const std::string& s
     auto& row = shared.assets.at(asset).sources.at(source);
     row.price = price; row.bid = bid; row.ask = ask;
     row.source_timestamp = source_timestamp; row.received_at = received; row.connected = true;
-    row.samples.emplace_back(received, price);
+    const bool same_model_bucket = !row.samples.empty() &&
+        static_cast<long long>(row.samples.back().first / MODEL_SAMPLE_BUCKET_MS) ==
+        static_cast<long long>(received / MODEL_SAMPLE_BUCKET_MS);
+    if (same_model_bucket) {
+        row.samples.back().first = received;
+        row.samples.back().second = price;
+    } else {
+        row.samples.emplace_back(received, price);
+    }
     while (!row.samples.empty() && received - row.samples.front().first > 300000) row.samples.pop_front();
     while (row.samples.size() > 512) row.samples.pop_front();
     if (source == "chainlink" && !source_timestamp.empty()) {

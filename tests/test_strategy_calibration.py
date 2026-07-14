@@ -12,6 +12,7 @@ def test_calibration_filters_hash_and_detects_correlated_risk(tmp_path):
          "market_id": "m1", "asset": "BTC", "timeframe": "5m", "outcome": "Up",
          "condition_id": "c1",
          "entry_event_id": "entry-a", "volatility_per_sqrt_second": .001,
+         "model_sample_span_seconds": 120, "minimum_model_sample_span_seconds": 60,
          "close_ts": 90, "estimated_probability": .8, "expected_fill_price": .6,
          "net_ev": .1, "price_to_beat": 100, "consensus_price": 101,
          "seconds_to_close": 30, "settlement_price": 99, "winning_outcome": "Down",
@@ -39,6 +40,8 @@ def test_calibration_filters_hash_and_detects_correlated_risk(tmp_path):
     assert report["official_resolution_mismatches"] == 0
     assert report["trades"][0]["entry_event_id"] == "entry-a"
     assert report["trades"][0]["volatility_per_sqrt_second"] == .001
+    assert report["trades"][0]["model_sample_span_seconds"] == 120
+    assert report["trades"][0]["minimum_model_sample_span_seconds"] == 60
     assert report["by_strategy"]["late_window_directional_ev"]["brier_score"] == .64
     assert report["by_strategy"]["late_window_directional_ev"]["maximum_drawdown"] == 6
     assert report["by_strategy"]["late_window_directional_ev"]["maximum_losing_streak"] == 1
