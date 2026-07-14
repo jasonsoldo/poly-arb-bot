@@ -62,3 +62,11 @@ def test_dashboard_renders_three_strategies_without_combining_acceptance():
     assert "strategy_latest" in source
     for element_id in ("directionalCard", "lotteryCard", "pairedCard"):
         assert f'id="{element_id}"' in source
+
+
+def test_dashboard_renders_latest_asset_pnl_from_completed_shadow_data():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    assert "LATEST SIM PNL" in source
+    assert "asset_latest_pnl" in source
+    assert "assetPnlCell" in source
+    assert "NO COMPLETED SHADOW TRADE" in source

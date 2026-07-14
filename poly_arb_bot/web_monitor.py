@@ -52,7 +52,7 @@ def build_report_empty():
             strategy: dict(empty_performance)
             for strategy in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
         },
-        "equity_curve": [], "trade_ledger": [],
+        "equity_curve": [], "trade_ledger": [], "asset_latest_pnl": {},
     }
 
 
@@ -328,6 +328,11 @@ def build_status(data_dir, log_file, state_file):
                 item.get("reason", "unknown") for item in recent if item.get("decision") == "REJECT"
             )),
         }
+    asset_latest_pnl = {asset: None for asset in ASSETS}
+    asset_latest_pnl.update({
+        asset: item for asset, item in report.get("asset_latest_pnl", {}).items()
+        if asset in asset_latest_pnl
+    })
     ready_markets = int(shadow_health.get("ready_markets", 0))
     clob_readiness = {
         "discovered_markets": len(markets), "paired_markets_ready": ready_markets,
@@ -413,6 +418,7 @@ def build_status(data_dir, log_file, state_file):
             "real_orders": 0,
         },
         "market_matrix": market_matrix,
+        "asset_latest_pnl": asset_latest_pnl,
         "system_status": system_status,
         "rejection_reasons": report["rejection_reasons"] or dict(rejection_reasons),
         "shadow_report": report,

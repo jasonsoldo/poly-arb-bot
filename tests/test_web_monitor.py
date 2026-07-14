@@ -241,6 +241,42 @@ def test_web_status_includes_completed_shadow_analytics(tmp_path):
     assert status["performance_by_strategy"]["paired_lock"]["completed"] == 1
 
 
+def test_web_status_exposes_latest_completed_pnl_per_asset(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    rows = [
+        {"ts": 101.0, "event_type": "shadow_complete", "event_id": "btc-old",
+         "strategy": "paired_lock", "market_id": "btc-5m-old", "asset": "BTC",
+         "timeframe": "5m", "realized_simulated_pnl": -0.53},
+        {"ts": 103.0, "event_type": "shadow_complete", "event_id": "eth-latest",
+         "strategy": "paired_lock", "market_id": "eth-15m", "asset": "ETH",
+         "timeframe": "15m", "realized_simulated_pnl": 0.12},
+        {"ts": 102.0, "event_type": "shadow_complete", "event_id": "btc-latest",
+         "strategy": "paired_lock", "market_id": "btc-5m-new", "asset": "BTC",
+         "timeframe": "5m", "realized_simulated_pnl": 0.56},
+    ]
+    rows.extend(
+        {"ts": 200.0 + index, "event_type": "shadow_complete", "event_id": f"hype-{index}",
+         "strategy": "paired_lock", "market_id": f"hype-{index}", "asset": "HYPE",
+         "timeframe": "5m", "realized_simulated_pnl": -0.01}
+        for index in range(101)
+    )
+    (logs / "shadow-execution.jsonl").write_text(
+        "\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8"
+    )
+    (logs / "shadow-audit.jsonl").write_text("", encoding="utf-8")
+
+    status = build_status(data, logs / "missing.jsonl", tmp_path / "state.json")
+
+    assert status["asset_latest_pnl"]["BTC"] == {
+        "pnl": 0.56, "strategy": "paired_lock", "ts": 102.0,
+        "market_id": "btc-5m-new", "timeframe": "5m",
+    }
+    assert status["asset_latest_pnl"]["ETH"]["pnl"] == 0.12
+    assert status["asset_latest_pnl"]["SOL"] is None
+
+
 def test_web_status_exposes_open_strategy_shadow_positions(tmp_path):
     data = tmp_path / "data"
     state = tmp_path / "state"

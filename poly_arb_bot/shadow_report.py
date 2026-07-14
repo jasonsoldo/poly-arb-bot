@@ -55,6 +55,7 @@ def _performance(opportunities, execution_path):
         pnl = float(row["realized_simulated_pnl"])
         ledger.append({"ts": float(row.get("ts", 0)), "event_id": event_id,
                        "market_id": row.get("market_id"), "strategy": row.get("strategy"),
+                       "asset": row.get("asset"), "timeframe": row.get("timeframe"),
                        "strategy_config_version": row.get("strategy_config_version"),
                        "strategy_config_hash": row.get("strategy_config_hash"),
                        "pnl": pnl, "state": "COMPLETE"})
@@ -62,6 +63,13 @@ def _performance(opportunities, execution_path):
     current_hash = strategy_config()[1]
     current = [item for item in ledger if item.get("strategy") == "paired_lock" or
                item.get("strategy_config_hash") == current_hash]
+    asset_latest_pnl = {}
+    for item in current:
+        if item.get("asset"):
+            asset_latest_pnl[item["asset"]] = {
+                key: item.get(key)
+                for key in ("pnl", "strategy", "ts", "market_id", "timeframe")
+            }
     equity = 0.0
     curve = []
     for item in current:
@@ -76,6 +84,7 @@ def _performance(opportunities, execution_path):
         },
         "equity_curve": curve,
         "trade_ledger": list(reversed(current[-100:])),
+        "asset_latest_pnl": asset_latest_pnl,
         "excluded_pre_rule_compliance": len(ledger) - len(current),
         "excluded_other_strategy_config": sum(
             item.get("strategy") != "paired_lock" and
