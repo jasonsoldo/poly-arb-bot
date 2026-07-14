@@ -213,22 +213,38 @@ def _reference_state(asset, settlement_source, maximum_age_ms, file_age_ms=0):
     return aggregate_reference(sources, selected.price if selected else None, verified)
 
 
-def _up_probability(asset, price_to_beat, seconds_to_close, book_imbalance=None):
+def _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance=None):
     reference = asset.get("consensus_price")
     volatility = asset.get("volatility_per_sqrt_second")
     samples = int(asset.get("model_sample_count", 0))
     if not reference or not price_to_beat or not volatility or samples < 20 or seconds_to_close <= 0:
-        return None
+        return None, {}
     scale = float(volatility) * math.sqrt(seconds_to_close)
     if scale <= 0:
-        return None
+        return None, {}
     momentum = asset.get("momentum_bps_30s")
     if momentum is None or book_imbalance is None:
-        return None
-    z = math.log(float(reference) / float(price_to_beat)) / scale
-    z += float(momentum) * float(os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"))
-    z += float(book_imbalance) * float(os.getenv("MODEL_IMBALANCE_Z", "0.25"))
-    return min(.999, max(.001, .5 * (1 + math.erf(z / math.sqrt(2)))))
+        return None, {}
+    log_distance = math.log(float(reference) / float(price_to_beat))
+    standardized_distance = log_distance / scale
+    momentum_z = float(momentum) * float(os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"))
+    imbalance_z = float(book_imbalance) * float(os.getenv("MODEL_IMBALANCE_Z", "0.25"))
+    final_z = standardized_distance + momentum_z + imbalance_z
+    probability = min(.999, max(.001, .5 * (1 + math.erf(final_z / math.sqrt(2)))))
+    return probability, {
+        "volatility_per_sqrt_second": float(volatility),
+        "expected_move_log_std": scale,
+        "reference_log_distance": log_distance,
+        "up_standardized_distance": standardized_distance,
+        "up_momentum_z": momentum_z,
+        "up_imbalance_z": imbalance_z,
+        "up_final_model_z": final_z,
+        "paired_book_imbalance": float(book_imbalance),
+    }
+
+
+def _up_probability(asset, price_to_beat, seconds_to_close, book_imbalance=None):
+    return _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance)[0]
 
 
 def evaluate_market_event(event, market, venue, now=None, historical_models=None,
@@ -275,7 +291,9 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
     paired_imbalance = None
     if up_imbalance is not None and down_imbalance is not None:
         paired_imbalance = (float(up_imbalance) - float(down_imbalance)) / 2
-    up_probability = _up_probability(model_asset, price_to_beat, seconds_to_close, paired_imbalance)
+    up_probability, model_diagnostics = _up_probability_model(
+        model_asset, price_to_beat, seconds_to_close, paired_imbalance,
+    )
     probability_block_reason = None
     if up_probability is None:
         if price_to_beat is None:
@@ -376,6 +394,9 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             audit["model_type"] = "configured_distributional_shadow"
             audit["model_sample_count"] = int(model_asset.get("model_sample_count", 0))
             audit["model_source"] = model_source if up_probability is not None else None
+            audit.update(model_diagnostics)
+            audit["input_quality_score"] = confidence
+            audit["confidence_type"] = "input_quality_not_historical_accuracy"
             audit["price_to_beat_source"] = price_to_beat_source
             audit["price_to_beat_capture_mode"] = price_to_beat_capture_mode
             audit["price_to_beat_source_timestamp_ms"] = price_to_beat_source_timestamp_ms

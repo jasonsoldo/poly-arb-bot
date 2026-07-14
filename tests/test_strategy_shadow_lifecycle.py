@@ -258,7 +258,10 @@ def test_completed_event_preserves_entry_model_evidence(tmp_path):
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
     row = accepted()
     row.update(estimated_probability=.7, net_ev=.2, gross_edge=.3,
-               consensus_price=101, reference_state="REFERENCE_READY")
+               consensus_price=101, reference_state="REFERENCE_READY",
+               volatility_per_sqrt_second=.001, up_final_model_z=.5,
+               paired_book_imbalance=.2,
+               confidence_type="input_quality_not_historical_accuracy")
     lifecycle.consume(row, {"m1": market()})
     venue = {"assets": {"BTC": {"chainlink_settlement_samples": [
         {"source_timestamp_ms": 1_100_000, "price": 101},
@@ -268,6 +271,9 @@ def test_completed_event_preserves_entry_model_evidence(tmp_path):
     assert complete["estimated_probability"] == .7
     assert complete["net_ev"] == .2
     assert complete["consensus_price"] == 101
+    assert complete["volatility_per_sqrt_second"] == .001
+    assert complete["up_final_model_z"] == .5
+    assert complete["paired_book_imbalance"] == .2
 
 def test_opened_position_has_explicit_active_lifecycle_state(tmp_path):
     lifecycle = StrategyShadowLifecycle(

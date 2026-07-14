@@ -129,10 +129,14 @@ def build_calibration(path, config_hash=None, resolved_outcomes=None):
         [row for row in rows if row.get("strategy") == strategy]
     ) for strategy in sorted(STRATEGIES)}
     evidence_fields = (
-        "event_id", "strategy", "strategy_config_hash", "market_id", "condition_id", "asset", "timeframe",
+        "event_id", "entry_event_id", "strategy", "strategy_config_hash", "market_id", "condition_id", "asset", "timeframe",
         "outcome", "close_ts", "estimated_probability", "expected_fill_price", "net_ev",
         "price_to_beat", "consensus_price", "seconds_to_close", "settlement_price",
-        "winning_outcome", "realized_simulated_pnl",
+        "winning_outcome", "realized_simulated_pnl", "model_source", "model_sample_count",
+        "volatility_per_sqrt_second", "expected_move_log_std", "reference_log_distance",
+        "up_standardized_distance", "up_momentum_z", "up_imbalance_z",
+        "up_final_model_z", "paired_book_imbalance", "input_quality_score",
+        "confidence_type",
     )
     return {
         "config_hash": config_hash,

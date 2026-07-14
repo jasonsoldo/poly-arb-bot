@@ -75,6 +75,13 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
     assert all(row["target_size"] == 10 for row in rows)
     assert all(row["config_version"] == "shadow-buy-rules-v2" for row in rows)
     assert all(len(row["config_hash"]) == 64 for row in rows)
+    assert all(row["volatility_per_sqrt_second"] == .001 for row in rows)
+    assert all(row["expected_move_log_std"] > 0 for row in rows)
+    assert all(row["paired_book_imbalance"] == .2 for row in rows)
+    assert all(row["up_final_model_z"] == (
+        row["up_standardized_distance"] + row["up_momentum_z"] + row["up_imbalance_z"]
+    ) for row in rows)
+    assert all(row["confidence_type"] == "input_quality_not_historical_accuracy" for row in rows)
 
 
 def test_probability_model_fails_closed_without_volatility_samples():
