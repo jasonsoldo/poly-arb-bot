@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
 
@@ -76,11 +76,26 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     events = []
     candidates = {slug: (asset, interval) for asset, interval, slug in series_slugs}
     gamma_request_count = 0
+    scan_started = time.monotonic()
+    deadline_seconds = float(os.getenv("SCAN_DEADLINE_SECONDS", "45"))
+    deadline = scan_started + deadline_seconds
+    gamma_workers = max(1, min(12, int(os.getenv("GAMMA_CONCURRENCY", "12"))))
+
+    def remaining():
+        return max(0.0, deadline - time.monotonic())
+
+    def require_budget():
+        budget = remaining()
+        if budget <= 0:
+            raise TimeoutError("scan_global_deadline")
+        client.http.timeout = min(10.0, budget)
+
     stage_started = time.monotonic()
-    print(f"GAMMA_SERIES_START candidates={len(candidates)} active_workers=4", flush=True)
+    print(f"GAMMA_SERIES_START candidates={len(candidates)} active_workers={min(gamma_workers, len(candidates))}", flush=True)
 
     def fetch_series(slugs):
         try:
+            require_budget()
             return client.series_by_slugs(slugs), 0
         except (OSError, RuntimeError, TimeoutError):
             return [], 1
@@ -89,7 +104,7 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     gamma_request_count += len(series_batches)
     matching_series = []
     series_errors = 0
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=gamma_workers) as executor:
         for rows, errors in executor.map(fetch_series, series_batches):
             matching_series.extend(rows)
             series_errors += errors
@@ -126,6 +141,7 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     if event_candidates or hourly_windows:
         def fetch_events(slugs):
             try:
+                require_budget()
                 return client.events_by_slugs(slugs), 0
             except (OSError, RuntimeError, TimeoutError):
                 return [], 1
@@ -133,6 +149,7 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         def fetch_hourly(window):
             series_id, start, end = window
             try:
+                require_budget()
                 return series_id, client.events_by_series_window(series_id, start, end), 0
             except (OSError, RuntimeError, TimeoutError):
                 return series_id, [], 1
@@ -141,14 +158,21 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         event_batches = [event_slugs[index:index + 20] for index in range(0, len(event_slugs), 20)]
         stage_started = time.monotonic()
         gamma_request_count += len(event_batches) + len(hourly_windows)
-        print(f"GAMMA_EVENTS_START candidates={len(event_slugs) + len(hourly_windows) * 2} active_workers=4", flush=True)
+        request_count = len(event_batches) + len(hourly_windows)
+        print(f"GAMMA_EVENTS_START candidates={len(event_slugs) + len(hourly_windows) * 2} active_workers={min(gamma_workers, request_count)}", flush=True)
         window_events = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            for rows, errors in executor.map(fetch_events, event_batches):
-                window_events.extend(rows)
-                series_errors += errors
-            for series_id, rows, errors in executor.map(fetch_hourly, hourly_windows):
-                grouped_events[series_id].extend(rows)
+        with ThreadPoolExecutor(max_workers=gamma_workers) as executor:
+            futures = {executor.submit(fetch_events, batch): ("events", None) for batch in event_batches}
+            futures.update({executor.submit(fetch_hourly, window): ("hourly", window[0]) for window in hourly_windows})
+            for future in as_completed(futures):
+                kind, series_id = futures[future]
+                result = future.result()
+                if kind == "events":
+                    rows, errors = result
+                    window_events.extend(rows)
+                else:
+                    series_id, rows, errors = result
+                    grouped_events[series_id].extend(rows)
                 series_errors += errors
         print(
             f"GAMMA_EVENTS_DONE elapsed_ms={int((time.monotonic() - stage_started) * 1000)} "
@@ -190,6 +214,9 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         unique[spec.market_id] = spec
         used_tokens.update(tokens)
     print(f"MARKET_PARSE_DONE candidates={len(specs)} unique_markets={len(unique)}", flush=True)
+    if remaining() <= 0:
+        print(f"SCAN_DEADLINE_EXCEEDED elapsed_ms={int((time.monotonic() - scan_started) * 1000)} kept=true", flush=True)
+        return 3
     clob = PolymarketClobClient()
     diagnostics = {}
     examples = []
@@ -204,6 +231,9 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         f"completed_workers={len(unique)} valid={len(valid)} rejected={rejected}", flush=True,
     )
     unique = {spec.market_id: spec for spec in valid}
+    if remaining() <= 0:
+        print(f"SCAN_DEADLINE_EXCEEDED elapsed_ms={int((time.monotonic() - scan_started) * 1000)} kept=true", flush=True)
+        return 3
     if unique:
         print(f"WRITE_START path={output_path} markets={len(unique)}", flush=True)
         write_market_payload_atomic(output_path, scanner.to_payload(unique.values()), now_ts)

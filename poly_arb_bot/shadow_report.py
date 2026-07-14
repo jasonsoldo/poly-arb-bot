@@ -5,6 +5,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from .ev_shadow import STRATEGY_CONFIG_VERSION
+
 
 def percentile(values, fraction):
     if not values:
@@ -53,22 +55,26 @@ def _performance(opportunities, execution_path):
         pnl = float(row["realized_simulated_pnl"])
         ledger.append({"ts": float(row.get("ts", 0)), "event_id": event_id,
                        "market_id": row.get("market_id"), "strategy": row.get("strategy"),
+                       "strategy_config_version": row.get("strategy_config_version"),
                        "pnl": pnl, "state": "COMPLETE"})
     ledger.sort(key=lambda item: item["ts"])
+    current = [item for item in ledger if item.get("strategy") == "paired_lock" or
+               item.get("strategy_config_version") == STRATEGY_CONFIG_VERSION]
     equity = 0.0
     curve = []
-    for item in ledger:
+    for item in current:
         equity += item["pnl"]
         curve.append({"ts": item["ts"], "pnl": item["pnl"], "equity": round(equity, 12),
                       "event_id": item["event_id"]})
     return {
-        "performance": _metrics(ledger),
+        "performance": _metrics(current),
         "performance_by_strategy": {
-            strategy: _metrics([item for item in ledger if item.get("strategy") == strategy])
+            strategy: _metrics([item for item in current if item.get("strategy") == strategy])
             for strategy in STRATEGIES
         },
         "equity_curve": curve,
-        "trade_ledger": list(reversed(ledger[-100:])),
+        "trade_ledger": list(reversed(current[-100:])),
+        "excluded_pre_rule_compliance": len(ledger) - len(current),
     }
 
 

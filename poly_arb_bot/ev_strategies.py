@@ -29,6 +29,19 @@ class DirectionalInput:
     execution_risk_buffer: float
     liquidity: float
     book_age_ms: float
+    reference_age_ms: Optional[float]
+    clock_skew_ms: Optional[float]
+    minimum_liquidity: float
+    maximum_slippage: float
+    maximum_reference_age_ms: float
+    maximum_book_age_ms: float
+    maximum_clock_skew_ms: float
+    market_active: bool
+    market_tradable: bool
+    target_depth_ok: bool
+    momentum_bps_30s: Optional[float]
+    order_book_imbalance: Optional[float]
+    confidence: Optional[float]
     settlement_source_verified: bool
     probability_block_reason: Optional[str] = None
 
@@ -53,10 +66,24 @@ def _common_rejection(row):
         return "settlement_reference_unverified"
     if not row.reference.reference_quorum_met:
         return row.reference.reference_block_reason or "insufficient_reference_sources"
-    if row.book_age_ms > 750:
+    if row.reference_age_ms is None or row.reference_age_ms > row.maximum_reference_age_ms:
+        return "reference_data_stale"
+    if row.clock_skew_ms is None or abs(row.clock_skew_ms) > row.maximum_clock_skew_ms:
+        return "clock_skew_exceeded" if row.clock_skew_ms is not None else "clock_skew_unavailable"
+    if not row.market_active or not row.market_tradable:
+        return "market_not_tradable"
+    if row.book_age_ms > row.maximum_book_age_ms:
         return "clob_book_stale"
-    if row.liquidity <= 0:
+    if row.liquidity < row.minimum_liquidity:
         return "insufficient_liquidity"
+    if not row.target_depth_ok:
+        return "target_depth_insufficient"
+    if row.slippage_per_share > row.maximum_slippage:
+        return "slippage_exceeded"
+    if row.momentum_bps_30s is None:
+        return "momentum_unavailable"
+    if row.order_book_imbalance is None:
+        return "order_book_imbalance_unavailable"
     return None
 
 
@@ -111,6 +138,16 @@ def decision_audit(row, result, event_id, generation, session, evaluation_sequen
         "reference_price": reference_price, "price_to_beat": row.price_to_beat,
         "distance_to_price_to_beat": reference_price - row.price_to_beat if reference_price is not None and row.price_to_beat is not None else None,
         "seconds_to_close": row.seconds_to_close, "book_age_ms": row.book_age_ms,
+        "reference_age_ms": row.reference_age_ms, "clock_skew_ms": row.clock_skew_ms,
+        "liquidity": row.liquidity, "minimum_liquidity": row.minimum_liquidity,
+        "target_depth_ok": row.target_depth_ok,
+        "maximum_slippage": row.maximum_slippage,
+        "maximum_reference_age_ms": row.maximum_reference_age_ms,
+        "maximum_book_age_ms": row.maximum_book_age_ms,
+        "maximum_clock_skew_ms": row.maximum_clock_skew_ms,
+        "momentum_bps_30s": row.momentum_bps_30s,
+        "order_book_imbalance": row.order_book_imbalance,
+        "confidence": row.confidence,
         "decision": result.decision, "reason": result.reason,
         "real_order_submissions": 0, "real_orders": 0,
     }

@@ -19,6 +19,10 @@ def event():
         "market_id": "m1", "ts": 1000.0, "up_vwap": 0.45, "down_vwap": 0.56,
         "up_fee": 0.01, "down_fee": 0.01, "up_fill": 10.0, "down_fill": 10.0,
         "size": 10.0, "source_age_ms": 20.0, "books_synced": True,
+        "up_best_ask": 0.44, "down_best_ask": 0.55,
+        "up_available_depth": 100.0, "down_available_depth": 100.0,
+        "up_book_imbalance": 0.2, "down_book_imbalance": -0.2,
+        "clock_skew_ms": 10.0,
         "subscription_generation": 2, "ws_session_id": 3,
     }
 
@@ -29,7 +33,7 @@ def venue(volatility=0.001):
         "fresh_exchange_source_count": 3, "fresh_usd_spot_source_count": 2,
         "cross_source_divergence_bps": 5.0, "reference_quorum_met": True,
         "reference_state": "REFERENCE_READY", "volatility_per_sqrt_second": volatility,
-        "model_sample_count": 40,
+        "model_sample_count": 40, "momentum_bps_30s": 2.0, "clock_skew_ms": 10.0,
         "sources": {
             "coinbase": {"symbol": "BTC-USD", "market_type": "spot", "quote_currency": "USD", "price": 101.0, "bid": 100.9, "ask": 101.1, "source_timestamp": "x", "received_at": 999000, "message_age_ms": 10, "status": "FRESH"},
             "kraken": {"symbol": "BTC/USD", "market_type": "spot", "quote_currency": "USD", "price": 101.0, "bid": 100.9, "ask": 101.1, "source_timestamp": "x", "received_at": 999000, "message_age_ms": 10, "status": "FRESH"},
@@ -46,6 +50,8 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
     assert all(row["event_id"].startswith("paired-1:") for row in rows)
     assert all(row["real_order_submissions"] == 0 for row in rows)
     assert all(row["target_size"] == 10 for row in rows)
+    assert all(row["config_version"] == "shadow-buy-rules-v2" for row in rows)
+    assert all(len(row["config_hash"]) == 64 for row in rows)
 
 
 def test_probability_model_fails_closed_without_volatility_samples():

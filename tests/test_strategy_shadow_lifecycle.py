@@ -147,6 +147,16 @@ def test_lottery_total_open_notional_limit_is_enforced(tmp_path):
     assert json.loads(log.read_text().splitlines()[-1])["reason"] == "lottery_open_notional_limit"
 
 
+def test_strategy_order_size_limits_are_enforced(tmp_path):
+    limits = replace(PortfolioLimits(), directional_max_order_size=5,
+                     lottery_max_order_size=5)
+    log = tmp_path / "complete.jsonl"
+    markets = {"m1": market()}
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log, limits)
+    assert lifecycle.consume(accepted(), markets) is False
+    assert json.loads(log.read_text().splitlines()[-1])["reason"] == "directional_order_size_limit"
+
+
 def test_lottery_daily_loss_blocks_new_positions_after_settlement(tmp_path, monkeypatch):
     monkeypatch.setattr("poly_arb_bot.strategy_shadow_lifecycle.time.time", lambda: 1200)
     limits = replace(PortfolioLimits(), lottery_max_daily_loss=0.5)

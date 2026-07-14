@@ -32,10 +32,9 @@ def test_ws_engine_reconnects_and_audits_rejected_shadow_evaluations():
     assert '"net_cost_above_threshold"' in SOURCE
 
 
-def test_ws_engine_bootstraps_rest_books_before_ws_deltas():
-    assert '"/book?token_id=" + token' in SOURCE
-    assert 'book.initialized = true' in SOURCE
-    assert '"BOOK_BOOTSTRAP_SUMMARY initialized="' in SOURCE
+def test_ws_engine_does_not_block_websocket_on_rest_bootstrap():
+    assert '"/book?token_id=" + token' not in SOURCE
+    assert '"BOOK_BOOTSTRAP_SKIPPED reason=ws_snapshot_required tokens="' in SOURCE
     assert '"book_uninitialized"' in SOURCE
 
 
@@ -86,6 +85,14 @@ def test_static_books_stay_usable_while_websocket_feed_is_live():
 
 def test_audit_stream_preserves_unix_timestamp_precision():
     assert "audit_ << std::setprecision(15);" in SOURCE
+
+
+def test_directional_inputs_use_real_clob_best_ask_slippage_and_imbalance():
+    for field in ("up_best_ask", "down_best_ask", "up_slippage_per_share",
+                  "down_slippage_per_share", "up_book_imbalance", "down_book_imbalance",
+                  "up_available_depth", "down_available_depth"):
+        assert field in SOURCE
+    assert "clob_source_delta_upper_bound" in SOURCE
 
 
 def test_health_explains_paired_market_readiness_gap():

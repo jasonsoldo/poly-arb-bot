@@ -58,16 +58,18 @@ struct AssetConfig {
     const char* chainlink;
     const char* coinbase;
     const char* kraken;
+    const char* bybit;
+    const char* okx;
 };
 
 const AssetConfig ASSETS[] = {
-    {"BTC", "btcusdt", "btc/usd", "BTC-USD", "BTC/USD"},
-    {"ETH", "ethusdt", "eth/usd", "ETH-USD", "ETH/USD"},
-    {"SOL", "solusdt", "sol/usd", "SOL-USD", "SOL/USD"},
-    {"XRP", "xrpusdt", "xrp/usd", "XRP-USD", "XRP/USD"},
-    {"BNB", "bnbusdt", "bnb/usd", "", ""},
-    {"DOGE", "dogeusdt", "doge/usd", "DOGE-USD", "DOGE/USD"},
-    {"HYPE", "", "hype/usd", "", ""},
+    {"BTC", "btcusdt", "btc/usd", "BTC-USD", "BTC/USD", "BTCUSDT", "BTC-USDT"},
+    {"ETH", "ethusdt", "eth/usd", "ETH-USD", "ETH/USD", "ETHUSDT", "ETH-USDT"},
+    {"SOL", "solusdt", "sol/usd", "SOL-USD", "SOL/USD", "SOLUSDT", "SOL-USDT"},
+    {"XRP", "xrpusdt", "xrp/usd", "XRP-USD", "XRP/USD", "XRPUSDT", "XRP-USDT"},
+    {"BNB", "bnbusdt", "bnb/usd", "", "", "BNBUSDT", "BNB-USDT"},
+    {"DOGE", "dogeusdt", "doge/usd", "DOGE-USD", "DOGE/USD", "DOGEUSDT", "DOGE-USDT"},
+    {"HYPE", "", "hype/usd", "", "", "", ""},
 };
 
 struct SharedState {
@@ -137,25 +139,49 @@ void write_status_locked(SharedState& shared, bool force = false) {
         first_asset = false;
         const auto& asset = shared.assets.at(config.asset);
         std::vector<double> fresh_spot, fresh_usd;
+        std::map<std::string, std::vector<double>> quote_prices;
+        for (const auto& item : asset.sources) {
+            const auto& source = item.second;
+            if (source_status(source, timestamp) == "FRESH" && source.market_type == "spot" && source.price)
+                quote_prices[source.quote_currency].push_back(source.price);
+        }
+        std::map<std::string, double> quote_medians;
+        for (const auto& item : quote_prices) quote_medians[item.first] = median(item.second);
+        const auto is_outlier = [&](const SourceState& source) {
+            const auto found = quote_medians.find(source.quote_currency);
+            return found != quote_medians.end() && found->second > 0 &&
+                   std::abs(source.price - found->second) / found->second * 10000 > 100;
+        };
         double fast_price = 0, settlement_reference = 0;
+        double clock_skew_upper_bound_ms = 0;
         int fresh_sources = 0, fresh_usd_sources = 0;
         std::vector<double> volatilities, momentums;
         int model_sample_count = 0;
         for (const auto& item : asset.sources) {
             const auto& source = item.second;
-            if (source_status(source, timestamp) != "FRESH" || source.market_type != "spot" || !source.price) continue;
-            if (item.first != "chainlink") {
-                fresh_spot.push_back(source.price);
-                ++fresh_sources;
-                if (source.quote_currency == "USD") { fresh_usd.push_back(source.price); ++fresh_usd_sources; }
-                if (!fast_price && (item.first == "binance" || item.first == "coinbase" || item.first == "kraken")) fast_price = source.price;
-                const double volatility = volatility_per_sqrt_second(source);
-                if (volatility > 0) volatilities.push_back(volatility);
-                if (source.samples.size() >= 2) momentums.push_back(momentum_bps(source, timestamp));
-                model_sample_count = std::max(model_sample_count, static_cast<int>(source.samples.size()));
-            } else {
+            if (source_status(source, timestamp) != "FRESH" || !source.price) continue;
+            if (item.first == "chainlink") {
                 settlement_reference = source.price;
+                continue;
             }
+            if (source.market_type != "spot" || is_outlier(source)) continue;
+            if (!source.source_timestamp.empty()) {
+                try {
+                    double source_ms = std::stod(source.source_timestamp);
+                    if (source_ms > 0 && source_ms < 1e12) source_ms *= 1000;
+                    const double delta = std::abs(source.received_at - source_ms);
+                    if (source_ms > 0 && (!clock_skew_upper_bound_ms || delta < clock_skew_upper_bound_ms))
+                        clock_skew_upper_bound_ms = delta;
+                } catch (...) {}
+            }
+            fresh_spot.push_back(source.price);
+            ++fresh_sources;
+            if (source.quote_currency == "USD") { fresh_usd.push_back(source.price); ++fresh_usd_sources; }
+            if (!fast_price && (item.first == "binance" || item.first == "bybit" || item.first == "okx")) fast_price = source.price;
+            const double volatility = volatility_per_sqrt_second(source);
+            if (volatility > 0) volatilities.push_back(volatility);
+            if (source.samples.size() >= 2) momentums.push_back(momentum_bps(source, timestamp));
+            model_sample_count = std::max(model_sample_count, static_cast<int>(source.samples.size()));
         }
         const double consensus = median(fresh_usd);
         double divergence = 0;
@@ -171,6 +197,9 @@ void write_status_locked(SharedState& shared, bool force = false) {
             if (!first_source) out << ',';
             first_source = false;
             const auto& source = item.second;
+            const std::string status = source_status(source, timestamp) == "FRESH" &&
+                                       source.market_type == "spot" && is_outlier(source)
+                                       ? "OUTLIER" : source_status(source, timestamp);
             out << '\"' << item.first << "\":{\"supported\":" << (source.supported ? "true" : "false")
                 << ",\"symbol\":\"" << source.symbol
                 << "\",\"market_type\":\"" << source.market_type
@@ -181,7 +210,7 @@ void write_status_locked(SharedState& shared, bool force = false) {
                 << "\",\"received_at\":"; write_number(out, source.received_at);
             out << ",\"message_age_ms\":";
             if (source.received_at) out << std::max(0.0, timestamp - source.received_at); else out << "null";
-            out << ",\"status\":\"" << source_status(source, timestamp) << "\"}";
+            out << ",\"status\":\"" << status << "\"}";
         }
         const auto& binance = asset.sources.at("binance");
         const auto& chainlink = asset.sources.at("chainlink");
@@ -197,6 +226,8 @@ void write_status_locked(SharedState& shared, bool force = false) {
             << ",\"fresh_usd_spot_source_count\":" << fresh_usd_sources
             << ",\"consensus_price\":"; write_number(out, consensus);
         out << ",\"fast_price\":"; write_number(out, fast_price);
+        out << ",\"clock_skew_ms\":"; write_number(out, clock_skew_upper_bound_ms);
+        out << ",\"clock_skew_basis\":\"minimum_reference_receive_delta_upper_bound\"";
         out << ",\"settlement_reference\":"; write_number(out, settlement_reference);
         out << ",\"cross_source_divergence_bps\":";
         if (fresh_spot.size() > 1) out << divergence; else out << "null";
@@ -303,7 +334,7 @@ void set_connected(SharedState& shared, const std::string& source, bool connecte
 
 template <typename Handler>
 void websocket_loop(SharedState& shared, const std::string& source, const std::string& host,
-                    const std::string& path, const std::string& subscription,
+                    const std::string& port, const std::string& path, const std::string& subscription,
                     bool text_ping, Handler handler) {
     for (;;) {
         try {
@@ -312,7 +343,7 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
             ssl.set_default_verify_paths(); ssl.set_verify_mode(asio::ssl::verify_peer);
             tcp::resolver resolver(io);
             websocket::stream<ssl_socket> ws(io, ssl);
-            asio::connect(beast::get_lowest_layer(ws), resolver.resolve(host, "443"));
+            asio::connect(beast::get_lowest_layer(ws), resolver.resolve(host, port));
             if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str())) throw std::runtime_error("SNI failed");
             ws.next_layer().handshake(asio::ssl::stream_base::client);
             ws.handshake(host, path);
@@ -350,6 +381,8 @@ void initialize(SharedState& shared) {
         sources["binance"] = {config.binance, "spot", "USDT", "", 0, 0, 0, 0, false, std::string(config.binance).size() > 0, {}, {}, {}};
         sources["coinbase"] = {config.coinbase, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.coinbase).size() > 0, {}, {}, {}};
         sources["kraken"] = {config.kraken, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.kraken).size() > 0, {}, {}, {}};
+        sources["bybit"] = {config.bybit, "spot", "USDT", "", 0, 0, 0, 0, false, std::string(config.bybit).size() > 0, {}, {}, {}};
+        sources["okx"] = {config.okx, "spot", "USDT", "", 0, 0, 0, 0, false, std::string(config.okx).size() > 0, {}, {}, {}};
         sources["chainlink"] = {config.chainlink, "settlement", "USD", "", 0, 0, 0, 0, false, std::string(config.chainlink).size() > 0, {}, {}, {}};
     }
 }
@@ -364,9 +397,11 @@ int main(int argc, char** argv) {
     const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker/btcusdt@kline_1h/ethusdt@kline_1h/solusdt@kline_1h/xrpusdt@kline_1h/bnbusdt@kline_1h/dogeusdt@kline_1h/btcusdt@kline_4h/ethusdt@kline_4h/solusdt@kline_4h/xrpusdt@kline_4h/bnbusdt@kline_4h/dogeusdt@kline_4h";
     const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","DOGE-USD"],"channels":["ticker"]})";
     const std::string kraken_sub = R"({"method":"subscribe","params":{"channel":"ticker","symbol":["BTC/USD","ETH/USD","SOL/USD","XRP/USD","DOGE/USD"]}})";
+    const std::string bybit_sub = R"({"op":"subscribe","args":["orderbook.1.BTCUSDT","orderbook.1.ETHUSDT","orderbook.1.SOLUSDT","orderbook.1.XRPUSDT","orderbook.1.BNBUSDT","orderbook.1.DOGEUSDT"]})";
+    const std::string okx_sub = R"({"op":"subscribe","args":[{"channel":"tickers","instId":"BTC-USDT"},{"channel":"tickers","instId":"ETH-USDT"},{"channel":"tickers","instId":"SOL-USDT"},{"channel":"tickers","instId":"XRP-USDT"},{"channel":"tickers","instId":"BNB-USDT"},{"channel":"tickers","instId":"DOGE-USDT"}]})";
 
     std::thread binance([&] {
-        websocket_loop(shared, "binance", "data-stream.binance.vision", binance_path, "", false, [&](const std::string& raw) {
+        websocket_loop(shared, "binance", "data-stream.binance.vision", "443", binance_path, "", false, [&](const std::string& raw) {
             const auto row = parse_json(raw);
             const auto data = row.get_child_optional("data");
             if (!data) return;
@@ -397,7 +432,7 @@ int main(int argc, char** argv) {
         });
     });
     std::thread rtds([&] {
-        websocket_loop(shared, "chainlink", "ws-live-data.polymarket.com", "/", rtds_sub, true, [&](const std::string& raw) {
+        websocket_loop(shared, "chainlink", "ws-live-data.polymarket.com", "443", "/", rtds_sub, true, [&](const std::string& raw) {
             const auto row = parse_json(raw);
             const std::string topic = row.get<std::string>("topic", "");
             std::string symbol = row.get<std::string>("payload.symbol", "");
@@ -416,7 +451,7 @@ int main(int argc, char** argv) {
         });
     });
     std::thread coinbase([&] {
-        websocket_loop(shared, "coinbase", "ws-feed.exchange.coinbase.com", "/", coinbase_sub, false, [&](const std::string& raw) {
+        websocket_loop(shared, "coinbase", "ws-feed.exchange.coinbase.com", "443", "/", coinbase_sub, false, [&](const std::string& raw) {
             const auto row = parse_json(raw);
             if (row.get<std::string>("type", "") != "ticker") return;
             const std::string symbol = row.get<std::string>("product_id", "");
@@ -425,7 +460,7 @@ int main(int argc, char** argv) {
         });
     });
     std::thread kraken([&] {
-        websocket_loop(shared, "kraken", "ws.kraken.com", "/v2", kraken_sub, false, [&](const std::string& raw) {
+        websocket_loop(shared, "kraken", "ws.kraken.com", "443", "/v2", kraken_sub, false, [&](const std::string& raw) {
             const auto row = parse_json(raw);
             if (row.get<std::string>("channel", "") != "ticker") return;
             const auto data = row.get_child_optional("data");
@@ -436,5 +471,38 @@ int main(int argc, char** argv) {
                 return publish(shared, config.asset, "kraken", tick.get<double>("last"), tick.get<double>("bid", 0), tick.get<double>("ask", 0), tick.get<std::string>("timestamp", ""));
         });
     });
-    binance.join(); rtds.join(); coinbase.join(); kraken.join();
+    std::thread bybit([&] {
+        websocket_loop(shared, "bybit", "stream.bybit.com", "443", "/v5/public/spot", bybit_sub, false, [&](const std::string& raw) {
+            const auto row = parse_json(raw);
+            if (row.get<std::string>("type", "") != "snapshot") return;
+            const auto data = row.get_child_optional("data");
+            if (!data) return;
+            const std::string symbol = data->get<std::string>("s", "");
+            const auto bids = data->get_child_optional("b"), asks = data->get_child_optional("a");
+            if (!bids || !asks || bids->empty() || asks->empty()) return;
+            const auto& bid_level = bids->front().second;
+            const auto& ask_level = asks->front().second;
+            if (bid_level.empty() || ask_level.empty()) return;
+            const double bid = bid_level.front().second.get_value<double>();
+            const double ask = ask_level.front().second.get_value<double>();
+            if (!bid || !ask) return;
+            for (const auto& config : ASSETS) if (symbol == config.bybit)
+                return publish(shared, config.asset, "bybit", (bid + ask) / 2, bid, ask, row.get<std::string>("ts", ""));
+        });
+    });
+    std::thread okx([&] {
+        websocket_loop(shared, "okx", "ws.okx.com", "8443", "/ws/v5/public", okx_sub, false, [&](const std::string& raw) {
+            const auto row = parse_json(raw);
+            if (row.get<std::string>("arg.channel", "") != "tickers") return;
+            const auto data = row.get_child_optional("data");
+            if (!data || data->empty()) return;
+            const auto& tick = data->front().second;
+            const std::string symbol = tick.get<std::string>("instId", "");
+            const double bid = tick.get<double>("bidPx", 0), ask = tick.get<double>("askPx", 0);
+            if (!bid || !ask) return;
+            for (const auto& config : ASSETS) if (symbol == config.okx)
+                return publish(shared, config.asset, "okx", (bid + ask) / 2, bid, ask, tick.get<std::string>("ts", ""));
+        });
+    });
+    binance.join(); rtds.join(); coinbase.join(); kraken.join(); bybit.join(); okx.join();
 }

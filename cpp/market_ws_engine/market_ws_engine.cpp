@@ -3,7 +3,6 @@
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp>
-#include <boost/beast/http.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -26,7 +25,6 @@
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
-namespace http = beast::http;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
 using ssl_socket = asio::ssl::stream<tcp::socket>;
@@ -100,6 +98,21 @@ bool crossed(const Book& book) {
     return !book.bids.empty() && !book.asks.empty() && book.bids.rbegin()->first >= book.asks.begin()->first;
 }
 
+double best_ask(const Book& book) { return book.asks.empty() ? 0 : book.asks.begin()->first; }
+
+double book_imbalance(const Book& book) {
+    double bids = 0, asks = 0;
+    for (const auto& level : book.bids) bids += level.second;
+    for (const auto& level : book.asks) asks += level.second;
+    return bids + asks > 0 ? (bids - asks) / (bids + asks) : 0;
+}
+
+double available_ask_depth(const Book& book) {
+    double depth = 0;
+    for (const auto& level : book.asks) depth += level.second;
+    return depth;
+}
+
 std::pair<double, double> buy_vwap(const Book& book, double size) {
     double left = size, filled = 0, notional = 0;
     for (const auto& level : book.asks) {
@@ -108,43 +121,6 @@ std::pair<double, double> buy_vwap(const Book& book, double size) {
         if (left <= 1e-9) break;
     }
     return {filled, filled ? notional / filled : 0};
-}
-
-bool fetch_book(asio::io_context& io, asio::ssl::context& ssl, const std::string& token, Book& book) {
-    const std::string host = "clob.polymarket.com";
-    try {
-        tcp::resolver resolver(io);
-        beast::ssl_stream<beast::tcp_stream> stream(io, ssl);
-        if (!SSL_set_tlsext_host_name(stream.native_handle(), host.c_str())) throw std::runtime_error("SNI failed");
-        const auto endpoints = resolver.resolve(host, "443");
-        beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(5));
-        beast::get_lowest_layer(stream).connect(endpoints);
-        stream.handshake(asio::ssl::stream_base::client);
-        http::request<http::empty_body> request{http::verb::get, "/book?token_id=" + token, 11};
-        request.set(http::field::host, host);
-        request.set(http::field::user_agent, "poly-arb-bot/0.1");
-        http::write(stream, request);
-        beast::flat_buffer buffer;
-        http::response<http::string_body> response;
-        http::read(stream, buffer, response);
-        if (response.result() != http::status::ok) throw std::runtime_error("HTTP " + std::to_string(response.result_int()));
-        ptree payload;
-        std::istringstream input(response.body());
-        boost::property_tree::read_json(input, payload);
-        if (auto bids = payload.get_child_optional("bids")) set_levels(book, *bids, true, true);
-        if (auto asks = payload.get_child_optional("asks")) set_levels(book, *asks, false, true);
-        book.initialized = true;
-        book.updated_at = now_seconds();
-        book.source_timestamp_ms = payload.get<double>("timestamp", 0);
-        book.hash = payload.get<std::string>("hash", "");
-        beast::error_code ignored;
-        stream.shutdown(ignored);
-        std::cerr << "BOOK_BOOTSTRAP token=" << token << " bids=" << book.bids.size() << " asks=" << book.asks.size() << "\n";
-        return true;
-    } catch (const std::exception& error) {
-        std::cerr << "BOOK_BOOTSTRAP_ERROR token=" << token << " message=" << error.what() << "\n";
-        return false;
-    }
 }
 
 class MarketWsSession : public std::enable_shared_from_this<MarketWsSession> {
@@ -287,6 +263,7 @@ private:
             const double seconds_to_close = item.second.close_ts - timestamp;
             const double source_age_ms = std::max(std::abs(timestamp * 1000 - up_book.source_timestamp_ms), std::abs(timestamp * 1000 - down_book.source_timestamp_ms));
             auto up = buy_vwap(up_book, size_), down = buy_vwap(down_book, size_);
+            const double up_best_ask = best_ask(up_book), down_best_ask = best_ask(down_book);
             const bool fok = up.first >= size_ && down.first >= size_;
             const double rate = item.second.fee > 0 ? item.second.fee : fallback_fee_;
             const double up_fee = std::round(up.first * rate * up.second * (1 - up.second) * 100000) / 100000;
@@ -315,10 +292,18 @@ private:
                                    << "\",\"reason\":\"" << reason << "\",\"fok\":" << (fok ? "true" : "false")
                                    << ",\"seconds_to_close\":" << seconds_to_close << ",\"size\":" << size_
                                    << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
-                                   << ",\"clock_skew_ms\":null,\"source_age_ms\":" << source_age_ms
+                                   << ",\"clock_skew_ms\":" << source_age_ms
+                                   << ",\"clock_skew_basis\":\"clob_source_delta_upper_bound\",\"source_age_ms\":" << source_age_ms
                                    << ",\"up_book_age_ms\":" << up_age_ms << ",\"down_book_age_ms\":" << down_age_ms
                                    << ",\"up_fill\":" << up.first << ",\"down_fill\":" << down.first
+                                   << ",\"up_available_depth\":" << available_ask_depth(up_book)
+                                   << ",\"down_available_depth\":" << available_ask_depth(down_book)
                                    << ",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
+                                   << ",\"up_best_ask\":" << up_best_ask << ",\"down_best_ask\":" << down_best_ask
+                                   << ",\"up_slippage_per_share\":" << std::max(0.0, up.second - up_best_ask)
+                                   << ",\"down_slippage_per_share\":" << std::max(0.0, down.second - down_best_ask)
+                                   << ",\"up_book_imbalance\":" << book_imbalance(up_book)
+                                   << ",\"down_book_imbalance\":" << book_imbalance(down_book)
                                    << ",\"up_fee\":" << up_fee << ",\"down_fee\":" << down_fee
                                    << ",\"fee_rate\":" << rate
                                    << ",\"gross_cost\":" << gross_cost << ",\"buffer\":" << buffer
@@ -423,7 +408,6 @@ private:
             for (const auto& token : next_tokens) if (!old_tokens.count(token.first)) {
                 books_[token.first] = Book{};
                 books_[token.first].generation = generation_;
-                fetch_book(io_, ssl_, token.first, books_[token.first]);
                 added.push_back(token.first);
             }
             for (const auto& token : old_tokens) if (!next_tokens.count(token.first)) removed.push_back(token.first);
@@ -516,9 +500,7 @@ int main(int argc, char** argv) {
             ssl.set_default_verify_paths(); ssl.set_verify_mode(asio::ssl::verify_peer);
             std::map<std::string, Book> books;
             for (const auto& item : markets) { books[item.second.up]; books[item.second.down]; }
-            size_t initialized = 0;
-            for (auto& item : books) if (fetch_book(io, ssl, item.first, item.second)) ++initialized;
-            std::cerr << "BOOK_BOOTSTRAP_SUMMARY initialized=" << initialized << " tokens=" << books.size() << "\n";
+            std::cerr << "BOOK_BOOTSTRAP_SKIPPED reason=ws_snapshot_required tokens=" << books.size() << "\n";
             auto session = std::make_shared<MarketWsSession>(io, ssl, markets, std::move(books), size, fee, buffer_per_share,
                 min_profit, leg_interval_us, execution_half_life_us, orphan_loss_per_share, min_expected_value,
                 audit_path, argv[1], document_version, health_path);

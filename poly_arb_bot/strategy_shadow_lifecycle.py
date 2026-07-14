@@ -13,12 +13,14 @@ SETTLEMENT_MAX_DELAY_MS = 10_000
 
 @dataclass(frozen=True)
 class PortfolioLimits:
+    directional_max_order_size: float = 250.0
     directional_max_open_positions: int = 8
     directional_max_per_close_window: int = 4
     directional_max_open_notional: float = 20.0
     directional_max_daily_loss: float = 5.0
     directional_max_consecutive_losses: int = 5
     lottery_max_open_positions: int = 4
+    lottery_max_order_size: float = 25.0
     lottery_max_per_close_window: int = 2
     lottery_max_open_notional: float = 5.0
     lottery_max_daily_loss: float = 5.0
@@ -27,12 +29,14 @@ class PortfolioLimits:
     @classmethod
     def from_env(cls):
         return cls(
+            directional_max_order_size=float(os.getenv("DIRECTIONAL_MAX_ORDER_SIZE", "250")),
             directional_max_open_positions=int(os.getenv("DIRECTIONAL_MAX_OPEN_POSITIONS", "8")),
             directional_max_per_close_window=int(os.getenv("DIRECTIONAL_MAX_PER_CLOSE_WINDOW", "4")),
             directional_max_open_notional=float(os.getenv("DIRECTIONAL_MAX_OPEN_NOTIONAL", "20")),
             directional_max_daily_loss=float(os.getenv("DIRECTIONAL_MAX_DAILY_LOSS", "5")),
             directional_max_consecutive_losses=int(os.getenv("DIRECTIONAL_MAX_CONSECUTIVE_LOSSES", "5")),
             lottery_max_open_positions=int(os.getenv("LOTTERY_MAX_OPEN_POSITIONS", "4")),
+            lottery_max_order_size=float(os.getenv("LOTTERY_MAX_ORDER_SIZE", "25")),
             lottery_max_per_close_window=int(os.getenv("LOTTERY_MAX_PER_CLOSE_WINDOW", "2")),
             lottery_max_open_notional=float(os.getenv("LOTTERY_MAX_OPEN_NOTIONAL", "5")),
             lottery_max_daily_loss=float(os.getenv("LOTTERY_MAX_DAILY_LOSS", "5")),
@@ -138,6 +142,8 @@ class StrategyShadowLifecycle:
         close_ts = market.get("close_ts")
         same_close = [position for position in strategy_positions if position.get("close_ts") == close_ts]
         if strategy == "late_window_directional_ev":
+            if float(row.get("target_size", 0)) > self.limits.directional_max_order_size:
+                return "directional_order_size_limit"
             if len(strategy_positions) >= self.limits.directional_max_open_positions:
                 return "directional_open_position_limit"
             if len(same_close) >= self.limits.directional_max_per_close_window:
@@ -148,6 +154,8 @@ class StrategyShadowLifecycle:
                 strategy, self.limits.directional_max_daily_loss,
                 self.limits.directional_max_consecutive_losses, "directional",
             )
+        if float(row.get("target_size", 0)) > self.limits.lottery_max_order_size:
+            return "lottery_order_size_limit"
         if len(strategy_positions) >= self.limits.lottery_max_open_positions:
             return "lottery_open_position_limit"
         if len(same_close) >= self.limits.lottery_max_per_close_window:
@@ -207,6 +215,8 @@ class StrategyShadowLifecycle:
             "cross_source_divergence_bps": row.get("cross_source_divergence_bps"),
             "close_ts": market.get("close_ts"),
             "settlement_source": market.get("settlement_source"),
+            "strategy_config_version": row.get("config_version"),
+            "strategy_config_hash": row.get("config_hash"),
             "config_version": self.config_version, "config_hash": self.config_hash,
             "real_order_submissions": 0, "real_orders": 0,
         }

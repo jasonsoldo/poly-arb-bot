@@ -15,7 +15,12 @@ def base(**overrides):
                 seconds_to_close=45, price_to_beat=99, reference=reference(), fee_per_share=.01,
                 slippage_per_share=.002, latency_risk_buffer=.003, settlement_risk_buffer=.002,
                 model_uncertainty_buffer=.01, execution_risk_buffer=.005, liquidity=100,
-                book_age_ms=50, settlement_source_verified=True)
+                book_age_ms=50, reference_age_ms=50, clock_skew_ms=10,
+                minimum_liquidity=20, maximum_slippage=.01,
+                maximum_reference_age_ms=3000, maximum_book_age_ms=750,
+                maximum_clock_skew_ms=250,
+                market_active=True, market_tradable=True, target_depth_ok=True, momentum_bps_30s=2,
+                order_book_imbalance=.1, confidence=.8, settlement_source_verified=True)
     data.update(overrides)
     return DirectionalInput(**data)
 
@@ -48,6 +53,17 @@ def test_completed_statistics_are_not_created_by_accept():
     result = evaluate_directional(base())
     assert result.completed is False
     assert result.real_order_submissions == 0
+
+
+def test_buy_rules_fail_closed_on_missing_clock_skew_and_excess_slippage():
+    assert evaluate_directional(base(clock_skew_ms=None)).reason == "clock_skew_unavailable"
+    assert evaluate_directional(base(slippage_per_share=.02)).reason == "slippage_exceeded"
+
+
+def test_buy_rules_require_target_depth_and_microstructure_inputs():
+    assert evaluate_directional(base(liquidity=19)).reason == "insufficient_liquidity"
+    assert evaluate_directional(base(momentum_bps_30s=None)).reason == "momentum_unavailable"
+    assert evaluate_directional(base(order_book_imbalance=None)).reason == "order_book_imbalance_unavailable"
 
 
 def test_directional_audit_contains_strategy_specific_cost_and_reference_fields():

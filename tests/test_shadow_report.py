@@ -60,6 +60,7 @@ def test_shadow_report_uses_realized_shadow_complete_pnl(tmp_path):
     execution.write_text(json.dumps({
         "ts": 1101, "event_type": "shadow_complete", "event_id": "p1",
         "strategy": "late_window_directional_ev", "market_id": "m1",
+        "strategy_config_version": "shadow-buy-rules-v2",
         "realized_simulated_pnl": 5.9,
     }) + "\n", encoding="utf-8")
     report = build_report(audit, execution)

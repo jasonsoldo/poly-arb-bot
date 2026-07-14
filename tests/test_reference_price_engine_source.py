@@ -47,6 +47,19 @@ def test_reference_engine_subscribes_to_coinbase_and_kraken_spot_tickers():
         assert f'"{source}"' in SOURCE
 
 
+def test_reference_engine_subscribes_to_official_bybit_and_okx_spot_tickers():
+    assert 'stream.bybit.com' in SOURCE
+    assert '/v5/public/spot' in SOURCE
+    assert '"orderbook.1.BTCUSDT"' in SOURCE
+    assert 'get_child_optional("b")' in SOURCE and 'get_child_optional("a")' in SOURCE
+    assert 'ws.okx.com' in SOURCE
+    assert '"8443"' in SOURCE
+    assert '/ws/v5/public' in SOURCE
+    assert '"instId":"BTC-USDT"' in SOURCE
+    assert '"bidPx"' in SOURCE and '"askPx"' in SOURCE
+    assert '"HYPE", "", "hype/usd", "", "", "", ""' in SOURCE
+
+
 def test_reference_engine_emits_normalized_source_and_quorum_state():
     for field in (
         "market_type", "quote_currency", "price", "bid", "ask",
@@ -54,8 +67,16 @@ def test_reference_engine_emits_normalized_source_and_quorum_state():
         "fresh_exchange_source_count", "fresh_usd_spot_source_count",
         "consensus_price", "fast_price", "settlement_reference",
         "cross_source_divergence_bps", "reference_quorum_met", "reference_state",
+        "clock_skew_ms", "clock_skew_basis",
     ):
         assert field in SOURCE
+    assert '"OUTLIER"' in SOURCE
+    assert "quote_medians" in SOURCE
+
+
+def test_chainlink_is_extracted_as_settlement_reference_not_spot_consensus():
+    settlement_branch = SOURCE.split('if (item.first == "chainlink")', 1)[1].split("continue;", 1)[0]
+    assert "settlement_reference = source.price" in settlement_branch
 
 
 def test_rtds_subscription_is_chainlink_only_and_binance_uses_verified_spot_symbols():

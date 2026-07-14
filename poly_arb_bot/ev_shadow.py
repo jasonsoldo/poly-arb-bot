@@ -1,4 +1,5 @@
 import json
+import hashlib
 import math
 import os
 import statistics
@@ -22,6 +23,29 @@ BINANCE_SYMBOLS = {
     "XRP": "XRPUSDT", "BNB": "BNBUSDT", "DOGE": "DOGEUSDT",
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
+STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v2"
+
+
+def strategy_config():
+    values = {
+        "directional_min_net_ev": os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015"),
+        "directional_latency_buffer": os.getenv("DIRECTIONAL_LATENCY_BUFFER", "0.003"),
+        "directional_settlement_buffer": os.getenv("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002"),
+        "lottery_min_price": os.getenv("LOTTERY_MIN_PRICE", "0.01"),
+        "lottery_max_price": os.getenv("LOTTERY_MAX_PRICE", "0.05"),
+        "lottery_min_net_ev": os.getenv("LOTTERY_MIN_NET_EV", "0.015"),
+        "lottery_model_buffer": os.getenv("LOTTERY_MODEL_BUFFER", "0.01"),
+        "lottery_execution_buffer": os.getenv("LOTTERY_EXECUTION_BUFFER", "0.005"),
+        "minimum_liquidity": os.getenv("STRATEGY_MIN_LIQUIDITY", "20"),
+        "maximum_slippage": os.getenv("STRATEGY_MAX_SLIPPAGE", "0.01"),
+        "maximum_reference_age_ms": os.getenv("REFERENCE_MAX_AGE_MS", "3000"),
+        "maximum_book_age_ms": os.getenv("CLOB_MAX_BOOK_AGE_MS", "750"),
+        "maximum_clock_skew_ms": os.getenv("MAX_CLOCK_SKEW_MS", "250"),
+        "momentum_z_per_bps": os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"),
+        "imbalance_z": os.getenv("MODEL_IMBALANCE_Z", "0.25"),
+    }
+    encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
+    return values, hashlib.sha256(encoded).hexdigest()
 
 
 def capture_opening_prices(markets, venue, existing, now_ms=None):
@@ -105,7 +129,7 @@ def _reference_state(asset, settlement_source):
     return aggregate_reference(sources, selected.get("price"), verified)
 
 
-def _up_probability(asset, price_to_beat, seconds_to_close):
+def _up_probability(asset, price_to_beat, seconds_to_close, book_imbalance=None):
     reference = asset.get("consensus_price")
     volatility = asset.get("volatility_per_sqrt_second")
     samples = int(asset.get("model_sample_count", 0))
@@ -114,7 +138,12 @@ def _up_probability(asset, price_to_beat, seconds_to_close):
     scale = float(volatility) * math.sqrt(seconds_to_close)
     if scale <= 0:
         return None
+    momentum = asset.get("momentum_bps_30s")
+    if momentum is None or book_imbalance is None:
+        return None
     z = math.log(float(reference) / float(price_to_beat)) / scale
+    z += float(momentum) * float(os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"))
+    z += float(book_imbalance) * float(os.getenv("MODEL_IMBALANCE_Z", "0.25"))
     return min(.999, max(.001, .5 * (1 + math.erf(z / math.sqrt(2)))))
 
 
@@ -139,7 +168,12 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
     if price_to_beat is None and anchor.get("price") is not None:
         price_to_beat = float(anchor["price"])
         price_to_beat_source = f"{anchor.get('source')}_start_anchor"
-    up_probability = _up_probability(model_asset, price_to_beat, seconds_to_close)
+    up_imbalance = event.get("up_book_imbalance")
+    down_imbalance = event.get("down_book_imbalance")
+    paired_imbalance = None
+    if up_imbalance is not None and down_imbalance is not None:
+        paired_imbalance = (float(up_imbalance) - float(down_imbalance)) / 2
+    up_probability = _up_probability(model_asset, price_to_beat, seconds_to_close, paired_imbalance)
     probability_block_reason = None
     if up_probability is None:
         if price_to_beat is None:
@@ -153,28 +187,56 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             probability_block_reason = "volatility_unavailable"
         elif int(model_asset.get("model_sample_count", 0)) < 20:
             probability_block_reason = "insufficient_model_samples"
+        elif model_asset.get("momentum_bps_30s") is None:
+            probability_block_reason = "momentum_unavailable"
+        elif paired_imbalance is None:
+            probability_block_reason = "order_book_imbalance_unavailable"
         else:
             probability_block_reason = "probability_model_unavailable"
     size = max(float(event.get("size", 0)), 1e-9)
     settlement = asset.get("sources", {}).get(settlement_source, {})
     rows = []
-    for outcome, fill_key, fee_key, depth_key, probability in (
-        ("Up", "up_vwap", "up_fee", "up_fill", up_probability),
-        ("Down", "down_vwap", "down_fee", "down_fill", None if up_probability is None else 1 - up_probability),
+    config_values, config_hash = strategy_config()
+    for outcome, fill_key, ask_key, fee_key, depth_key, imbalance_key, probability in (
+        ("Up", "up_vwap", "up_best_ask", "up_fee", "up_available_depth", "up_book_imbalance", up_probability),
+        ("Down", "down_vwap", "down_best_ask", "down_fee", "down_available_depth", "down_book_imbalance", None if up_probability is None else 1 - up_probability),
     ):
         fill = float(event.get(fill_key, 1))
+        best_ask = event.get(ask_key)
+        slippage = max(0.0, fill - float(best_ask)) if best_ask is not None else float("inf")
+        source_ages = [row.get("message_age_ms") for row in asset.get("sources", {}).values()
+                       if row.get("status") == "FRESH" and row.get("message_age_ms") is not None]
+        reference_age_ms = max(source_ages) if source_ages else None
+        samples = int(model_asset.get("model_sample_count", 0))
+        divergence = reference.cross_source_divergence_bps
+        confidence = None if up_probability is None else max(0.0, min(1.0,
+            min(samples / 120, 1.0) * (1 - min(float(divergence or 0) / 100, 1.0))))
         common = dict(
-            market_id=market.get("market_id", ""), condition_id=market.get("market_id", ""),
+            market_id=market.get("market_id", ""), condition_id=market.get("condition_id", market.get("market_id", "")),
             asset=market.get("asset", ""), timeframe=market.get("interval", ""), outcome=outcome,
-            market_price=fill, expected_fill_price=fill, estimated_probability=probability,
+            market_price=float(best_ask) if best_ask is not None else fill,
+            expected_fill_price=fill, estimated_probability=probability,
             seconds_to_close=seconds_to_close, price_to_beat=price_to_beat,
             reference=reference, fee_per_share=float(event.get(fee_key, 0)) / size,
-            slippage_per_share=0.0,
+            slippage_per_share=slippage,
             latency_risk_buffer=float(os.getenv("DIRECTIONAL_LATENCY_BUFFER", "0.003")),
             settlement_risk_buffer=float(os.getenv("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002")),
             model_uncertainty_buffer=float(os.getenv("LOTTERY_MODEL_BUFFER", "0.01")),
             execution_risk_buffer=float(os.getenv("LOTTERY_EXECUTION_BUFFER", "0.005")),
-            liquidity=float(event.get(depth_key, 0)), book_age_ms=float(event.get("source_age_ms", 1e9)),
+            liquidity=float(event.get(depth_key, event.get("up_fill" if outcome == "Up" else "down_fill", 0))),
+            book_age_ms=float(event.get("source_age_ms", 1e9)),
+            reference_age_ms=reference_age_ms,
+            clock_skew_ms=asset.get("clock_skew_ms"),
+            minimum_liquidity=float(os.getenv("STRATEGY_MIN_LIQUIDITY", "20")),
+            maximum_slippage=float(os.getenv("STRATEGY_MAX_SLIPPAGE", "0.01")),
+            maximum_reference_age_ms=float(os.getenv("REFERENCE_MAX_AGE_MS", "3000")),
+            maximum_book_age_ms=float(os.getenv("CLOB_MAX_BOOK_AGE_MS", "750")),
+            maximum_clock_skew_ms=float(os.getenv("MAX_CLOCK_SKEW_MS", "250")),
+            market_active=bool(market.get("active", True)) and float(market.get("close_ts", 0)) > now,
+            market_tradable=bool(market.get("accepting_orders", True)),
+            target_depth_ok=float(event.get("up_fill" if outcome == "Up" else "down_fill", 0)) >= size,
+            momentum_bps_30s=model_asset.get("momentum_bps_30s"),
+            order_book_imbalance=event.get(imbalance_key), confidence=confidence,
             settlement_source_verified=(settlement.get("status") == "FRESH" and
                                         settlement.get("price") is not None),
             probability_block_reason=probability_block_reason,
@@ -206,6 +268,9 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             audit["price_to_beat_source_timestamp_ms"] = anchor.get("source_timestamp_ms")
             audit["target_size"] = size
             audit["window"] = market.get("window", "current")
+            audit["config_version"] = STRATEGY_CONFIG_VERSION
+            audit["config_hash"] = config_hash
+            audit["strategy_config"] = config_values
             rows.append(audit)
     return rows
 
