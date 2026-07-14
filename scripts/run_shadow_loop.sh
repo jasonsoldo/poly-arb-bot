@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 mkdir -p data logs state
 touch logs/shadow-audit.jsonl
 touch logs/strategy-audit.jsonl
+touch logs/shadow-execution.jsonl
 python_bin="${PYTHON_BIN:-$PWD/.venv/bin/python}"
 if [[ ! -x "$python_bin" ]]; then
   echo "PYTHON_NOT_EXECUTABLE path=$python_bin" >&2

@@ -91,6 +91,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable poly-arb-web
 sudo systemctl start poly-arb-web
 sudo ufw allow 8787/tcp
+
+# Install and validate JSONL rotation.
+sudo cp deploy/poly-arb-bot.logrotate /etc/logrotate.d/poly-arb-bot
+sudo chmod 0644 /etc/logrotate.d/poly-arb-bot
+sudo logrotate -d /etc/logrotate.d/poly-arb-bot
 ```
 
 Logs:

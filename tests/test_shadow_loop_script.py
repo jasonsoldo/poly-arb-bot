@@ -8,6 +8,7 @@ def test_shadow_loop_creates_audit_log_before_network_startup():
     touch = SCRIPT.index("touch logs/shadow-audit.jsonl")
     scan = SCRIPT.index("scan_once()")
     assert touch < scan
+    assert "touch logs/shadow-execution.jsonl" in SCRIPT
 
 
 def test_shadow_loop_runs_cpp_engine_with_structured_audit_path():
@@ -58,3 +59,6 @@ def test_systemd_requires_ntp_and_logrotate_retains_thirty_days():
     assert "NTPSynchronized" in ntp
     assert "rotate 30" in rotation
     assert "copytruncate" in rotation
+    deploy = Path("deploy/VPS_DEPLOY.md").read_text(encoding="utf-8")
+    assert "sudo cp deploy/poly-arb-bot.logrotate /etc/logrotate.d/poly-arb-bot" in deploy
+    assert "sudo logrotate -d /etc/logrotate.d/poly-arb-bot" in deploy
