@@ -88,13 +88,15 @@ def _jsonl(path, limit=100):
 
 def _strategy_counts(paths):
     names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
-    total = {name: {"evaluations": 0, "accepts": 0, "rejections": 0} for name in names}
+    total = {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
+                    "model_evaluations": 0} for name in names}
     with _STRATEGY_COUNT_LOCK:
         for path in paths:
             key = str(path.resolve())
             state = _STRATEGY_COUNT_CACHE.setdefault(key, {
                 "offset": 0, "size": 0, "seen": set(),
-                "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0} for name in names},
+                "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
+                                  "model_evaluations": 0} for name in names},
             })
             try:
                 size = path.stat().st_size
@@ -103,7 +105,8 @@ def _strategy_counts(paths):
             if size < state["offset"]:
                 state.update({
                     "offset": 0, "size": 0, "seen": set(),
-                    "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0} for name in names},
+                    "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
+                                      "model_evaluations": 0} for name in names},
                 })
             if size > state["offset"]:
                 try:
@@ -114,7 +117,7 @@ def _strategy_counts(paths):
                                 row = json.loads(line)
                             except ValueError:
                                 continue
-                            strategy = row.get("strategy")
+                            strategy = row.get("strategy", "paired_lock")
                             if row.get("event_type") != "shadow_eval" or strategy not in state["counts"]:
                                 continue
                             event_id = row.get("event_id")
@@ -127,12 +130,15 @@ def _strategy_counts(paths):
                             accepted = row.get("decision") == "ACCEPT"
                             bucket["accepts"] += int(accepted)
                             bucket["rejections"] += int(not accepted)
+                            bucket["model_evaluations"] += int(
+                                strategy != "paired_lock" and row.get("estimated_probability") is not None
+                            )
                         state["offset"] = handle.tell()
                 except OSError:
                     pass
             state["size"] = size
             for name in names:
-                for field in ("evaluations", "accepts", "rejections"):
+                for field in ("evaluations", "accepts", "rejections", "model_evaluations"):
                     total[name][field] += state["counts"][name][field]
     return total
 
@@ -281,6 +287,8 @@ def build_status(data_dir, log_file, state_file):
     latest_event = next(iter(latest_shadow.values()), None)
     strategy_score = _strategy_score(latest_event)
     strategy_counts = _strategy_counts((selected_log, strategy_log))
+    strategy_evaluations = sum(row["evaluations"] for row in strategy_counts.values())
+    strategy_accepts = sum(row["accepts"] for row in strategy_counts.values())
     strategy_latest = {}
     for item in shadow_events:
         strategy = item.get("strategy", "paired_lock")
@@ -335,9 +343,9 @@ def build_status(data_dir, log_file, state_file):
             "executed_orders": sum(item.get("status") in {"filled", "partially_filled", "submitted"} for item in decision_records),
             "risk_decisions": len(decisions),
             "shadow_attempts": sum(item.get("status") == "dry_run" for item in decision_records),
-            "shadow_evaluations": report["evaluations"],
+            "shadow_evaluations": strategy_evaluations,
             "fok_passed": report["fok_passed"],
-            "shadow_opportunities": report["accepts"],
+            "shadow_opportunities": max(strategy_accepts, report["accepts"]),
             "simulated_complete": report["performance"]["completed"],
         },
         "shadow_markets": list(latest_shadow.values()),

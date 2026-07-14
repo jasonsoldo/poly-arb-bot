@@ -1,8 +1,12 @@
 import json
 import math
 import os
+import statistics
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from .ev_strategies import (
     DirectionalInput,
@@ -11,6 +15,52 @@ from .ev_strategies import (
     evaluate_lottery,
 )
 from .reference_layer import ReferenceQuote, ReferenceState
+
+
+BINANCE_SYMBOLS = {
+    "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
+    "XRP": "XRPUSDT", "BNB": "BNBUSDT", "DOGE": "DOGEUSDT",
+}
+
+
+def _historical_volatility(rows):
+    closes = [float(row[4]) for row in rows if len(row) > 4 and float(row[4]) > 0]
+    returns = [math.log(current / previous) for previous, current in zip(closes, closes[1:])]
+    if len(returns) < 2:
+        return None, len(returns)
+    return statistics.pstdev(returns) / math.sqrt(60), len(returns)
+
+
+def _load_historical_model(asset, symbol, timeout):
+    query = urlencode({"symbol": symbol, "interval": "1m", "limit": 120})
+    request = Request(
+        f"https://data-api.binance.vision/api/v3/klines?{query}",
+        headers={"User-Agent": "poly-arb-bot/1.0", "Accept": "application/json"},
+    )
+    with urlopen(request, timeout=timeout) as response:
+        rows = json.load(response)
+    volatility, samples = _historical_volatility(rows)
+    if volatility is None or samples < 20:
+        return asset, None
+    return asset, {
+        "volatility_per_sqrt_second": volatility,
+        "model_sample_count": samples,
+    }
+
+
+def load_historical_models(timeout=10):
+    models = {}
+    with ThreadPoolExecutor(max_workers=len(BINANCE_SYMBOLS)) as pool:
+        futures = [pool.submit(_load_historical_model, asset, symbol, timeout)
+                   for asset, symbol in BINANCE_SYMBOLS.items()]
+        for future in as_completed(futures):
+            try:
+                asset, model = future.result()
+                if model:
+                    models[asset] = model
+            except (OSError, ValueError, TypeError):
+                continue
+    return models
 
 
 def _reference_state(asset):
@@ -44,12 +94,30 @@ def _up_probability(asset, price_to_beat, seconds_to_close):
     return min(.999, max(.001, .5 * (1 + math.erf(z / math.sqrt(2)))))
 
 
-def evaluate_market_event(event, market, venue, now=None):
+def evaluate_market_event(event, market, venue, now=None, historical_models=None):
     now = time.time() if now is None else now
     asset = venue.get("assets", {}).get(market.get("asset"), {})
     reference = _reference_state(asset)
     seconds_to_close = max(0, int(float(market.get("close_ts", 0)) - now))
-    up_probability = _up_probability(asset, market.get("open_price"), seconds_to_close)
+    model_asset = asset
+    model_source = "live_multi_source"
+    if (not asset.get("volatility_per_sqrt_second") or
+            int(asset.get("model_sample_count", 0)) < 20):
+        historical = (historical_models or {}).get(market.get("asset"))
+        if historical:
+            model_asset = dict(asset, **historical)
+            model_source = "binance_historical_1m"
+    up_probability = _up_probability(model_asset, market.get("open_price"), seconds_to_close)
+    probability_block_reason = None
+    if up_probability is None:
+        if market.get("open_price") is None:
+            probability_block_reason = "price_to_beat_missing"
+        elif not model_asset.get("volatility_per_sqrt_second"):
+            probability_block_reason = "volatility_unavailable"
+        elif int(model_asset.get("model_sample_count", 0)) < 20:
+            probability_block_reason = "insufficient_model_samples"
+        else:
+            probability_block_reason = "probability_model_unavailable"
     size = max(float(event.get("size", 0)), 1e-9)
     chainlink = asset.get("sources", {}).get("chainlink", {})
     rows = []
@@ -71,6 +139,7 @@ def evaluate_market_event(event, market, venue, now=None):
             execution_risk_buffer=float(os.getenv("LOTTERY_EXECUTION_BUFFER", "0.005")),
             liquidity=float(event.get(depth_key, 0)), book_age_ms=float(event.get("source_age_ms", 1e9)),
             settlement_source_verified=chainlink.get("status") == "FRESH",
+            probability_block_reason=probability_block_reason,
         )
         for strategy, evaluator in (
             ("late_window_directional_ev", evaluate_directional),
@@ -93,7 +162,8 @@ def evaluate_market_event(event, market, venue, now=None):
                 int(event.get("evaluation_sequence", 0)), float(event.get("ts", now)),
             )
             audit["model_type"] = "configured_distributional_shadow"
-            audit["model_sample_count"] = int(asset.get("model_sample_count", 0))
+            audit["model_sample_count"] = int(model_asset.get("model_sample_count", 0))
+            audit["model_source"] = model_source if up_probability is not None else None
             audit["window"] = market.get("window", "current")
             rows.append(audit)
     return rows
@@ -106,7 +176,8 @@ def _load(path, default):
         return default
 
 
-def process_once(audit_path, market_path, venue_path, output_path, state_path):
+def process_once(audit_path, market_path, venue_path, output_path, state_path,
+                 historical_models=None):
     state = _load(state_path, {"offset": 0, "processed": []})
     processed = set(state.get("processed", []))
     markets = {row.get("market_id"): row for row in _load(market_path, {"markets": []}).get("markets", [])}
@@ -130,7 +201,8 @@ def process_once(audit_path, market_path, venue_path, output_path, state_path):
             market = markets.get(event.get("market_id"))
             if not event_id or event_id in processed or not market:
                 continue
-            for row in evaluate_market_event(event, market, venue):
+            for row in evaluate_market_event(event, market, venue,
+                                             historical_models=historical_models):
                 target.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
                 emitted += 1
             processed.add(event_id)
@@ -144,9 +216,10 @@ def process_once(audit_path, market_path, venue_path, output_path, state_path):
 
 
 def main():
+    historical_models = load_historical_models()
     while True:
         process_once("logs/shadow-audit.jsonl", "data/live_markets.json", "data/venue-status.json",
-                     "logs/strategy-audit.jsonl", "state/ev-shadow.json")
+                     "logs/strategy-audit.jsonl", "state/ev-shadow.json", historical_models)
         time.sleep(.5)
 
 

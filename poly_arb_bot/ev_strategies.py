@@ -30,6 +30,7 @@ class DirectionalInput:
     liquidity: float
     book_age_ms: float
     settlement_source_verified: bool
+    probability_block_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -44,10 +45,10 @@ class EvDecision:
 
 
 def _common_rejection(row):
-    if row.estimated_probability is None:
-        return "probability_model_unavailable"
     if row.price_to_beat is None:
         return "price_to_beat_missing"
+    if row.estimated_probability is None:
+        return row.probability_block_reason or "probability_model_unavailable"
     if not row.settlement_source_verified:
         return "settlement_reference_unverified"
     if not row.reference.reference_quorum_met:

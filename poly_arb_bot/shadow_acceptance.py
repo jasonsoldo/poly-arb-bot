@@ -11,6 +11,7 @@ def evaluate_status(status):
     strategy_counts = status.get("strategy_counts", {})
     strategy_names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
     strategy_rows = [strategy_counts.get(name, {}) for name in strategy_names]
+    probability_rows = [strategy_counts.get(name, {}) for name in strategy_names[:2]]
     checks = [
         {"name": "market_data_present", "passed": readiness.get("discovered_markets", 0) > 0},
         {"name": "audit_data_present", "passed": shadow.get("evaluations", 0) > 0},
@@ -29,6 +30,8 @@ def evaluate_status(status):
         {"name": "three_strategy_decisions",
          "passed": all(row.get("accepts", 0) + row.get("rejections", 0) == row.get("evaluations", 0)
                        for row in strategy_rows)},
+        {"name": "probability_models_evaluated",
+         "passed": all(row.get("model_evaluations", 0) > 0 for row in probability_rows)},
     ]
     return {"passed": all(item["passed"] for item in checks), "checks": checks,
             "metrics": {"discovered": readiness.get("discovered_markets", 0),

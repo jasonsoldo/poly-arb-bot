@@ -11,9 +11,14 @@ def valid_status():
         "counts": {"executed_orders": 0},
         "shadow_execution": {"real_order_submissions": 0},
         "strategy_counts": {
-            "paired_lock": {"evaluations": 10, "accepts": 2, "rejections": 8},
-            "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19},
-            "low_price_lottery_ev": {"evaluations": 20, "accepts": 0, "rejections": 20},
+            "paired_lock": {"evaluations": 10, "accepts": 2, "rejections": 8, "model_evaluations": 0},
+            "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19, "model_evaluations": 20},
+            "low_price_lottery_ev": {"evaluations": 20, "accepts": 0, "rejections": 20, "model_evaluations": 20},
+        },
+        "strategy_latest": {
+            "late_window_directional_ev": {"estimated_probability": 0.6},
+            "low_price_lottery_ev": {"estimated_probability": 0.6},
+            "paired_lock": {"locked_profit": -0.1},
         },
         "performance": {"completed": 0},
     }
@@ -38,7 +43,15 @@ def test_acceptance_fails_drift_and_real_order_submission():
 
 def test_acceptance_fails_when_an_independent_strategy_is_not_running():
     status = valid_status()
-    status["strategy_counts"]["low_price_lottery_ev"] = {"evaluations": 0, "accepts": 0, "rejections": 0}
+    status["strategy_counts"]["low_price_lottery_ev"] = {"evaluations": 0, "accepts": 0, "rejections": 0, "model_evaluations": 0}
     report = evaluate_status(status)
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert "three_strategy_evaluations" in failed
+
+
+def test_acceptance_fails_when_probability_model_never_evaluated():
+    status = valid_status()
+    status["strategy_counts"]["late_window_directional_ev"]["model_evaluations"] = 0
+    report = evaluate_status(status)
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert "probability_models_evaluated" in failed

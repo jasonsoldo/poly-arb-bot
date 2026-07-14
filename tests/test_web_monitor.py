@@ -308,15 +308,16 @@ def test_web_status_keeps_three_strategy_statistics_separate(tmp_path):
         "market_id": "m1", "decision": "REJECT", "reason": "net_cost_above_threshold",
     }), encoding="utf-8")
     (logs / "strategy-audit.jsonl").write_text("\n".join([
-        json.dumps({"ts": time.time(), "event_id": "d1", "event_type": "shadow_eval", "strategy": "late_window_directional_ev", "market_id": "m1", "decision": "ACCEPT", "reason": "positive_net_ev"}),
-        json.dumps({"ts": time.time(), "event_id": "l1", "event_type": "shadow_eval", "strategy": "low_price_lottery_ev", "market_id": "m1", "decision": "REJECT", "reason": "entry_price_above_limit"}),
+        json.dumps({"ts": time.time(), "event_id": "d1", "event_type": "shadow_eval", "strategy": "late_window_directional_ev", "market_id": "m1", "decision": "ACCEPT", "reason": "positive_net_ev", "estimated_probability": .6}),
+        json.dumps({"ts": time.time(), "event_id": "l1", "event_type": "shadow_eval", "strategy": "low_price_lottery_ev", "market_id": "m1", "decision": "REJECT", "reason": "entry_price_above_limit", "estimated_probability": .6}),
     ]), encoding="utf-8")
 
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
 
-    assert status["strategy_counts"]["paired_lock"] == {"evaluations": 1, "accepts": 0, "rejections": 1}
-    assert status["strategy_counts"]["late_window_directional_ev"] == {"evaluations": 1, "accepts": 1, "rejections": 0}
-    assert status["strategy_counts"]["low_price_lottery_ev"] == {"evaluations": 1, "accepts": 0, "rejections": 1}
+    assert status["strategy_counts"]["paired_lock"] == {"evaluations": 1, "accepts": 0, "rejections": 1, "model_evaluations": 0}
+    assert status["strategy_counts"]["late_window_directional_ev"] == {"evaluations": 1, "accepts": 1, "rejections": 0, "model_evaluations": 1}
+    assert status["strategy_counts"]["low_price_lottery_ev"] == {"evaluations": 1, "accepts": 0, "rejections": 1, "model_evaluations": 1}
+    assert status["counts"]["shadow_evaluations"] == 3
     assert status["current_pair"]["reason"] == "net_cost_above_threshold"
 
 
@@ -352,4 +353,4 @@ def test_strategy_count_cache_consumes_only_appended_events(tmp_path):
     assert _strategy_counts((path,))["paired_lock"]["evaluations"] == 1
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"event_id": "2", "event_type": "shadow_eval", "strategy": "paired_lock", "decision": "ACCEPT"}) + "\n")
-    assert _strategy_counts((path,))["paired_lock"] == {"evaluations": 2, "accepts": 1, "rejections": 1}
+    assert _strategy_counts((path,))["paired_lock"] == {"evaluations": 2, "accepts": 1, "rejections": 1, "model_evaluations": 0}

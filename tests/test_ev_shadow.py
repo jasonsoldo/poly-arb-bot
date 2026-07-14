@@ -1,4 +1,8 @@
-from poly_arb_bot.ev_shadow import evaluate_market_event
+import json
+import time
+
+from poly_arb_bot import ev_shadow
+from poly_arb_bot.ev_shadow import _historical_volatility, evaluate_market_event
 
 
 def market():
@@ -45,4 +49,45 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
 def test_probability_model_fails_closed_without_volatility_samples():
     rows = evaluate_market_event(event(), market(), venue(volatility=None), now=1000.0)
     assert all(row["decision"] == "REJECT" for row in rows)
-    assert all(row["reason"] == "probability_model_unavailable" for row in rows)
+    assert all(row["reason"] == "volatility_unavailable" for row in rows)
+
+
+def test_binance_kline_closes_produce_per_second_volatility():
+    rows = [
+        [0, "0", "0", "0", "100", "0", 60_000],
+        [60_000, "0", "0", "0", "101", "0", 120_000],
+        [120_000, "0", "0", "0", "99", "0", 180_000],
+    ]
+    volatility, samples = _historical_volatility(rows)
+    assert volatility > 0
+    assert samples == 2
+
+
+def test_historical_model_is_used_until_live_samples_are_ready():
+    model = {"BTC": {"volatility_per_sqrt_second": 0.001, "model_sample_count": 40}}
+    rows = evaluate_market_event(event(), market(), venue(volatility=None), now=1000.0,
+                                 historical_models=model)
+    assert all(row["estimated_probability"] is not None for row in rows)
+    assert all(row["model_source"] == "binance_historical_1m" for row in rows)
+
+
+def test_historical_backfill_requests_assets_concurrently(monkeypatch):
+    rows = [[index * 60_000, "0", "0", "0", str(100 + index / 10), "0"]
+            for index in range(30)]
+
+    class Response:
+        def __enter__(self):
+            time.sleep(0.05)
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps(rows).encode()
+
+    monkeypatch.setattr(ev_shadow, "urlopen", lambda *_args, **_kwargs: Response())
+    started = time.monotonic()
+    models = ev_shadow.load_historical_models()
+    assert time.monotonic() - started < 0.2
+    assert set(models) == set(ev_shadow.BINANCE_SYMBOLS)
