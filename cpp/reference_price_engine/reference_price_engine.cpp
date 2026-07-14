@@ -45,8 +45,9 @@ struct SourceState {
     bool connected = false;
     bool supported = false;
     std::deque<std::pair<double, double>> samples;
-    struct AnchorSample { double source_timestamp_ms, received_at, price; };
+    struct AnchorSample { double source_timestamp_ms, received_at, price; std::string timeframe; };
     std::deque<AnchorSample> anchor_samples;
+    std::deque<AnchorSample> settlement_samples;
 };
 
 struct AssetState { std::map<std::string, SourceState> sources; };
@@ -209,7 +210,19 @@ void write_status_locked(SharedState& shared, bool force = false) {
                 first_anchor = false;
                 out << "{\"source_timestamp_ms\":" << sample.source_timestamp_ms
                     << ",\"received_at\":" << sample.received_at
-                    << ",\"price\":" << sample.price << '}';
+                    << ",\"price\":" << sample.price
+                    << ",\"timeframe\":\"" << sample.timeframe << "\"}";
+            }
+            out << ']';
+            out << ",\"" << name << "_settlement_samples\":[";
+            first_anchor = true;
+            for (const auto& sample : asset.sources.at(name).settlement_samples) {
+                if (!first_anchor) out << ',';
+                first_anchor = false;
+                out << "{\"source_timestamp_ms\":" << sample.source_timestamp_ms
+                    << ",\"received_at\":" << sample.received_at
+                    << ",\"price\":" << sample.price
+                    << ",\"timeframe\":\"" << sample.timeframe << "\"}";
             }
             out << ']';
         }
@@ -247,8 +260,10 @@ void publish(SharedState& shared, const std::string& asset, const std::string& s
             double source_timestamp_ms = std::stod(source_timestamp);
             if (source_timestamp_ms > 0 && source_timestamp_ms < 1e12) source_timestamp_ms *= 1000;
             if (source_timestamp_ms > 0) {
-                row.anchor_samples.push_back({source_timestamp_ms, received, price});
+                row.anchor_samples.push_back({source_timestamp_ms, received, price, ""});
+                row.settlement_samples.push_back({source_timestamp_ms, received, price, ""});
                 while (row.anchor_samples.size() > 128) row.anchor_samples.pop_front();
+                while (row.settlement_samples.size() > 128) row.settlement_samples.pop_front();
             }
         } catch (...) {}
     }
@@ -258,13 +273,23 @@ void publish(SharedState& shared, const std::string& asset, const std::string& s
 }
 
 void publish_anchor(SharedState& shared, const std::string& asset, const std::string& source,
-                    double price, double source_timestamp_ms) {
+                    double price, double source_timestamp_ms, const std::string& timeframe) {
     const double received = now_ms();
     std::lock_guard<std::mutex> lock(shared.mutex);
     auto& samples = shared.assets.at(asset).sources.at(source).anchor_samples;
-    samples.push_back({source_timestamp_ms, received, price});
+    samples.push_back({source_timestamp_ms, received, price, timeframe});
     while (samples.size() > 128) samples.pop_front();
     write_status_locked(shared);
+}
+
+void publish_settlement(SharedState& shared, const std::string& asset, const std::string& source,
+                        double price, double source_timestamp_ms, const std::string& timeframe) {
+    const double received = now_ms();
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    auto& samples = shared.assets.at(asset).sources.at(source).settlement_samples;
+    samples.push_back({source_timestamp_ms, received, price, timeframe});
+    while (samples.size() > 128) samples.pop_front();
+    write_status_locked(shared, true);
 }
 
 void set_connected(SharedState& shared, const std::string& source, bool connected) {
@@ -322,10 +347,10 @@ ptree parse_json(const std::string& raw) {
 void initialize(SharedState& shared) {
     for (const auto& config : ASSETS) {
         auto& sources = shared.assets[config.asset].sources;
-        sources["binance"] = {config.binance, "spot", "USDT", "", 0, 0, 0, 0, false, std::string(config.binance).size() > 0, {}, {}};
-        sources["coinbase"] = {config.coinbase, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.coinbase).size() > 0, {}, {}};
-        sources["kraken"] = {config.kraken, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.kraken).size() > 0, {}, {}};
-        sources["chainlink"] = {config.chainlink, "settlement", "USD", "", 0, 0, 0, 0, false, std::string(config.chainlink).size() > 0, {}, {}};
+        sources["binance"] = {config.binance, "spot", "USDT", "", 0, 0, 0, 0, false, std::string(config.binance).size() > 0, {}, {}, {}};
+        sources["coinbase"] = {config.coinbase, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.coinbase).size() > 0, {}, {}, {}};
+        sources["kraken"] = {config.kraken, "spot", "USD", "", 0, 0, 0, 0, false, std::string(config.kraken).size() > 0, {}, {}, {}};
+        sources["chainlink"] = {config.chainlink, "settlement", "USD", "", 0, 0, 0, 0, false, std::string(config.chainlink).size() > 0, {}, {}, {}};
     }
 }
 
@@ -336,7 +361,7 @@ int main(int argc, char** argv) {
     { std::lock_guard<std::mutex> lock(shared.mutex); write_status_locked(shared, true); }
 
     const std::string rtds_sub = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
-    const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker/btcusdt@kline_1h/ethusdt@kline_1h/solusdt@kline_1h/xrpusdt@kline_1h/bnbusdt@kline_1h/dogeusdt@kline_1h";
+    const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker/btcusdt@kline_1h/ethusdt@kline_1h/solusdt@kline_1h/xrpusdt@kline_1h/bnbusdt@kline_1h/dogeusdt@kline_1h/btcusdt@kline_4h/ethusdt@kline_4h/solusdt@kline_4h/xrpusdt@kline_4h/bnbusdt@kline_4h/dogeusdt@kline_4h";
     const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","DOGE-USD"],"channels":["ticker"]})";
     const std::string kraken_sub = R"({"method":"subscribe","params":{"channel":"ticker","symbol":["BTC/USD","ETH/USD","SOL/USD","XRP/USD","DOGE/USD"]}})";
 
@@ -348,12 +373,20 @@ int main(int argc, char** argv) {
             std::string symbol = data->get<std::string>("s", "");
             std::transform(symbol.begin(), symbol.end(), symbol.begin(), ::tolower);
             if (const auto kline = data->get_child_optional("k")) {
-                if (kline->get<std::string>("i", "") != "1h") return;
+                const std::string timeframe = kline->get<std::string>("i", "");
+                if (timeframe != "1h" && timeframe != "4h") return;
                 const double open = kline->get<double>("o", 0);
                 const double start = kline->get<double>("t", 0);
                 if (!open || !start) return;
-                for (const auto& config : ASSETS) if (symbol == config.binance)
-                    return publish_anchor(shared, config.asset, "binance", open, start);
+                for (const auto& config : ASSETS) if (symbol == config.binance) {
+                    publish_anchor(shared, config.asset, "binance", open, start, timeframe);
+                    if (kline->get<bool>("x", false)) {
+                        const double close = kline->get<double>("c", 0);
+                        const double duration = timeframe == "1h" ? 3600000 : 14400000;
+                        if (close) publish_settlement(shared, config.asset, "binance", close, start + duration, timeframe);
+                    }
+                    return;
+                }
                 return;
             }
             const double bid = data->get<double>("b", 0);

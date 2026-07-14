@@ -45,6 +45,7 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
     assert {row["outcome"] for row in rows} == {"Up", "Down"}
     assert all(row["event_id"].startswith("paired-1:") for row in rows)
     assert all(row["real_order_submissions"] == 0 for row in rows)
+    assert all(row["target_size"] == 10 for row in rows)
 
 
 def test_probability_model_fails_closed_without_volatility_samples():

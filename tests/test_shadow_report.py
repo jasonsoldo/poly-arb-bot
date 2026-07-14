@@ -20,7 +20,7 @@ def test_shadow_report_aggregates_reasons_and_percentiles(tmp_path):
     assert report["source_age_ms"]["p95"] == 30
 
 
-def test_shadow_report_builds_real_simulation_metrics_from_complete_events(tmp_path):
+def test_execution_complete_is_not_counted_as_settled_simulation(tmp_path):
     audit = tmp_path / "audit.jsonl"
     execution = tmp_path / "execution.jsonl"
     audit.write_text("\n".join([
@@ -35,15 +35,9 @@ def test_shadow_report_builds_real_simulation_metrics_from_complete_events(tmp_p
 
     report = build_report(audit, execution)
 
-    assert report["performance"]["completed"] == 2
-    assert report["performance"]["simulated_pnl"] == 0.3
-    assert report["performance"]["win_rate"] == 0.5
-    assert report["performance"]["sharpe"] is None
-    assert report["equity_curve"] == [
-        {"ts": 101.0, "pnl": 0.4, "equity": 0.4, "event_id": "m1:100.0"},
-        {"ts": 201.0, "pnl": -0.1, "equity": 0.3, "event_id": "m2:200.0"},
-    ]
-    assert len(report["trade_ledger"]) == 2
+    assert report["performance"]["completed"] == 0
+    assert report["performance"]["simulated_pnl"] is None
+    assert report["equity_curve"] == []
 
 
 def test_shadow_report_keeps_empty_performance_empty(tmp_path):
@@ -57,6 +51,22 @@ def test_shadow_report_keeps_empty_performance_empty(tmp_path):
         "win_rate": None, "sharpe": None, "sharpe_samples": 0,
     }
     assert report["equity_curve"] == []
+
+
+def test_shadow_report_uses_realized_shadow_complete_pnl(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    audit.write_text("", encoding="utf-8")
+    execution.write_text(json.dumps({
+        "ts": 1101, "event_type": "shadow_complete", "event_id": "p1",
+        "strategy": "late_window_directional_ev", "market_id": "m1",
+        "realized_simulated_pnl": 5.9,
+    }) + "\n", encoding="utf-8")
+    report = build_report(audit, execution)
+    assert report["performance"]["completed"] == 1
+    assert report["performance"]["simulated_pnl"] == 5.9
+    assert report["performance_by_strategy"]["late_window_directional_ev"]["completed"] == 1
+    assert report["performance_by_strategy"]["paired_lock"]["completed"] == 0
 
 
 def test_shadow_report_quarantines_future_clock_records(tmp_path):

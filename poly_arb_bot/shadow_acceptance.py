@@ -23,7 +23,9 @@ def evaluate_status(status):
          "passed": sum(reasons.values()) == shadow.get("rejected_evaluations", 0)},
         {"name": "real_execution_disabled",
          "passed": status.get("counts", {}).get("executed_orders", 0) == 0 and
-                   status.get("shadow_execution", {}).get("real_order_submissions", 0) == 0},
+                   status.get("shadow_execution", {}).get("real_order_submissions", 0) == 0 and
+                   status.get("shadow_lifecycle", {}).get("real_order_submissions", 0) == 0 and
+                   status.get("shadow_lifecycle", {}).get("real_orders", 0) == 0},
         {"name": "event_deduplication", "passed": shadow.get("duplicate_events", 0) == 0},
         {"name": "three_strategy_evaluations",
          "passed": all(row.get("evaluations", 0) > 0 for row in strategy_rows)},
@@ -33,7 +35,12 @@ def evaluate_status(status):
         {"name": "probability_models_evaluated",
          "passed": all(row.get("latest_model_evaluated") is True for row in probability_rows)},
     ]
-    return {"passed": all(item["passed"] for item in checks), "checks": checks,
+    passed = all(item["passed"] for item in checks)
+    incomplete_checks = {"market_data_present", "audit_data_present", "three_strategy_evaluations",
+                         "probability_models_evaluated"}
+    incomplete_only = all(item["passed"] or item["name"] in incomplete_checks for item in checks)
+    status = "PASS" if passed else "INCOMPLETE" if incomplete_only else "FAIL"
+    return {"passed": passed, "status": status, "checks": checks,
             "metrics": {"discovered": readiness.get("discovered_markets", 0),
                         "ready": readiness.get("paired_markets_ready", 0),
                         "evaluations": shadow.get("evaluations", 0),
@@ -45,4 +52,4 @@ def evaluate_status(status):
 def run(data_dir=Path("data"), log_file=Path("logs/shadow-audit.jsonl"), state_file=Path("state/orders.json")):
     report = evaluate_status(build_status(data_dir, log_file, state_file))
     print(json.dumps(report, sort_keys=True))
-    return 0 if report["passed"] else 3
+    return {"PASS": 0, "FAIL": 1, "INCOMPLETE": 2}[report["status"]]

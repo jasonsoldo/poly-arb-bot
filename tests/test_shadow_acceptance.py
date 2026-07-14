@@ -10,6 +10,7 @@ def valid_status():
         },
         "counts": {"executed_orders": 0},
         "shadow_execution": {"real_order_submissions": 0},
+        "shadow_lifecycle": {"real_order_submissions": 0, "real_orders": 0},
         "strategy_counts": {
             "paired_lock": {"evaluations": 10, "accepts": 2, "rejections": 8, "model_evaluations": 0},
             "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19, "model_evaluations": 20, "latest_model_evaluated": True},
@@ -21,12 +22,18 @@ def valid_status():
             "paired_lock": {"locked_profit": -0.1},
         },
         "performance": {"completed": 0},
+        "performance_by_strategy": {
+            "late_window_directional_ev": {"completed": 0},
+            "low_price_lottery_ev": {"completed": 0},
+            "paired_lock": {"completed": 0},
+        },
     }
 
 
 def test_acceptance_passes_all_shadow_invariants():
     report = evaluate_status(valid_status())
     assert report["passed"] is True
+    assert report["status"] == "PASS"
     assert all(check["passed"] for check in report["checks"])
 
 
@@ -55,3 +62,20 @@ def test_acceptance_fails_when_probability_model_never_evaluated():
     report = evaluate_status(status)
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert "probability_models_evaluated" in failed
+
+
+def test_acceptance_allows_zero_completed_samples_when_evaluations_are_valid():
+    status = valid_status()
+    report = evaluate_status(status)
+    assert report["status"] == "PASS"
+
+
+def test_acceptance_marks_missing_market_and_audit_data_incomplete():
+    status = valid_status()
+    status["clob_readiness"] = {"discovered_markets": 0, "paired_markets_ready": 0, "not_ready": 0}
+    status["shadow_report"].update(evaluations=0, accepted_evaluations=0, rejected_evaluations=0,
+                                    rejection_reasons={})
+    for row in status["strategy_counts"].values():
+        row.update(evaluations=0, accepts=0, rejections=0)
+    report = evaluate_status(status)
+    assert report["status"] == "INCOMPLETE"

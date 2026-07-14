@@ -86,3 +86,12 @@ def test_reference_engine_keeps_timestamped_settlement_anchor_samples():
     assert '"_samples\\":["' in SOURCE
     assert "source_timestamp_ms" in SOURCE
     assert "anchor_samples" in SOURCE
+
+
+def test_binance_kline_stream_emits_hourly_and_four_hour_close_samples():
+    assert "@kline_1h" in SOURCE
+    assert "@kline_4h" in SOURCE
+    assert "settlement_samples" in SOURCE
+    assert 'get<bool>("x"' in SOURCE
+    assert 'get<double>("c"' in SOURCE
+    assert r'\"timeframe\"' in SOURCE

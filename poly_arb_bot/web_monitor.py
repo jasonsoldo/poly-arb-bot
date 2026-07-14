@@ -39,14 +39,19 @@ def _cached_report(path, execution_path=None):
 
 
 def build_report_empty():
+    empty_performance = {"completed": 0, "wins": 0, "losses": 0, "simulated_pnl": None,
+                         "win_rate": None, "sharpe": None, "sharpe_samples": 0}
     return {
         "markets_seen": 0, "evaluations": 0, "fok_passed": 0, "accepts": 0,
         "invalid_json": 0, "rejection_reasons": {},
         "opportunity_duration_ms": {"p50": None, "p95": None, "max": None},
         "source_age_ms": {"latest": None, "p50": None, "p95": None, "p99": None,
                           "max": None, "samples": 0},
-        "performance": {"completed": 0, "wins": 0, "losses": 0, "simulated_pnl": None,
-                        "win_rate": None, "sharpe": None, "sharpe_samples": 0},
+        "performance": dict(empty_performance),
+        "performance_by_strategy": {
+            strategy: dict(empty_performance)
+            for strategy in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+        },
         "equity_curve": [], "trade_ledger": [],
     }
 
@@ -236,6 +241,10 @@ def build_status(data_dir, log_file, state_file):
         {"state": "IDLE", "processed": [], "audit_offset": 0},
     )
     shadow_execution["real_order_submissions"] = 0
+    lifecycle_state = _json(
+        data_dir.parent / "state" / "strategy-shadow.json",
+        {"positions": {}, "completed": []},
+    )
     reference_prices = _json(data_dir / "venue-status.json", {})
     reference_age_ms = time.time() * 1000 - reference_prices.get("updated_at_ms", 0)
     reference_prices["stale"] = reference_age_ms > 10_000
@@ -383,11 +392,18 @@ def build_status(data_dir, log_file, state_file):
         "reference_prices": reference_prices,
         "shadow_health": shadow_health,
         "shadow_execution": shadow_execution,
+        "shadow_lifecycle": {
+            "open_positions": len(lifecycle_state.get("positions", {})),
+            "completed_ids": len(lifecycle_state.get("completed", [])),
+            "real_order_submissions": 0,
+            "real_orders": 0,
+        },
         "market_matrix": market_matrix,
         "system_status": system_status,
         "rejection_reasons": report["rejection_reasons"] or dict(rejection_reasons),
         "shadow_report": report,
         "performance": report["performance"],
+        "performance_by_strategy": report["performance_by_strategy"],
         "equity_curve": report["equity_curve"],
         "trade_ledger": report["trade_ledger"],
         "pnl_meter": {"simulated_pnl": report["performance"]["simulated_pnl"], "realized_pnl": 0.0},

@@ -229,8 +229,8 @@ def test_web_status_includes_completed_shadow_analytics(tmp_path):
         "expected_execution_value": 0.25,
     }), encoding="utf-8")
     (logs / "shadow-execution.jsonl").write_text(json.dumps({
-        "ts": 101.0, "event_type": "shadow_execution", "event_id": "m1:100.0",
-        "market_id": "m1", "state": "COMPLETE",
+        "ts": 101.0, "event_type": "shadow_complete", "event_id": "m1:100.0:complete",
+        "strategy": "paired_lock", "market_id": "m1", "realized_simulated_pnl": 0.25,
     }), encoding="utf-8")
 
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
@@ -238,6 +238,19 @@ def test_web_status_includes_completed_shadow_analytics(tmp_path):
     assert status["performance"]["completed"] == 1
     assert status["performance"]["simulated_pnl"] == 0.25
     assert status["counts"]["simulated_complete"] == 1
+    assert status["performance_by_strategy"]["paired_lock"]["completed"] == 1
+
+
+def test_web_status_exposes_open_strategy_shadow_positions(tmp_path):
+    data = tmp_path / "data"
+    state = tmp_path / "state"
+    data.mkdir(); state.mkdir()
+    (state / "strategy-shadow.json").write_text(json.dumps({
+        "positions": {"p1": {"strategy": "late_window_directional_ev"}},
+        "completed": [], "audit_offset": 0,
+    }), encoding="utf-8")
+    status = build_status(data, tmp_path / "missing.jsonl", tmp_path / "orders.json")
+    assert status["shadow_lifecycle"]["open_positions"] == 1
 
 
 def test_web_status_does_not_display_future_clock_events(tmp_path):

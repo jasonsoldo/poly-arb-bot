@@ -1,6 +1,7 @@
 import json
 
 from poly_arb_bot.shadow_execution import ShadowExecutionStateMachine, process_audit_once
+from poly_arb_bot.strategy_shadow_lifecycle import StrategyShadowLifecycle
 
 
 def opportunity():
@@ -39,3 +40,19 @@ def test_process_audit_once_persists_offset_and_does_not_repeat(tmp_path):
     assert process_audit_once(audit_path, machine) == 1
     assert process_audit_once(audit_path, machine) == 0
     assert machine.data["audit_offset"] == audit_path.stat().st_size
+
+
+def test_rejected_second_leg_does_not_open_paired_lifecycle_position(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.write_text(json.dumps({
+        "event_id": "pair-rejected", "event_type": "shadow_opportunity", "strategy": "paired_lock",
+        "market_id": "m1", "target_size": 10, "net_cost": 9.7, "ts": 123,
+    }) + "\n", encoding="utf-8")
+    machine = ShadowExecutionStateMachine(tmp_path / "execution-state.json", tmp_path / "execution.jsonl")
+    lifecycle = StrategyShadowLifecycle(tmp_path / "lifecycle-state.json", tmp_path / "complete.jsonl")
+    monkeypatch.setenv("SHADOW_LEG2_RESULT", "rejected")
+    process_audit_once(audit_path, machine, lifecycle, {
+        "m1": {"market_id": "m1", "asset": "BTC", "interval": "5m", "close_ts": 200,
+               "settlement_source": "chainlink"},
+    })
+    assert lifecycle.data["positions"] == {}

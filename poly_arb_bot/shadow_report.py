@@ -24,26 +24,10 @@ def _rows(path):
                 yield None
 
 
-def _performance(opportunities, execution_path):
-    completed = {}
-    for row in _rows(execution_path):
-        if row and row.get("event_type") == "shadow_execution" and row.get("state") == "COMPLETE":
-            completed.setdefault(row.get("event_id"), row)
-    ledger = []
-    for event_id, row in completed.items():
-        opportunity = opportunities.get(event_id)
-        if not opportunity:
-            continue
-        pnl = float(opportunity.get("realized_simulated_pnl", opportunity.get("expected_execution_value", 0)))
-        ledger.append({"ts": float(row.get("ts", 0)), "event_id": event_id,
-                       "market_id": row.get("market_id"), "pnl": pnl, "state": "COMPLETE"})
-    ledger.sort(key=lambda item: item["ts"])
-    equity = 0.0
-    curve = []
-    for item in ledger:
-        equity += item["pnl"]
-        curve.append({"ts": item["ts"], "pnl": item["pnl"], "equity": round(equity, 12),
-                      "event_id": item["event_id"]})
+STRATEGIES = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+
+
+def _metrics(ledger):
     wins = sum(item["pnl"] > 0 for item in ledger)
     hourly = Counter()
     for item in ledger:
@@ -52,11 +36,37 @@ def _performance(opportunities, execution_path):
     sharpe = None
     if len(samples) >= 24 and statistics.stdev(samples) > 0:
         sharpe = statistics.mean(samples) / statistics.stdev(samples) * math.sqrt(24 * 365)
+    pnl = sum(item["pnl"] for item in ledger)
+    return {"completed": len(ledger), "wins": wins, "losses": len(ledger) - wins,
+            "simulated_pnl": round(pnl, 12) if ledger else None,
+            "win_rate": wins / len(ledger) if ledger else None,
+            "sharpe": sharpe, "sharpe_samples": len(samples)}
+
+
+def _performance(opportunities, execution_path):
+    completed = {}
+    for row in _rows(execution_path):
+        if row and row.get("event_type") == "shadow_complete":
+            completed.setdefault(row.get("event_id"), row)
+    ledger = []
+    for event_id, row in completed.items():
+        pnl = float(row["realized_simulated_pnl"])
+        ledger.append({"ts": float(row.get("ts", 0)), "event_id": event_id,
+                       "market_id": row.get("market_id"), "strategy": row.get("strategy"),
+                       "pnl": pnl, "state": "COMPLETE"})
+    ledger.sort(key=lambda item: item["ts"])
+    equity = 0.0
+    curve = []
+    for item in ledger:
+        equity += item["pnl"]
+        curve.append({"ts": item["ts"], "pnl": item["pnl"], "equity": round(equity, 12),
+                      "event_id": item["event_id"]})
     return {
-        "performance": {"completed": len(ledger), "wins": wins, "losses": len(ledger) - wins,
-                        "simulated_pnl": round(equity, 12) if ledger else None,
-                        "win_rate": wins / len(ledger) if ledger else None,
-                        "sharpe": sharpe, "sharpe_samples": len(samples)},
+        "performance": _metrics(ledger),
+        "performance_by_strategy": {
+            strategy: _metrics([item for item in ledger if item.get("strategy") == strategy])
+            for strategy in STRATEGIES
+        },
         "equity_curve": curve,
         "trade_ledger": list(reversed(ledger[-100:])),
     }

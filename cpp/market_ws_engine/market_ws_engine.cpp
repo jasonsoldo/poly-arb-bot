@@ -339,7 +339,9 @@ private:
                                 << "\tprofit=" << profit << "\tfok=1\tduration_ms=" << (timestamp - item.second.active_since) * 1000 << "\n" << std::flush;
             if (good && audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':' << ws_session_id_ << ':' << item.first << ":opportunity:" << ++opportunity_sequence_ << "\",\"run_id\":\"" << run_id_ << "\",\"event_type\":\"shadow_opportunity\",\"market_id\":\"" << item.first
                                        << "\",\"strategy\":\"paired_lock\",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
-                                       << ",\"fee_rate\":" << rate << ",\"fees\":" << up_fee + down_fee << ",\"net_cost\":" << net_cost << ",\"locked_profit\":" << profit
+                                       << ",\"target_size\":" << size_ << ",\"gross_cost\":" << gross_cost
+                                       << ",\"up_fee\":" << up_fee << ",\"down_fee\":" << down_fee
+                                       << ",\"fee_rate\":" << rate << ",\"fees\":" << up_fee + down_fee << ",\"net_cost\":" << net_cost << ",\"guaranteed_payout\":" << size_ << ",\"locked_profit\":" << profit
                                        << ",\"fok\":true,\"duration_ms\":" << (timestamp - item.second.active_since) * 1000 << "}\n" << std::flush;
         }
         if (now_seconds() - last_health_write_ >= 1) write_health(true);

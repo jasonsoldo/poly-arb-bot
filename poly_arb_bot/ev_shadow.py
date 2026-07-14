@@ -204,6 +204,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             audit["model_source"] = model_source if up_probability is not None else None
             audit["price_to_beat_source"] = price_to_beat_source
             audit["price_to_beat_source_timestamp_ms"] = anchor.get("source_timestamp_ms")
+            audit["target_size"] = size
             audit["window"] = market.get("window", "current")
             rows.append(audit)
     return rows
