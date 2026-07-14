@@ -162,3 +162,35 @@ def test_lottery_daily_loss_blocks_new_positions_after_settlement(tmp_path, monk
     second["market_id"] = "m2"
     assert lifecycle.consume(second, markets) is False
     assert json.loads(log.read_text().splitlines()[-1])["reason"] == "lottery_daily_loss_limit"
+
+
+def test_existing_completion_log_is_backfilled_for_loss_limits(tmp_path, monkeypatch):
+    monkeypatch.setattr("poly_arb_bot.strategy_shadow_lifecycle.time.time", lambda: 1200)
+    log = tmp_path / "complete.jsonl"
+    log.write_text(json.dumps({
+        "ts": 1101, "event_id": "old:complete", "event_type": "shadow_complete",
+        "strategy": "late_window_directional_ev", "market_id": "old",
+        "realized_simulated_pnl": -6.0,
+    }) + "\n", encoding="utf-8")
+    limits = replace(PortfolioLimits(), directional_max_daily_loss=5.0)
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log, limits)
+    assert len(lifecycle.data["completed_trades"]) == 1
+    assert lifecycle.consume(accepted("d2"), {"m1": market()}) is False
+    assert json.loads(log.read_text().splitlines()[-1])["reason"] == "directional_daily_loss_limit"
+
+
+def test_completed_event_preserves_entry_model_evidence(tmp_path):
+    log = tmp_path / "complete.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    row = accepted()
+    row.update(estimated_probability=.7, net_ev=.2, gross_edge=.3,
+               consensus_price=101, reference_state="REFERENCE_READY")
+    lifecycle.consume(row, {"m1": market()})
+    venue = {"assets": {"BTC": {"chainlink_settlement_samples": [
+        {"source_timestamp_ms": 1_100_000, "price": 101},
+    ]}}}
+    lifecycle.settle({"m1": market()}, venue, now=1200)
+    complete = json.loads(log.read_text().splitlines()[-1])
+    assert complete["estimated_probability"] == .7
+    assert complete["net_ev"] == .2
+    assert complete["consensus_price"] == 101

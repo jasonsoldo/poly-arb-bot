@@ -15,6 +15,9 @@ SETTLEMENT_MAX_DELAY_MS = 10_000
 class PortfolioLimits:
     directional_max_open_positions: int = 8
     directional_max_per_close_window: int = 4
+    directional_max_open_notional: float = 20.0
+    directional_max_daily_loss: float = 5.0
+    directional_max_consecutive_losses: int = 5
     lottery_max_open_positions: int = 4
     lottery_max_per_close_window: int = 2
     lottery_max_open_notional: float = 5.0
@@ -26,6 +29,9 @@ class PortfolioLimits:
         return cls(
             directional_max_open_positions=int(os.getenv("DIRECTIONAL_MAX_OPEN_POSITIONS", "8")),
             directional_max_per_close_window=int(os.getenv("DIRECTIONAL_MAX_PER_CLOSE_WINDOW", "4")),
+            directional_max_open_notional=float(os.getenv("DIRECTIONAL_MAX_OPEN_NOTIONAL", "20")),
+            directional_max_daily_loss=float(os.getenv("DIRECTIONAL_MAX_DAILY_LOSS", "5")),
+            directional_max_consecutive_losses=int(os.getenv("DIRECTIONAL_MAX_CONSECUTIVE_LOSSES", "5")),
             lottery_max_open_positions=int(os.getenv("LOTTERY_MAX_OPEN_POSITIONS", "4")),
             lottery_max_per_close_window=int(os.getenv("LOTTERY_MAX_PER_CLOSE_WINDOW", "2")),
             lottery_max_open_notional=float(os.getenv("LOTTERY_MAX_OPEN_NOTIONAL", "5")),
@@ -50,6 +56,8 @@ class StrategyShadowLifecycle:
         self.data["portfolio_limits"] = asdict(self.limits)
         self.data["config_version"] = self.config_version
         self.data["config_hash"] = self.config_hash
+        if self._backfill_completed_trades():
+            self._save()
 
     def _load(self):
         if not self.state_path.exists():
@@ -60,6 +68,47 @@ class StrategyShadowLifecycle:
         temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
         temporary.write_text(json.dumps(self.data, indent=2, sort_keys=True), encoding="utf-8")
         os.replace(temporary, self.state_path)
+
+    def _backfill_completed_trades(self):
+        if not self.logger.path.exists():
+            return False
+        known = {row.get("event_id") for row in self.data["completed_trades"]}
+        changed = False
+        with self.logger.path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                event_id = row.get("event_id")
+                if row.get("event_type") != "shadow_complete" or not event_id or event_id in known:
+                    continue
+                self.data["completed_trades"].append({
+                    "event_id": event_id, "strategy": row.get("strategy"),
+                    "market_id": row.get("market_id"), "ts": float(row.get("ts", 0)),
+                    "pnl": float(row.get("realized_simulated_pnl", 0)),
+                })
+                known.add(event_id)
+                changed = True
+        self.data["completed_trades"] = self.data["completed_trades"][-20000:]
+        return changed
+
+    def _loss_block_reason(self, strategy, daily_limit, consecutive_limit, prefix):
+        today = int(time.time() // 86400)
+        completed = [trade for trade in self.data["completed_trades"]
+                     if trade.get("strategy") == strategy and int(trade.get("ts", 0) // 86400) == today]
+        if -sum(min(0.0, float(trade.get("pnl", 0))) for trade in completed) >= daily_limit:
+            return f"{prefix}_daily_loss_limit"
+        consecutive = 0
+        for trade in reversed(self.data["completed_trades"]):
+            if trade.get("strategy") != strategy:
+                continue
+            if float(trade.get("pnl", 0)) >= 0:
+                break
+            consecutive += 1
+        if consecutive >= consecutive_limit:
+            return f"{prefix}_consecutive_loss_limit"
+        return None
 
     def _reject(self, row, reason):
         key = self._key(row)
@@ -93,28 +142,22 @@ class StrategyShadowLifecycle:
                 return "directional_open_position_limit"
             if len(same_close) >= self.limits.directional_max_per_close_window:
                 return "directional_close_window_limit"
-            return None
+            if sum(position["entry_cost"] for position in strategy_positions) + entry_cost > self.limits.directional_max_open_notional:
+                return "directional_open_notional_limit"
+            return self._loss_block_reason(
+                strategy, self.limits.directional_max_daily_loss,
+                self.limits.directional_max_consecutive_losses, "directional",
+            )
         if len(strategy_positions) >= self.limits.lottery_max_open_positions:
             return "lottery_open_position_limit"
         if len(same_close) >= self.limits.lottery_max_per_close_window:
             return "lottery_close_window_limit"
         if sum(position["entry_cost"] for position in strategy_positions) + entry_cost > self.limits.lottery_max_open_notional:
             return "lottery_open_notional_limit"
-        today = int(time.time() // 86400)
-        completed = [trade for trade in self.data["completed_trades"]
-                     if trade.get("strategy") == strategy and int(trade.get("ts", 0) // 86400) == today]
-        if -sum(min(0.0, float(trade.get("pnl", 0))) for trade in completed) >= self.limits.lottery_max_daily_loss:
-            return "lottery_daily_loss_limit"
-        consecutive = 0
-        for trade in reversed(self.data["completed_trades"]):
-            if trade.get("strategy") != strategy:
-                continue
-            if float(trade.get("pnl", 0)) >= 0:
-                break
-            consecutive += 1
-        if consecutive >= self.limits.lottery_max_consecutive_losses:
-            return "lottery_consecutive_loss_limit"
-        return None
+        return self._loss_block_reason(
+            strategy, self.limits.lottery_max_daily_loss,
+            self.limits.lottery_max_consecutive_losses, "lottery",
+        )
 
     @staticmethod
     def _key(row):
@@ -151,6 +194,17 @@ class StrategyShadowLifecycle:
             "fees_per_share": fees, "target_size": size,
             "entry_cost": round(entry_cost, 12),
             "price_to_beat": row.get("price_to_beat"),
+            "condition_id": row.get("condition_id"), "window": row.get("window"),
+            "generation": row.get("generation"), "session": row.get("session"),
+            "evaluation_sequence": row.get("evaluation_sequence"),
+            "estimated_probability": row.get("estimated_probability"),
+            "market_implied_probability": row.get("market_implied_probability"),
+            "gross_edge": row.get("gross_edge"), "net_ev": row.get("net_ev"),
+            "consensus_price": row.get("consensus_price"),
+            "fast_price": row.get("fast_price"),
+            "reference_state": row.get("reference_state"),
+            "reference_quorum_met": row.get("reference_quorum_met"),
+            "cross_source_divergence_bps": row.get("cross_source_divergence_bps"),
             "close_ts": market.get("close_ts"),
             "settlement_source": market.get("settlement_source"),
             "config_version": self.config_version, "config_hash": self.config_hash,
