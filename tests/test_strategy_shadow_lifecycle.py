@@ -1,6 +1,7 @@
 import json
+from dataclasses import replace
 
-from poly_arb_bot.strategy_shadow_lifecycle import StrategyShadowLifecycle, process_audit_once
+from poly_arb_bot.strategy_shadow_lifecycle import PortfolioLimits, StrategyShadowLifecycle, process_audit_once
 
 
 def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up"):
@@ -33,6 +34,8 @@ def test_repeated_accepts_open_one_position(tmp_path):
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["entry_cost"] == 4.1
     assert position["real_order_submissions"] == 0
+    assert position["config_version"] == "shadow-portfolio-v1"
+    assert len(position["config_hash"]) == 64
 
 
 def test_chainlink_settlement_completes_winning_up_position(tmp_path):
@@ -104,3 +107,58 @@ def test_strategy_audit_offset_is_persisted_and_accept_is_not_replayed(tmp_path)
     assert process_audit_once(audit, lifecycle, markets) == 1
     assert process_audit_once(audit, lifecycle, markets) == 0
     assert lifecycle.data["audit_offset"] == audit.stat().st_size
+
+
+def test_cross_strategy_same_market_outcome_is_not_double_opened(tmp_path):
+    log = tmp_path / "complete.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    markets = {"m1": market()}
+    assert lifecycle.consume(accepted(), markets) is True
+    assert lifecycle.consume(accepted("l1", "low_price_lottery_ev"), markets) is False
+    reject = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert reject["event_type"] == "shadow_position_reject"
+    assert reject["reason"] == "correlated_market_outcome_exposure"
+
+
+def test_lottery_close_window_and_total_notional_limits_are_enforced(tmp_path):
+    limits = replace(PortfolioLimits(), lottery_max_per_close_window=1,
+                     lottery_max_open_notional=10.0)
+    log = tmp_path / "complete.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log, limits)
+    markets = {"m1": market(), "m2": dict(market(), market_id="m2")}
+    assert lifecycle.consume(accepted("l1", "low_price_lottery_ev"), markets) is True
+    second = accepted("l2", "low_price_lottery_ev")
+    second["market_id"] = "m2"
+    second["asset"] = "ETH"
+    assert lifecycle.consume(second, markets) is False
+    assert json.loads(log.read_text().splitlines()[-1])["reason"] == "lottery_close_window_limit"
+
+
+def test_lottery_total_open_notional_limit_is_enforced(tmp_path):
+    limits = replace(PortfolioLimits(), lottery_max_open_notional=5.0)
+    log = tmp_path / "complete.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log, limits)
+    markets = {"m1": market(), "m2": dict(market(), market_id="m2", close_ts=1300)}
+    assert lifecycle.consume(accepted("l1", "low_price_lottery_ev"), markets) is True
+    second = accepted("l2", "low_price_lottery_ev")
+    second["market_id"] = "m2"
+    second["asset"] = "ETH"
+    assert lifecycle.consume(second, markets) is False
+    assert json.loads(log.read_text().splitlines()[-1])["reason"] == "lottery_open_notional_limit"
+
+
+def test_lottery_daily_loss_blocks_new_positions_after_settlement(tmp_path, monkeypatch):
+    monkeypatch.setattr("poly_arb_bot.strategy_shadow_lifecycle.time.time", lambda: 1200)
+    limits = replace(PortfolioLimits(), lottery_max_daily_loss=0.5)
+    log = tmp_path / "complete.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log, limits)
+    markets = {"m1": market(), "m2": dict(market(), market_id="m2", close_ts=1300)}
+    lifecycle.consume(accepted("l1", "low_price_lottery_ev", "Down"), markets)
+    venue = {"assets": {"BTC": {"chainlink_settlement_samples": [
+        {"source_timestamp_ms": 1_100_000, "price": 101},
+    ]}}}
+    assert lifecycle.settle(markets, venue, now=1200) == 1
+    second = accepted("l2", "low_price_lottery_ev")
+    second["market_id"] = "m2"
+    assert lifecycle.consume(second, markets) is False
+    assert json.loads(log.read_text().splitlines()[-1])["reason"] == "lottery_daily_loss_limit"

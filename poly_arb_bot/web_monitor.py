@@ -395,6 +395,10 @@ def build_status(data_dir, log_file, state_file):
         "shadow_lifecycle": {
             "open_positions": len(lifecycle_state.get("positions", {})),
             "completed_ids": len(lifecycle_state.get("completed", [])),
+            "portfolio_rejections": dict(Counter(lifecycle_state.get("portfolio_rejections", {}).values())),
+            "portfolio_limits": lifecycle_state.get("portfolio_limits", {}),
+            "config_version": lifecycle_state.get("config_version"),
+            "config_hash": lifecycle_state.get("config_hash"),
             "real_order_submissions": 0,
             "real_orders": 0,
         },

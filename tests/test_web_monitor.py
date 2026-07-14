@@ -251,6 +251,7 @@ def test_web_status_exposes_open_strategy_shadow_positions(tmp_path):
     }), encoding="utf-8")
     status = build_status(data, tmp_path / "missing.jsonl", tmp_path / "orders.json")
     assert status["shadow_lifecycle"]["open_positions"] == 1
+    assert status["shadow_lifecycle"]["portfolio_rejections"] == {}
 
 
 def test_web_status_does_not_display_future_clock_events(tmp_path):

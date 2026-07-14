@@ -1,5 +1,8 @@
 import json
 import os
+import time
+import hashlib
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .logger import JsonlLogger
@@ -8,12 +11,45 @@ from .logger import JsonlLogger
 SETTLEMENT_MAX_DELAY_MS = 10_000
 
 
+@dataclass(frozen=True)
+class PortfolioLimits:
+    directional_max_open_positions: int = 8
+    directional_max_per_close_window: int = 4
+    lottery_max_open_positions: int = 4
+    lottery_max_per_close_window: int = 2
+    lottery_max_open_notional: float = 5.0
+    lottery_max_daily_loss: float = 5.0
+    lottery_max_consecutive_losses: int = 5
+
+    @classmethod
+    def from_env(cls):
+        return cls(
+            directional_max_open_positions=int(os.getenv("DIRECTIONAL_MAX_OPEN_POSITIONS", "8")),
+            directional_max_per_close_window=int(os.getenv("DIRECTIONAL_MAX_PER_CLOSE_WINDOW", "4")),
+            lottery_max_open_positions=int(os.getenv("LOTTERY_MAX_OPEN_POSITIONS", "4")),
+            lottery_max_per_close_window=int(os.getenv("LOTTERY_MAX_PER_CLOSE_WINDOW", "2")),
+            lottery_max_open_notional=float(os.getenv("LOTTERY_MAX_OPEN_NOTIONAL", "5")),
+            lottery_max_daily_loss=float(os.getenv("LOTTERY_MAX_DAILY_LOSS", "5")),
+            lottery_max_consecutive_losses=int(os.getenv("LOTTERY_MAX_CONSECUTIVE_LOSSES", "5")),
+        )
+
+
 class StrategyShadowLifecycle:
-    def __init__(self, state_path, log_path):
+    def __init__(self, state_path, log_path, limits=None):
         self.state_path = Path(state_path)
         self.logger = JsonlLogger(Path(log_path))
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.limits = limits or PortfolioLimits.from_env()
+        self.config_version = "shadow-portfolio-v1"
+        self.config_hash = hashlib.sha256(
+            json.dumps(asdict(self.limits), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         self.data = self._load()
+        self.data.setdefault("completed_trades", [])
+        self.data.setdefault("portfolio_rejections", {})
+        self.data["portfolio_limits"] = asdict(self.limits)
+        self.data["config_version"] = self.config_version
+        self.data["config_hash"] = self.config_hash
 
     def _load(self):
         if not self.state_path.exists():
@@ -24,6 +60,61 @@ class StrategyShadowLifecycle:
         temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
         temporary.write_text(json.dumps(self.data, indent=2, sort_keys=True), encoding="utf-8")
         os.replace(temporary, self.state_path)
+
+    def _reject(self, row, reason):
+        key = self._key(row)
+        if self.data["portfolio_rejections"].get(key) != reason:
+            self.logger.write("shadow_position_reject", {
+                "event_id": f'{row["event_id"]}:portfolio-reject',
+                "entry_event_id": row["event_id"], "strategy": row["strategy"],
+                "market_id": row["market_id"], "asset": row.get("asset"),
+                "timeframe": row.get("timeframe"), "outcome": row.get("outcome"),
+                "decision": "REJECT", "reason": reason,
+                "config_version": self.config_version, "config_hash": self.config_hash,
+                "real_order_submissions": 0, "real_orders": 0,
+            })
+        self.data["portfolio_rejections"][key] = reason
+        self._save()
+        return False
+
+    def _portfolio_block_reason(self, row, market, entry_cost):
+        strategy = row["strategy"]
+        if strategy == "paired_lock":
+            return None
+        positions = list(self.data["positions"].values())
+        if any(position["market_id"] == row["market_id"] and
+               position.get("outcome") == row.get("outcome") for position in positions):
+            return "correlated_market_outcome_exposure"
+        strategy_positions = [position for position in positions if position["strategy"] == strategy]
+        close_ts = market.get("close_ts")
+        same_close = [position for position in strategy_positions if position.get("close_ts") == close_ts]
+        if strategy == "late_window_directional_ev":
+            if len(strategy_positions) >= self.limits.directional_max_open_positions:
+                return "directional_open_position_limit"
+            if len(same_close) >= self.limits.directional_max_per_close_window:
+                return "directional_close_window_limit"
+            return None
+        if len(strategy_positions) >= self.limits.lottery_max_open_positions:
+            return "lottery_open_position_limit"
+        if len(same_close) >= self.limits.lottery_max_per_close_window:
+            return "lottery_close_window_limit"
+        if sum(position["entry_cost"] for position in strategy_positions) + entry_cost > self.limits.lottery_max_open_notional:
+            return "lottery_open_notional_limit"
+        today = int(time.time() // 86400)
+        completed = [trade for trade in self.data["completed_trades"]
+                     if trade.get("strategy") == strategy and int(trade.get("ts", 0) // 86400) == today]
+        if -sum(min(0.0, float(trade.get("pnl", 0))) for trade in completed) >= self.limits.lottery_max_daily_loss:
+            return "lottery_daily_loss_limit"
+        consecutive = 0
+        for trade in reversed(self.data["completed_trades"]):
+            if trade.get("strategy") != strategy:
+                continue
+            if float(trade.get("pnl", 0)) >= 0:
+                break
+            consecutive += 1
+        if consecutive >= self.limits.lottery_max_consecutive_losses:
+            return "lottery_consecutive_loss_limit"
+        return None
 
     @staticmethod
     def _key(row):
@@ -47,6 +138,10 @@ class StrategyShadowLifecycle:
         fill = None if paired else float(row["expected_fill_price"])
         fees = 0.0 if paired else float(row.get("fees", 0))
         entry_cost = float(row["net_cost"]) if paired else size * (fill + fees)
+        block_reason = self._portfolio_block_reason(row, market, entry_cost)
+        if block_reason:
+            return self._reject(row, block_reason)
+        self.data["portfolio_rejections"].pop(key, None)
         self.data["positions"][key] = {
             "event_id": row["event_id"], "strategy": strategy,
             "market_id": row["market_id"], "asset": row.get("asset", market.get("asset")),
@@ -58,6 +153,7 @@ class StrategyShadowLifecycle:
             "price_to_beat": row.get("price_to_beat"),
             "close_ts": market.get("close_ts"),
             "settlement_source": market.get("settlement_source"),
+            "config_version": self.config_version, "config_hash": self.config_hash,
             "real_order_submissions": 0, "real_orders": 0,
         }
         self._save()
@@ -111,6 +207,10 @@ class StrategyShadowLifecycle:
                 "realized_simulated_pnl": pnl, "real_order_submissions": 0, "real_orders": 0,
             })
             self.data["completed"] = (self.data["completed"] + [complete_id])[-20000:]
+            self.data["completed_trades"] = (self.data["completed_trades"] + [{
+                "event_id": complete_id, "strategy": position["strategy"],
+                "market_id": position["market_id"], "ts": now, "pnl": pnl,
+            }])[-20000:]
             del self.data["positions"][key]
             completed += 1
         if completed:
