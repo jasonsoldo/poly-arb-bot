@@ -12,6 +12,9 @@ from .strategy_config import StrategyConfig
 
 _REPORT_CACHE = {}
 _REPORT_LOCK = threading.Lock()
+_REPORT_JOBS = {}
+_REPORT_JOB_LOCK = threading.Lock()
+REPORT_ASYNC_THRESHOLD_BYTES = 10 * 1024 * 1024
 _STRATEGY_COUNT_CACHE = {}
 _STRATEGY_COUNT_LOCK = threading.Lock()
 _STRATEGY_COUNT_JOBS = {}
@@ -22,14 +25,18 @@ ASSETS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE")
 INTERVALS = ("5m", "15m", "1h", "4h")
 
 
+def _report_cache_key(path, execution_path=None):
+    stat = path.stat()
+    execution_stat = execution_path.stat() if execution_path and execution_path.exists() else None
+    return (stat.st_size, stat.st_mtime_ns,
+            execution_stat.st_size if execution_stat else 0,
+            execution_stat.st_mtime_ns if execution_stat else 0)
+
+
 def _cached_report(path, execution_path=None):
     if not path.exists():
         return build_report_empty()
-    stat = path.stat()
-    execution_stat = execution_path.stat() if execution_path and execution_path.exists() else None
-    key = (stat.st_size, stat.st_mtime_ns,
-           execution_stat.st_size if execution_stat else 0,
-           execution_stat.st_mtime_ns if execution_stat else 0)
+    key = _report_cache_key(path, execution_path)
     cached = _REPORT_CACHE.get(str(path))
     if cached and (cached[0] == key or time.monotonic() - cached[2] < 5):
         return cached[1]
@@ -40,6 +47,40 @@ def _cached_report(path, execution_path=None):
         report = build_report(path, execution_path)
         _REPORT_CACHE[str(path)] = (key, report, time.monotonic())
         return report
+
+
+def _report_worker(job_key, path, execution_path):
+    try:
+        _cached_report(path, execution_path)
+    finally:
+        with _REPORT_JOB_LOCK:
+            _REPORT_JOBS.pop(job_key, None)
+
+
+def _report_for_status(path, execution_path=None):
+    if not path.exists():
+        return build_report_empty(), False
+    job_key = (str(path.resolve()), str(execution_path.resolve()) if execution_path else "")
+    current_key = _report_cache_key(path, execution_path)
+    cached = _REPORT_CACHE.get(str(path))
+    cache_fresh = bool(cached and (
+        cached[0] == current_key or time.monotonic() - cached[2] < 5
+    ))
+    total_size = path.stat().st_size
+    if execution_path and execution_path.exists():
+        total_size += execution_path.stat().st_size
+    with _REPORT_JOB_LOCK:
+        job = _REPORT_JOBS.get(job_key)
+        if job and job.is_alive():
+            return cached[1] if cached else build_report_empty(), True
+        if not cache_fresh and total_size >= REPORT_ASYNC_THRESHOLD_BYTES:
+            job = threading.Thread(
+                target=_report_worker, args=(job_key, path, execution_path), daemon=True
+            )
+            _REPORT_JOBS[job_key] = job
+            job.start()
+            return cached[1] if cached else build_report_empty(), True
+    return _cached_report(path, execution_path), False
 
 
 def build_report_empty():
@@ -269,7 +310,7 @@ def build_status(data_dir, log_file, state_file):
     events.sort(key=lambda item: float(item.get("ts", 0)), reverse=True)
     events = [item for item in events if float(item.get("ts", 0)) <= time.time() + 300]
     execution_log = data_dir.parent / "logs" / "shadow-execution.jsonl"
-    report = _cached_report(selected_log, execution_log)
+    report, report_refreshing = _report_for_status(selected_log, execution_log)
     shadow_events = [item for item in events if item.get("event_type") in {"shadow_eval", "shadow_opportunity"}]
     paired_events = [item for item in shadow_events if item.get("strategy", "paired_lock") == "paired_lock"]
     latest_shadow = {}
@@ -351,7 +392,8 @@ def build_status(data_dir, log_file, state_file):
             cell["count"] += 1
     latest_event = next(iter(latest_shadow.values()), None)
     strategy_score = _strategy_score(latest_event)
-    strategy_counts, analytics_refreshing = _strategy_counts_for_status((selected_log, strategy_log))
+    strategy_counts, strategy_refreshing = _strategy_counts_for_status((selected_log, strategy_log))
+    analytics_refreshing = report_refreshing or strategy_refreshing
     if analytics_refreshing and system_status == "ONLINE":
         system_status = "DEGRADED"
     strategy_evaluations = sum(row["evaluations"] for row in strategy_counts.values())

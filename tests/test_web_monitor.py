@@ -315,6 +315,37 @@ def test_web_status_does_not_block_on_initial_large_strategy_audit(tmp_path, mon
     release.wait(1)
 
 
+def test_web_status_does_not_block_on_initial_large_shadow_report(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (data / "shadow-health.json").write_text(json.dumps({
+        "updated_at": time.time(), "ws_connected": True,
+    }), encoding="utf-8")
+    (data / "venue-status.json").write_text(json.dumps({
+        "updated_at_ms": time.time() * 1000, "assets": {},
+    }), encoding="utf-8")
+    (logs / "shadow-audit.jsonl").write_text("{}\n", encoding="utf-8")
+    release = threading.Event()
+
+    def slow_report(path, execution_path=None):
+        release.wait(1)
+        return web_monitor.build_report_empty()
+
+    monkeypatch.setattr(web_monitor, "REPORT_ASYNC_THRESHOLD_BYTES", 1)
+    monkeypatch.setattr(web_monitor, "build_report", slow_report)
+    threading.Timer(0.2, release.set).start()
+
+    started = time.perf_counter()
+    status = build_status(data, logs / "missing.jsonl", tmp_path / "state.json")
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.15
+    assert status["analytics_refreshing"] is True
+    assert status["system_status"] == "DEGRADED"
+    release.wait(1)
+
+
 def test_web_status_exposes_open_strategy_shadow_positions(tmp_path):
     data = tmp_path / "data"
     state = tmp_path / "state"
