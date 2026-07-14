@@ -89,7 +89,7 @@ std::string source_status(const SourceState& source, double timestamp) {
     if (!source.supported) return "UNSUPPORTED";
     if (!source.connected) return source.received_at ? "DISCONNECTED" : "NOT_RECEIVED";
     if (!source.received_at) return "NOT_RECEIVED";
-    return timestamp - source.received_at <= 10000 ? "FRESH" : "STALE";
+    return timestamp - source.received_at <= 3000 ? "FRESH" : "STALE";
 }
 
 void write_number(std::ostream& out, double value) {
@@ -480,9 +480,11 @@ int main(int argc, char** argv) {
             const std::string symbol = data->get<std::string>("symbol", "");
             const double bid = data->get<double>("bid1Price", 0);
             const double ask = data->get<double>("ask1Price", 0);
-            if (!bid || !ask) return;
+            const double last = data->get<double>("lastPrice", 0);
+            const double price = bid > 0 && ask > 0 ? (bid + ask) / 2 : last;
+            if (!price) return;
             for (const auto& config : ASSETS) if (symbol == config.bybit)
-                return publish(shared, config.asset, "bybit", (bid + ask) / 2, bid, ask, row.get<std::string>("ts", ""));
+                return publish(shared, config.asset, "bybit", price, bid, ask, row.get<std::string>("ts", ""));
         });
     });
     std::thread okx([&] {

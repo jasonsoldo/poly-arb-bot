@@ -53,6 +53,8 @@ def test_reference_engine_subscribes_to_official_bybit_and_okx_spot_tickers():
     assert '"tickers.BTCUSDT"' in SOURCE
     assert 'get<double>("bid1Price"' in SOURCE
     assert 'get<double>("ask1Price"' in SOURCE
+    assert 'get<double>("lastPrice"' in SOURCE
+    assert '<= 3000' in SOURCE
     assert 'ws.okx.com' in SOURCE
     assert '"8443"' in SOURCE
     assert '/ws/v5/public' in SOURCE
