@@ -28,7 +28,7 @@ def event():
 
 
 def venue(volatility=0.001):
-    return {"assets": {"BTC": {
+    return {"updated_at_ms": 1_000_000, "assets": {"BTC": {
         "fast_price": 101.0, "consensus_price": 101.0, "settlement_reference": 100.8,
         "fresh_exchange_source_count": 3, "fresh_usd_spot_source_count": 2,
         "cross_source_divergence_bps": 5.0, "reference_quorum_met": True,
@@ -40,6 +40,29 @@ def venue(volatility=0.001):
             "chainlink": {"symbol": "btc/usd", "market_type": "settlement", "quote_currency": "USD", "price": 100.8, "bid": None, "ask": None, "source_timestamp": "x", "received_at": 999000, "message_age_ms": 10, "status": "FRESH"},
         },
     }}}
+
+
+def test_reference_age_recomputes_quorum_without_slow_optional_source(monkeypatch):
+    monkeypatch.setenv("REFERENCE_MAX_AGE_MS", "3000")
+    state = venue()
+    state["assets"]["BTC"]["sources"]["binance"] = {
+        "symbol": "BTCUSDT", "market_type": "spot", "quote_currency": "USDT",
+        "price": 101.0, "bid": 100.9, "ask": 101.1,
+        "message_age_ms": 9000, "status": "FRESH",
+    }
+    rows = evaluate_market_event(event(), market(), state, now=1000.0)
+    assert all(row["reference_quorum_met"] is True for row in rows)
+    assert all(row["reference_age_ms"] == 10 for row in rows)
+    assert all(row["reason"] != "reference_data_stale" for row in rows)
+
+
+def test_reference_age_includes_venue_file_age(monkeypatch):
+    monkeypatch.setenv("REFERENCE_MAX_AGE_MS", "3000")
+    state = venue()
+    state["updated_at_ms"] = 996_000
+    rows = evaluate_market_event(event(), market(), state, now=1000.0)
+    assert all(row["reference_quorum_met"] is False for row in rows)
+    assert all(row["reason"] == "insufficient_reference_sources" for row in rows)
 
 
 def test_paired_event_produces_independent_directional_and_lottery_audits():
@@ -150,7 +173,8 @@ def test_hourly_binance_market_does_not_require_chainlink_settlement_feed():
     asset = state["assets"]["BTC"]
     asset["sources"]["binance"] = {
         "symbol": "BTCUSDT", "market_type": "spot", "quote_currency": "USDT",
-        "price": 101.0, "bid": 100.9, "ask": 101.1, "status": "FRESH",
+        "price": 101.0, "bid": 100.9, "ask": 101.1,
+        "message_age_ms": 10, "status": "FRESH",
     }
     asset["sources"]["chainlink"]["status"] = "STALE"
     asset["settlement_reference"] = None

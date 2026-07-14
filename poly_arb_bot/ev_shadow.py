@@ -115,18 +115,22 @@ def load_historical_models(timeout=10):
     return models
 
 
-def _reference_state(asset, settlement_source):
+def _reference_state(asset, settlement_source, maximum_age_ms, file_age_ms=0):
     sources = []
     for name, row in asset.get("sources", {}).items():
+        age = row.get("message_age_ms")
+        effective_age = None if age is None else max(0.0, float(age) + file_age_ms)
+        status = row.get("status", "NOT_RECEIVED")
+        if status == "FRESH" and (effective_age is None or effective_age > maximum_age_ms):
+            status = "STALE"
         sources.append(ReferenceQuote(
             name, "", row.get("symbol", ""), row.get("market_type", ""),
             row.get("quote_currency", ""), row.get("price"), row.get("bid"), row.get("ask"),
-            row.get("source_timestamp"), row.get("received_at"), row.get("message_age_ms"),
-            row.get("status", "NOT_RECEIVED"),
+            row.get("source_timestamp"), row.get("received_at"), effective_age, status,
         ))
-    selected = asset.get("sources", {}).get(settlement_source, {})
-    verified = selected.get("status") == "FRESH" and selected.get("price") is not None
-    return aggregate_reference(sources, selected.get("price"), verified)
+    selected = next((row for row in sources if row.source == settlement_source), None)
+    verified = selected is not None and selected.status == "FRESH" and selected.price is not None
+    return aggregate_reference(sources, selected.price if selected else None, verified)
 
 
 def _up_probability(asset, price_to_beat, seconds_to_close, book_imbalance=None):
@@ -152,7 +156,11 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
     now = time.time() if now is None else now
     asset = venue.get("assets", {}).get(market.get("asset"), {})
     settlement_source = market.get("settlement_source")
-    reference = _reference_state(asset, settlement_source)
+    maximum_reference_age_ms = float(os.getenv("REFERENCE_MAX_AGE_MS", "3000"))
+    file_age_ms = max(0.0, now * 1000 - float(venue.get("updated_at_ms", now * 1000)))
+    reference = _reference_state(
+        asset, settlement_source, maximum_reference_age_ms, file_age_ms,
+    )
     seconds_to_close = max(0, int(float(market.get("close_ts", 0)) - now))
     model_asset = asset
     model_source = "live_multi_source"
@@ -204,8 +212,9 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         fill = float(event.get(fill_key, 1))
         best_ask = event.get(ask_key)
         slippage = max(0.0, fill - float(best_ask)) if best_ask is not None else float("inf")
-        source_ages = [row.get("message_age_ms") for row in asset.get("sources", {}).values()
-                       if row.get("status") == "FRESH" and row.get("message_age_ms") is not None]
+        source_ages = [row.message_age_ms for row in reference.sources
+                       if row.status == "FRESH" and row.message_age_ms is not None and
+                       (row.market_type == "spot" or row.source == settlement_source)]
         reference_age_ms = max(source_ages) if source_ages else None
         samples = int(model_asset.get("model_sample_count", 0))
         divergence = reference.cross_source_divergence_bps
@@ -229,7 +238,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             clock_skew_ms=asset.get("clock_skew_ms"),
             minimum_liquidity=float(os.getenv("STRATEGY_MIN_LIQUIDITY", "20")),
             maximum_slippage=float(os.getenv("STRATEGY_MAX_SLIPPAGE", "0.01")),
-            maximum_reference_age_ms=float(os.getenv("REFERENCE_MAX_AGE_MS", "3000")),
+            maximum_reference_age_ms=maximum_reference_age_ms,
             maximum_book_age_ms=float(os.getenv("CLOB_MAX_BOOK_AGE_MS", "750")),
             maximum_clock_skew_ms=float(os.getenv("MAX_CLOCK_SKEW_MS", "250")),
             market_active=bool(market.get("active", True)) and float(market.get("close_ts", 0)) > now,
