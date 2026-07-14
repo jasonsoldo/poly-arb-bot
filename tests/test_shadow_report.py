@@ -1,6 +1,7 @@
 import json
 import time
 
+from poly_arb_bot.ev_shadow import strategy_config
 from poly_arb_bot.shadow_report import build_report
 
 
@@ -57,10 +58,12 @@ def test_shadow_report_uses_realized_shadow_complete_pnl(tmp_path):
     audit = tmp_path / "audit.jsonl"
     execution = tmp_path / "execution.jsonl"
     audit.write_text("", encoding="utf-8")
+    current_hash = strategy_config()[1]
     execution.write_text(json.dumps({
         "ts": 1101, "event_type": "shadow_complete", "event_id": "p1",
         "strategy": "late_window_directional_ev", "market_id": "m1",
         "strategy_config_version": "shadow-buy-rules-v2",
+        "strategy_config_hash": current_hash,
         "realized_simulated_pnl": 5.9,
     }) + "\n", encoding="utf-8")
     report = build_report(audit, execution)
@@ -68,6 +71,26 @@ def test_shadow_report_uses_realized_shadow_complete_pnl(tmp_path):
     assert report["performance"]["simulated_pnl"] == 5.9
     assert report["performance_by_strategy"]["late_window_directional_ev"]["completed"] == 1
     assert report["performance_by_strategy"]["paired_lock"]["completed"] == 0
+
+
+def test_shadow_report_excludes_other_hash_from_current_performance(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    audit.write_text("", encoding="utf-8")
+    current_hash = strategy_config()[1]
+    rows = [
+        {"ts": 1, "event_type": "shadow_complete", "event_id": "current",
+         "strategy": "late_window_directional_ev", "strategy_config_hash": current_hash,
+         "realized_simulated_pnl": 1},
+        {"ts": 2, "event_type": "shadow_complete", "event_id": "old",
+         "strategy": "late_window_directional_ev", "strategy_config_hash": "old-hash",
+         "realized_simulated_pnl": -10},
+    ]
+    execution.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    report = build_report(audit, execution)
+    assert report["performance"]["completed"] == 1
+    assert report["performance"]["simulated_pnl"] == 1
+    assert report["excluded_other_strategy_config"] == 1
 
 
 def test_shadow_report_quarantines_future_clock_records(tmp_path):

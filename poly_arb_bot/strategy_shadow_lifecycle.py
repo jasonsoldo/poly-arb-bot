@@ -5,6 +5,7 @@ import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .ev_shadow import strategy_config
 from .logger import JsonlLogger
 
 
@@ -14,6 +15,7 @@ DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS = 900
 
 @dataclass(frozen=True)
 class PortfolioLimits:
+    combined_max_per_close_window: int = 2
     directional_max_order_size: float = 250.0
     directional_max_open_positions: int = 8
     directional_max_per_close_window: int = 4
@@ -30,6 +32,7 @@ class PortfolioLimits:
     @classmethod
     def from_env(cls):
         return cls(
+            combined_max_per_close_window=int(os.getenv("COMBINED_MAX_PER_CLOSE_WINDOW", "2")),
             directional_max_order_size=float(os.getenv("DIRECTIONAL_MAX_ORDER_SIZE", "250")),
             directional_max_open_positions=int(os.getenv("DIRECTIONAL_MAX_OPEN_POSITIONS", "8")),
             directional_max_per_close_window=int(os.getenv("DIRECTIONAL_MAX_PER_CLOSE_WINDOW", "4")),
@@ -59,7 +62,8 @@ class StrategyShadowLifecycle:
                 str(DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS),
             )
         )
-        self.config_version = "shadow-portfolio-v1"
+        self.config_version = "shadow-portfolio-v2"
+        self.strategy_config_hash = strategy_config()[1]
         self.config_hash = hashlib.sha256(
             json.dumps(asdict(self.limits), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -86,7 +90,7 @@ class StrategyShadowLifecycle:
     def _backfill_completed_trades(self):
         if not self.logger.path.exists():
             return False
-        known = {row.get("event_id") for row in self.data["completed_trades"]}
+        known = {row.get("event_id"): row for row in self.data["completed_trades"]}
         changed = False
         with self.logger.path.open(encoding="utf-8") as handle:
             for line in handle:
@@ -95,14 +99,21 @@ class StrategyShadowLifecycle:
                 except ValueError:
                     continue
                 event_id = row.get("event_id")
-                if row.get("event_type") != "shadow_complete" or not event_id or event_id in known:
+                if row.get("event_type") != "shadow_complete" or not event_id:
+                    continue
+                if event_id in known:
+                    trade = known[event_id]
+                    if not trade.get("strategy_config_hash") and row.get("strategy_config_hash"):
+                        trade["strategy_config_hash"] = row["strategy_config_hash"]
+                        changed = True
                     continue
                 self.data["completed_trades"].append({
                     "event_id": event_id, "strategy": row.get("strategy"),
                     "market_id": row.get("market_id"), "ts": float(row.get("ts", 0)),
                     "pnl": float(row.get("realized_simulated_pnl", 0)),
+                    "strategy_config_hash": row.get("strategy_config_hash"),
                 })
-                known.add(event_id)
+                known[event_id] = self.data["completed_trades"][-1]
                 changed = True
         self.data["completed_trades"] = self.data["completed_trades"][-20000:]
         return changed
@@ -110,12 +121,16 @@ class StrategyShadowLifecycle:
     def _loss_block_reason(self, strategy, daily_limit, consecutive_limit, prefix):
         today = int(time.time() // 86400)
         completed = [trade for trade in self.data["completed_trades"]
-                     if trade.get("strategy") == strategy and int(trade.get("ts", 0) // 86400) == today]
+                     if trade.get("strategy") == strategy and
+                     trade.get("strategy_config_hash") == self.strategy_config_hash and
+                     int(trade.get("ts", 0) // 86400) == today]
         if -sum(min(0.0, float(trade.get("pnl", 0))) for trade in completed) >= daily_limit:
             return f"{prefix}_daily_loss_limit"
         consecutive = 0
         for trade in reversed(self.data["completed_trades"]):
             if trade.get("strategy") != strategy:
+                continue
+            if trade.get("strategy_config_hash") != self.strategy_config_hash:
                 continue
             if float(trade.get("pnl", 0)) >= 0:
                 break
@@ -150,6 +165,11 @@ class StrategyShadowLifecycle:
             return "correlated_market_outcome_exposure"
         strategy_positions = [position for position in positions if position["strategy"] == strategy]
         close_ts = market.get("close_ts")
+        combined_close = [position for position in positions
+                          if position["strategy"] != "paired_lock" and
+                          position.get("close_ts") == close_ts]
+        if len(combined_close) >= self.limits.combined_max_per_close_window:
+            return "combined_close_window_limit"
         same_close = [position for position in strategy_positions if position.get("close_ts") == close_ts]
         if strategy == "late_window_directional_ev":
             if float(row.get("target_size", 0)) > self.limits.directional_max_order_size:
@@ -224,6 +244,7 @@ class StrategyShadowLifecycle:
             "reference_state": row.get("reference_state"),
             "reference_quorum_met": row.get("reference_quorum_met"),
             "cross_source_divergence_bps": row.get("cross_source_divergence_bps"),
+            "seconds_to_close": row.get("seconds_to_close"),
             "close_ts": market.get("close_ts"),
             "settlement_source": market.get("settlement_source"),
             "strategy_config_version": row.get("config_version"),
@@ -342,6 +363,7 @@ class StrategyShadowLifecycle:
                     "market_id": position["market_id"],
                     "ts": now,
                     "pnl": pnl,
+                    "strategy_config_hash": position.get("strategy_config_hash"),
                 }]
             )[-20000:]
 

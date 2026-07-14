@@ -615,6 +615,7 @@ def main() -> int:
             "clob-book",
             "chainlink-price",
             "shadow-acceptance",
+            "strategy-calibration",
         ],
     )
     parser.add_argument("--snapshot", default="data/sample_live_snapshot.json")
@@ -642,6 +643,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--require-cpp", action="store_true")
     parser.add_argument("--live-enabled", action="store_true")
+    parser.add_argument("--execution-log", default="logs/shadow-execution.jsonl")
+    parser.add_argument("--config-hash", default="latest")
+    parser.add_argument("--verify-official", action="store_true")
     args = parser.parse_args()
     if args.command == "web-monitor":
         serve(args.host, args.port, Path("web"), Path("data"), Path(args.log_file), Path(args.state_file or "state/orders.json"))
@@ -651,6 +655,12 @@ def main() -> int:
     if args.command == "shadow-acceptance":
         from .shadow_acceptance import run as run_acceptance
         return run_acceptance(Path("data"), Path(args.log_file), Path(args.state_file or "state/orders.json"))
+    if args.command == "strategy-calibration":
+        from .strategy_calibration import main as calibration_main
+        return calibration_main(
+            args.execution_log, args.config_hash, args.verify_official,
+            args.gamma_base_url,
+        )
 
     if args.command == "simulate":
         return run_simulation(

@@ -5,7 +5,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from .ev_shadow import STRATEGY_CONFIG_VERSION
+from .ev_shadow import strategy_config
 
 
 def percentile(values, fraction):
@@ -56,10 +56,12 @@ def _performance(opportunities, execution_path):
         ledger.append({"ts": float(row.get("ts", 0)), "event_id": event_id,
                        "market_id": row.get("market_id"), "strategy": row.get("strategy"),
                        "strategy_config_version": row.get("strategy_config_version"),
+                       "strategy_config_hash": row.get("strategy_config_hash"),
                        "pnl": pnl, "state": "COMPLETE"})
     ledger.sort(key=lambda item: item["ts"])
+    current_hash = strategy_config()[1]
     current = [item for item in ledger if item.get("strategy") == "paired_lock" or
-               item.get("strategy_config_version") == STRATEGY_CONFIG_VERSION]
+               item.get("strategy_config_hash") == current_hash]
     equity = 0.0
     curve = []
     for item in current:
@@ -75,6 +77,11 @@ def _performance(opportunities, execution_path):
         "equity_curve": curve,
         "trade_ledger": list(reversed(current[-100:])),
         "excluded_pre_rule_compliance": len(ledger) - len(current),
+        "excluded_other_strategy_config": sum(
+            item.get("strategy") != "paired_lock" and
+            item.get("strategy_config_hash") != current_hash for item in ledger
+        ),
+        "current_strategy_config_hash": current_hash,
     }
 
 

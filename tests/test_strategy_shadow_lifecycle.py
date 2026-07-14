@@ -1,6 +1,7 @@
 import json
 from dataclasses import replace
 
+from poly_arb_bot.ev_shadow import strategy_config
 from poly_arb_bot.strategy_shadow_lifecycle import PortfolioLimits, StrategyShadowLifecycle, process_audit_once
 
 
@@ -9,7 +10,7 @@ def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up")
         "event_id": event_id, "event_type": "shadow_eval", "strategy": strategy,
         "market_id": "m1", "asset": "BTC", "timeframe": "5m", "outcome": outcome,
         "decision": "ACCEPT", "expected_fill_price": 0.4, "fees": 0.01,
-        "target_size": 10, "ts": 1000,
+        "target_size": 10, "ts": 1000, "config_hash": strategy_config()[1],
     }
 
 
@@ -34,7 +35,7 @@ def test_repeated_accepts_open_one_position(tmp_path):
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["entry_cost"] == 4.1
     assert position["real_order_submissions"] == 0
-    assert position["config_version"] == "shadow-portfolio-v1"
+    assert position["config_version"] == "shadow-portfolio-v2"
     assert len(position["config_hash"]) == 64
 
 
@@ -120,6 +121,18 @@ def test_cross_strategy_same_market_outcome_is_not_double_opened(tmp_path):
     assert reject["reason"] == "correlated_market_outcome_exposure"
 
 
+def test_directional_and_lottery_share_close_window_risk_limit(tmp_path):
+    limits = replace(PortfolioLimits(), combined_max_per_close_window=1)
+    log = tmp_path / "complete.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log, limits)
+    markets = {"m1": market(), "m2": dict(market(), market_id="m2", asset="ETH")}
+    assert lifecycle.consume(accepted(), markets) is True
+    second = accepted("l1", "low_price_lottery_ev")
+    second.update(market_id="m2", asset="ETH")
+    assert lifecycle.consume(second, markets) is False
+    assert json.loads(log.read_text().splitlines()[-1])["reason"] == "combined_close_window_limit"
+
+
 def test_lottery_close_window_and_total_notional_limits_are_enforced(tmp_path):
     limits = replace(PortfolioLimits(), lottery_max_per_close_window=1,
                      lottery_max_open_notional=10.0)
@@ -180,6 +193,7 @@ def test_existing_completion_log_is_backfilled_for_loss_limits(tmp_path, monkeyp
     log.write_text(json.dumps({
         "ts": 1101, "event_id": "old:complete", "event_type": "shadow_complete",
         "strategy": "late_window_directional_ev", "market_id": "old",
+        "strategy_config_hash": strategy_config()[1],
         "realized_simulated_pnl": -6.0,
     }) + "\n", encoding="utf-8")
     limits = replace(PortfolioLimits(), directional_max_daily_loss=5.0)
@@ -187,6 +201,37 @@ def test_existing_completion_log_is_backfilled_for_loss_limits(tmp_path, monkeyp
     assert len(lifecycle.data["completed_trades"]) == 1
     assert lifecycle.consume(accepted("d2"), {"m1": market()}) is False
     assert json.loads(log.read_text().splitlines()[-1])["reason"] == "directional_daily_loss_limit"
+
+
+def test_old_config_loss_does_not_block_current_strategy(tmp_path, monkeypatch):
+    monkeypatch.setattr("poly_arb_bot.strategy_shadow_lifecycle.time.time", lambda: 1200)
+    log = tmp_path / "complete.jsonl"
+    log.write_text(json.dumps({
+        "ts": 1101, "event_id": "old:complete", "event_type": "shadow_complete",
+        "strategy": "late_window_directional_ev", "market_id": "old",
+        "strategy_config_hash": "old-hash", "realized_simulated_pnl": -100.0,
+    }) + "\n", encoding="utf-8")
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    assert lifecycle.consume(accepted("current"), {"m1": market()}) is True
+
+
+def test_existing_state_trade_hash_is_migrated_from_canonical_log(tmp_path):
+    current_hash = strategy_config()[1]
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "positions": {}, "completed": ["done"], "completed_trades": [{
+            "event_id": "done", "strategy": "late_window_directional_ev",
+            "market_id": "m1", "ts": 1000, "pnl": -1,
+        }],
+    }), encoding="utf-8")
+    log = tmp_path / "complete.jsonl"
+    log.write_text(json.dumps({
+        "event_id": "done", "event_type": "shadow_complete",
+        "strategy": "late_window_directional_ev", "market_id": "m1",
+        "strategy_config_hash": current_hash, "realized_simulated_pnl": -1,
+    }), encoding="utf-8")
+    lifecycle = StrategyShadowLifecycle(state, log)
+    assert lifecycle.data["completed_trades"][0]["strategy_config_hash"] == current_hash
 
 
 def test_completed_event_preserves_entry_model_evidence(tmp_path):
