@@ -58,10 +58,19 @@ def test_acceptance_fails_when_an_independent_strategy_is_not_running():
 
 def test_acceptance_fails_when_probability_model_never_evaluated():
     status = valid_status()
+    status["strategy_counts"]["late_window_directional_ev"]["model_evaluations"] = 0
     status["strategy_counts"]["late_window_directional_ev"]["latest_model_evaluated"] = False
     report = evaluate_status(status)
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert "probability_models_evaluated" in failed
+
+
+def test_acceptance_uses_model_count_when_latest_row_fails_closed_before_model():
+    status = valid_status()
+    status["strategy_counts"]["late_window_directional_ev"]["latest_model_evaluated"] = False
+    status["strategy_counts"]["low_price_lottery_ev"]["latest_model_evaluated"] = False
+    report = evaluate_status(status)
+    assert report["status"] == "PASS"
 
 
 def test_acceptance_allows_zero_completed_samples_when_evaluations_are_valid():
