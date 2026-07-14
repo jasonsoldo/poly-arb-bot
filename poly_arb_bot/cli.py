@@ -112,38 +112,52 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         if slug not in matched_slugs:
             print(f"DISCOVERY asset={asset} interval={interval} series={slug} status=SERIES_NOT_FOUND", flush=True)
     event_candidates = {}
+    hourly_windows = []
     for series_id, (asset, interval, series_slug) in series_by_id.items():
         seconds = INTERVAL_SECONDS[interval]
         current_start = now_ts - now_ts % seconds
+        if interval == "1h":
+            hourly_windows.append((series_id, current_start - seconds, current_start + 3 * seconds))
+            continue
         prefix = series_slug.replace("-up-or-down-", "-updown-")
         for start in (current_start, current_start + seconds):
             event_candidates[f"{prefix}-{start}"] = series_id
-    if event_candidates:
+    grouped_events = {series_id: [] for series_id in series_by_id}
+    if event_candidates or hourly_windows:
         def fetch_events(slugs):
             try:
                 return client.events_by_slugs(slugs), 0
             except (OSError, RuntimeError, TimeoutError):
                 return [], 1
 
+        def fetch_hourly(window):
+            series_id, start, end = window
+            try:
+                return series_id, client.events_by_series_window(series_id, start, end), 0
+            except (OSError, RuntimeError, TimeoutError):
+                return series_id, [], 1
+
         event_slugs = list(event_candidates)
         event_batches = [event_slugs[index:index + 20] for index in range(0, len(event_slugs), 20)]
         stage_started = time.monotonic()
-        gamma_request_count += len(event_batches)
-        print(f"GAMMA_EVENTS_START candidates={len(event_slugs)} active_workers=4", flush=True)
+        gamma_request_count += len(event_batches) + len(hourly_windows)
+        print(f"GAMMA_EVENTS_START candidates={len(event_slugs) + len(hourly_windows) * 2} active_workers=4", flush=True)
         window_events = []
         with ThreadPoolExecutor(max_workers=4) as executor:
             for rows, errors in executor.map(fetch_events, event_batches):
                 window_events.extend(rows)
                 series_errors += errors
+            for series_id, rows, errors in executor.map(fetch_hourly, hourly_windows):
+                grouped_events[series_id].extend(rows)
+                series_errors += errors
         print(
             f"GAMMA_EVENTS_DONE elapsed_ms={int((time.monotonic() - stage_started) * 1000)} "
-            f"gamma_request_count={gamma_request_count} events={len(window_events)} errors={series_errors}", flush=True,
+            f"gamma_request_count={gamma_request_count} events={len(window_events) + sum(map(len, grouped_events.values()))} errors={series_errors}", flush=True,
         )
     else:
         window_events = []
         print(f"GAMMA_EVENTS_START candidates=0 active_workers=0", flush=True)
         print(f"GAMMA_EVENTS_DONE elapsed_ms=0 gamma_request_count={gamma_request_count} events=0 errors={series_errors}", flush=True)
-    grouped_events = {series_id: [] for series_id in series_by_id}
     for event in window_events:
         series_id = event_candidates.get(str(event.get("slug") or ""))
         if series_id in grouped_events:

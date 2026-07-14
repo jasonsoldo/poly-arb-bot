@@ -109,6 +109,7 @@ class MarketScanner:
             up_token_id=up_token_id,
             down_token_id=down_token_id,
             start_ts=start_ts,
+            settlement_source=self._settlement_source(market, event),
             interval=interval,
             series_id=series_id,
             fee_rate=self._fee_rate(market),
@@ -200,8 +201,19 @@ class MarketScanner:
             for interval in intervals:
                 if interval not in INTERVAL_SECONDS:
                     raise ValueError(f"unsupported interval: {interval}")
-                rows.append((ASSET_CODES[asset], interval, f"{prefix}-up-or-down-{interval}"))
+                suffix = "hourly" if interval == "1h" else interval
+                rows.append((ASSET_CODES[asset], interval, f"{prefix}-up-or-down-{suffix}"))
         return rows
+
+    @staticmethod
+    def _settlement_source(market: Dict[str, Any], event: Dict[str, Any]) -> Optional[str]:
+        fields = ("rules", "description", "resolutionSource", "resolution_source")
+        text = " ".join(str(first_present(row, fields) or "") for row in (market, event)).lower()
+        if "binance" in text:
+            return "binance"
+        if "chainlink" in text:
+            return "chainlink"
+        return None
 
     def _open_price(self, market: Dict[str, Any], event: Dict[str, Any]) -> Optional[float]:
         direct = first_present(
@@ -233,7 +245,11 @@ class MarketScanner:
                         pass
 
         rules = str(first_present(market, ("rules", "description", "resolutionSource")) or first_present(event, ("description", "resolutionSource")) or "")
-        match = re.search(r"(?:price to beat|open price|start price)[^0-9$-]*\$?([0-9][0-9,]*(?:\.[0-9]+)?)", rules, re.I)
+        match = re.search(
+            r"(?:price to beat|open price|start price)\s*(?:is|:|=)\s*\$?([0-9][0-9,]*(?:\.[0-9]+)?)",
+            rules,
+            re.I,
+        )
         if match:
             return float(match.group(1).replace(",", ""))
         return None

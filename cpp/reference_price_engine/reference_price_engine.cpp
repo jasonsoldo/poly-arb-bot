@@ -200,17 +200,20 @@ void write_status_locked(SharedState& shared, bool force = false) {
         out << ",\"cross_source_divergence_bps\":";
         if (fresh_spot.size() > 1) out << divergence; else out << "null";
         out << ",\"reference_quorum_met\":" << (quorum ? "true" : "false")
-            << ",\"reference_state\":\"" << (quorum ? "REFERENCE_READY" : "REFERENCE_BLOCKED") << "\""
-            << ",\"chainlink_samples\":[";
-        bool first_anchor = true;
-        for (const auto& sample : chainlink.anchor_samples) {
-            if (!first_anchor) out << ',';
-            first_anchor = false;
-            out << "{\"source_timestamp_ms\":" << sample.source_timestamp_ms
-                << ",\"received_at\":" << sample.received_at
-                << ",\"price\":" << sample.price << '}';
+            << ",\"reference_state\":\"" << (quorum ? "REFERENCE_READY" : "REFERENCE_BLOCKED") << "\"";
+        for (const auto* name : {"binance", "chainlink"}) {
+            out << ",\"" << name << "_samples\":[";
+            bool first_anchor = true;
+            for (const auto& sample : asset.sources.at(name).anchor_samples) {
+                if (!first_anchor) out << ',';
+                first_anchor = false;
+                out << "{\"source_timestamp_ms\":" << sample.source_timestamp_ms
+                    << ",\"received_at\":" << sample.received_at
+                    << ",\"price\":" << sample.price << '}';
+            }
+            out << ']';
         }
-        out << ']'
+        out
             << ",\"volatility_per_sqrt_second\":"; write_number(out, median(volatilities));
         out << ",\"momentum_bps_30s\":";
         if (!momentums.empty()) out << median(momentums); else out << "null";
@@ -251,6 +254,16 @@ void publish(SharedState& shared, const std::string& asset, const std::string& s
     }
     ++shared.matched_messages;
     shared.engine_latency_us = (now_ms() - received) * 1000;
+    write_status_locked(shared);
+}
+
+void publish_anchor(SharedState& shared, const std::string& asset, const std::string& source,
+                    double price, double source_timestamp_ms) {
+    const double received = now_ms();
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    auto& samples = shared.assets.at(asset).sources.at(source).anchor_samples;
+    samples.push_back({source_timestamp_ms, received, price});
+    while (samples.size() > 128) samples.pop_front();
     write_status_locked(shared);
 }
 
@@ -323,7 +336,7 @@ int main(int argc, char** argv) {
     { std::lock_guard<std::mutex> lock(shared.mutex); write_status_locked(shared, true); }
 
     const std::string rtds_sub = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
-    const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker";
+    const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker/btcusdt@kline_1h/ethusdt@kline_1h/solusdt@kline_1h/xrpusdt@kline_1h/bnbusdt@kline_1h/dogeusdt@kline_1h";
     const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","DOGE-USD"],"channels":["ticker"]})";
     const std::string kraken_sub = R"({"method":"subscribe","params":{"channel":"ticker","symbol":["BTC/USD","ETH/USD","SOL/USD","XRP/USD","DOGE/USD"]}})";
 
@@ -334,6 +347,15 @@ int main(int argc, char** argv) {
             if (!data) return;
             std::string symbol = data->get<std::string>("s", "");
             std::transform(symbol.begin(), symbol.end(), symbol.begin(), ::tolower);
+            if (const auto kline = data->get_child_optional("k")) {
+                if (kline->get<std::string>("i", "") != "1h") return;
+                const double open = kline->get<double>("o", 0);
+                const double start = kline->get<double>("t", 0);
+                if (!open || !start) return;
+                for (const auto& config : ASSETS) if (symbol == config.binance)
+                    return publish_anchor(shared, config.asset, "binance", open, start);
+                return;
+            }
             const double bid = data->get<double>("b", 0);
             const double ask = data->get<double>("a", 0);
             if (!bid || !ask) return;

@@ -9,6 +9,7 @@ def market():
     return {
         "market_id": "m1", "asset": "BTC", "interval": "5m", "window": "current",
         "open_price": 100.0, "close_ts": 1045.0, "fee_rate": 0.07,
+        "settlement_source": "chainlink",
     }
 
 
@@ -94,7 +95,8 @@ def test_historical_backfill_requests_assets_concurrently(monkeypatch):
 
 
 def test_chainlink_start_anchor_uses_first_source_sample_at_or_after_start():
-    markets = {"m1": {"market_id": "m1", "asset": "BTC", "start_ts": 1000}}
+    markets = {"m1": {"market_id": "m1", "asset": "BTC", "start_ts": 1000,
+                       "settlement_source": "chainlink"}}
     venue_state = {"assets": {"BTC": {"chainlink_samples": [
         {"source_timestamp_ms": 999_900, "price": 99},
         {"source_timestamp_ms": 1_000_100, "price": 100},
@@ -110,3 +112,43 @@ def test_missed_chainlink_start_anchor_fails_closed():
     row.update(open_price=None, start_ts=900)
     rows = evaluate_market_event(event(), row, venue(), now=1000.0, opening_prices={})
     assert all(item["reason"] == "price_to_beat_capture_missed" for item in rows)
+
+
+def test_binance_hourly_anchor_uses_binance_source_samples():
+    markets = {"m1": {"market_id": "m1", "asset": "BTC", "interval": "1h",
+                       "settlement_source": "binance", "start_ts": 1000}}
+    venue_state = {"assets": {"BTC": {
+        "chainlink_samples": [{"source_timestamp_ms": 1_000_000, "price": 99}],
+        "binance_samples": [{"source_timestamp_ms": 1_000_050, "price": 101}],
+    }}}
+    anchors = ev_shadow.capture_opening_prices(markets, venue_state, {}, now_ms=1_001_000)
+    assert anchors["m1"]["price"] == 101
+    assert anchors["m1"]["source"] == "binance"
+
+
+def test_unknown_settlement_source_does_not_capture_anchor():
+    markets = {"m1": {"market_id": "m1", "asset": "BTC",
+                       "settlement_source": "unverified", "start_ts": 1000}}
+    venue_state = {"assets": {"BTC": {
+        "chainlink_samples": [{"source_timestamp_ms": 1_000_000, "price": 99}],
+        "binance_samples": [{"source_timestamp_ms": 1_000_000, "price": 101}],
+    }}}
+    assert ev_shadow.capture_opening_prices(markets, venue_state, {}, now_ms=1_001_000) == {}
+
+
+def test_hourly_binance_market_does_not_require_chainlink_settlement_feed():
+    row = market()
+    row.update(interval="1h", settlement_source="binance", open_price=100.0, close_ts=1200)
+    state = venue()
+    asset = state["assets"]["BTC"]
+    asset["sources"]["binance"] = {
+        "symbol": "BTCUSDT", "market_type": "spot", "quote_currency": "USDT",
+        "price": 101.0, "bid": 100.9, "ask": 101.1, "status": "FRESH",
+    }
+    asset["sources"]["chainlink"]["status"] = "STALE"
+    asset["settlement_reference"] = None
+    asset["reference_quorum_met"] = False
+    rows = evaluate_market_event(event(), row, state, now=1000.0)
+    assert all(item["settlement_reference"] == 101.0 for item in rows)
+    assert all(item["reference_quorum_met"] is True for item in rows)
+    assert all(item["reason"] != "settlement_reference_unverified" for item in rows)

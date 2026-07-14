@@ -81,7 +81,8 @@ def test_reference_status_file_is_rate_limited_below_tick_frequency():
     assert "force" in SOURCE
 
 
-def test_reference_engine_keeps_timestamped_chainlink_anchor_samples():
-    assert 'chainlink_samples' in SOURCE
+def test_reference_engine_keeps_timestamped_settlement_anchor_samples():
+    assert '"binance", "chainlink"' in SOURCE
+    assert '"_samples\\":["' in SOURCE
     assert "source_timestamp_ms" in SOURCE
     assert "anchor_samples" in SOURCE

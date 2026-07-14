@@ -32,3 +32,25 @@ def test_scan_keeps_previous_file_when_batch_series_request_fails(tmp_path, monk
     result = scan_updown_markets(target, "https://example.invalid", "5m", "current,next", base_ts=1783904400)
     assert result == 3
     assert json.loads(target.read_text(encoding="utf-8"))["markets"][0]["market_id"] == "verified"
+
+
+def test_hourly_scan_queries_events_by_series_window(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "poly_arb_bot.cli.PolymarketDataClient.series_by_slugs",
+        lambda *args: [{"id": "10114", "slug": "btc-up-or-down-hourly"}],
+    )
+    monkeypatch.setattr(
+        "poly_arb_bot.cli.PolymarketDataClient.events_by_series_window",
+        lambda _self, series_id, start, end: calls.append((series_id, start, end)) or [],
+    )
+    monkeypatch.setattr(
+        "poly_arb_bot.cli.PolymarketDataClient.events_by_slugs",
+        lambda *args: (_ for _ in ()).throw(AssertionError("hourly must not synthesize event slugs")),
+    )
+    result = scan_updown_markets(
+        tmp_path / "hourly.json", "https://example.invalid", "1h", "current,next",
+        base_ts=1783904400,
+    )
+    assert result == 3
+    assert calls == [("10114", 1783900800, 1783915200)]

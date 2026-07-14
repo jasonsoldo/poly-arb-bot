@@ -296,6 +296,15 @@ def build_status(data_dir, log_file, state_file):
     for item in shadow_events:
         strategy = item.get("strategy", "paired_lock")
         strategy_latest.setdefault(strategy, item)
+    strategy_recent = {}
+    for strategy in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock"):
+        recent = [item for item in shadow_events if item.get("strategy", "paired_lock") == strategy]
+        strategy_recent[strategy] = {
+            "by_asset": dict(Counter(item.get("asset", "UNKNOWN") for item in recent)),
+            "rejection_reasons": dict(Counter(
+                item.get("reason", "unknown") for item in recent if item.get("decision") == "REJECT"
+            )),
+        }
     ready_markets = int(shadow_health.get("ready_markets", 0))
     clob_readiness = {
         "discovered_markets": len(markets), "paired_markets_ready": ready_markets,
@@ -354,6 +363,7 @@ def build_status(data_dir, log_file, state_file):
         "shadow_markets": list(latest_shadow.values()),
         "strategy_counts": strategy_counts,
         "strategy_latest": strategy_latest,
+        "strategy_recent": strategy_recent,
         "reference_prices": reference_prices,
         "shadow_health": shadow_health,
         "shadow_execution": shadow_execution,

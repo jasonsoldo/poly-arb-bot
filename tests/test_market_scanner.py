@@ -120,6 +120,16 @@ def test_scanner_reads_open_price_from_rules_text():
     assert spec.symbol == "ETHUSDT"
 
 
+def test_scanner_does_not_parse_hour_count_as_open_price():
+    market = {
+        "conditionId": "0xcondition", "question": "Bitcoin Up or Down - test",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "description": "The open price for the BTC/USDT 1 hour candle will be used.",
+        "endDate": "2026-07-14T03:00:00Z",
+    }
+    assert MarketScanner().spec_from_market(market, interval="1h").open_price is None
+
+
 def test_crypto_discovery_uses_market_identity_not_description_keywords():
     assert is_crypto_market({"question": "Bitcoin all time high by September 30, 2026?", "slug": "bitcoin-ath"})
     assert not is_crypto_market({"question": "Will Seth Moulton win?", "slug": "seth-moulton", "description": "Bitcoin policy"})
@@ -164,6 +174,23 @@ def test_scanner_generates_seven_asset_four_timeframe_matrix():
     assert len(rows) == 28
     assert ("BTC", "5m", "btc-up-or-down-5m") in rows
     assert ("HYPE", "4h", "hype-up-or-down-4h") in rows
+    assert ("BTC", "1h", "btc-up-or-down-hourly") in rows
+
+
+def test_scanner_identifies_settlement_source_from_official_rules():
+    base = {
+        "conditionId": "0xcondition", "question": "Bitcoin Up or Down - test",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-14T02:00:00Z",
+    }
+    chainlink = MarketScanner().spec_from_market(dict(
+        base, rules="This market will resolve according to the Chainlink BTC/USD data stream."
+    ), interval="5m")
+    binance = MarketScanner().spec_from_market(dict(
+        base, rules="The resolution source is Binance BTC/USDT using the 1H candle open."
+    ), interval="1h")
+    assert chainlink.settlement_source == "chainlink"
+    assert binance.settlement_source == "binance"
 
 
 def test_scanner_spec_carries_canonical_asset_interval_and_series():

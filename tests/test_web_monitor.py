@@ -354,3 +354,25 @@ def test_strategy_count_cache_consumes_only_appended_events(tmp_path):
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"event_id": "2", "event_type": "shadow_eval", "strategy": "paired_lock", "decision": "ACCEPT"}) + "\n")
     assert _strategy_counts((path,))["paired_lock"] == {"evaluations": 2, "accepts": 1, "rejections": 1, "model_evaluations": 0, "latest_model_evaluated": False}
+
+
+def test_web_exposes_recent_strategy_breakdown_by_asset_and_reason(tmp_path):
+    data = tmp_path / "data"; logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (data / "live_markets.json").write_text(json.dumps({"markets": [
+        {"market_id": "btc", "asset": "BTC", "interval": "5m"},
+        {"market_id": "hype", "asset": "HYPE", "interval": "5m"},
+    ]}), encoding="utf-8")
+    (logs / "strategy-audit.jsonl").write_text("\n".join([
+        json.dumps({"ts": time.time() - 1, "event_id": "d1", "event_type": "shadow_eval",
+                    "strategy": "late_window_directional_ev", "market_id": "btc", "asset": "BTC",
+                    "timeframe": "5m", "decision": "REJECT", "reason": "too_early"}),
+        json.dumps({"ts": time.time(), "event_id": "d2", "event_type": "shadow_eval",
+                    "strategy": "late_window_directional_ev", "market_id": "hype", "asset": "HYPE",
+                    "timeframe": "5m", "decision": "REJECT", "reason": "insufficient_reference_sources"}),
+    ]) + "\n", encoding="utf-8")
+    status = build_status(data, logs / "missing.jsonl", tmp_path / "state.json")
+    assert status["strategy_latest"]["late_window_directional_ev"]["asset"] == "HYPE"
+    breakdown = status["strategy_recent"]["late_window_directional_ev"]
+    assert breakdown["by_asset"] == {"BTC": 1, "HYPE": 1}
+    assert breakdown["rejection_reasons"] == {"too_early": 1, "insufficient_reference_sources": 1}

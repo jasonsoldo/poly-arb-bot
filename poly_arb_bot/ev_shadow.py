@@ -14,7 +14,7 @@ from .ev_strategies import (
     evaluate_directional,
     evaluate_lottery,
 )
-from .reference_layer import ReferenceQuote, ReferenceState
+from .reference_layer import ReferenceQuote, aggregate_reference
 
 
 BINANCE_SYMBOLS = {
@@ -33,7 +33,10 @@ def capture_opening_prices(markets, venue, existing, now_ms=None):
         start_ms = float(market.get("start_ts") or 0) * 1000
         if not start_ms or now_ms < start_ms:
             continue
-        samples = venue.get("assets", {}).get(market.get("asset"), {}).get("chainlink_samples", [])
+        source = market.get("settlement_source")
+        if source not in {"binance", "chainlink"}:
+            continue
+        samples = venue.get("assets", {}).get(market.get("asset"), {}).get(f"{source}_samples", [])
         eligible = [row for row in samples
                     if start_ms <= float(row.get("source_timestamp_ms", 0))
                     <= start_ms + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS]
@@ -43,6 +46,7 @@ def capture_opening_prices(markets, venue, existing, now_ms=None):
                 "price": float(sample["price"]),
                 "source_timestamp_ms": float(sample["source_timestamp_ms"]),
                 "captured_at_ms": now_ms,
+                "source": source,
             }
     return anchors
 
@@ -87,7 +91,7 @@ def load_historical_models(timeout=10):
     return models
 
 
-def _reference_state(asset):
+def _reference_state(asset, settlement_source):
     sources = []
     for name, row in asset.get("sources", {}).items():
         sources.append(ReferenceQuote(
@@ -96,13 +100,9 @@ def _reference_state(asset):
             row.get("source_timestamp"), row.get("received_at"), row.get("message_age_ms"),
             row.get("status", "NOT_RECEIVED"),
         ))
-    return ReferenceState(
-        sources, asset.get("fast_price"), asset.get("consensus_price"),
-        asset.get("settlement_reference"), int(asset.get("fresh_exchange_source_count", 0)),
-        int(asset.get("fresh_usd_spot_source_count", 0)), asset.get("cross_source_divergence_bps"),
-        bool(asset.get("reference_quorum_met")), asset.get("reference_state", "REFERENCE_BLOCKED"),
-        None if asset.get("reference_quorum_met") else asset.get("reference_block_reason", "insufficient_reference_sources"),
-    )
+    selected = asset.get("sources", {}).get(settlement_source, {})
+    verified = selected.get("status") == "FRESH" and selected.get("price") is not None
+    return aggregate_reference(sources, selected.get("price"), verified)
 
 
 def _up_probability(asset, price_to_beat, seconds_to_close):
@@ -122,7 +122,8 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                           opening_prices=None):
     now = time.time() if now is None else now
     asset = venue.get("assets", {}).get(market.get("asset"), {})
-    reference = _reference_state(asset)
+    settlement_source = market.get("settlement_source")
+    reference = _reference_state(asset, settlement_source)
     seconds_to_close = max(0, int(float(market.get("close_ts", 0)) - now))
     model_asset = asset
     model_source = "live_multi_source"
@@ -137,7 +138,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
     price_to_beat_source = "gamma" if price_to_beat is not None else None
     if price_to_beat is None and anchor.get("price") is not None:
         price_to_beat = float(anchor["price"])
-        price_to_beat_source = "chainlink_rtds_start_anchor"
+        price_to_beat_source = f"{anchor.get('source')}_start_anchor"
     up_probability = _up_probability(model_asset, price_to_beat, seconds_to_close)
     probability_block_reason = None
     if up_probability is None:
@@ -155,7 +156,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         else:
             probability_block_reason = "probability_model_unavailable"
     size = max(float(event.get("size", 0)), 1e-9)
-    chainlink = asset.get("sources", {}).get("chainlink", {})
+    settlement = asset.get("sources", {}).get(settlement_source, {})
     rows = []
     for outcome, fill_key, fee_key, depth_key, probability in (
         ("Up", "up_vwap", "up_fee", "up_fill", up_probability),
@@ -174,7 +175,8 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             model_uncertainty_buffer=float(os.getenv("LOTTERY_MODEL_BUFFER", "0.01")),
             execution_risk_buffer=float(os.getenv("LOTTERY_EXECUTION_BUFFER", "0.005")),
             liquidity=float(event.get(depth_key, 0)), book_age_ms=float(event.get("source_age_ms", 1e9)),
-            settlement_source_verified=chainlink.get("status") == "FRESH",
+            settlement_source_verified=(settlement.get("status") == "FRESH" and
+                                        settlement.get("price") is not None),
             probability_block_reason=probability_block_reason,
         )
         for strategy, evaluator in (
