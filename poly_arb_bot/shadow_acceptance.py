@@ -53,3 +53,7 @@ def run(data_dir=Path("data"), log_file=Path("logs/shadow-audit.jsonl"), state_f
     report = evaluate_status(build_status(data_dir, log_file, state_file))
     print(json.dumps(report, sort_keys=True))
     return {"PASS": 0, "FAIL": 1, "INCOMPLETE": 2}[report["status"]]
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

@@ -407,3 +407,31 @@ def test_web_exposes_recent_strategy_breakdown_by_asset_and_reason(tmp_path):
     breakdown = status["strategy_recent"]["late_window_directional_ev"]
     assert breakdown["by_asset"] == {"BTC": 1, "HYPE": 1}
     assert breakdown["rejection_reasons"] == {"too_early": 1, "insufficient_reference_sources": 1}
+
+def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
+    data = tmp_path / "data"
+    state = tmp_path / "state"
+    data.mkdir()
+    state.mkdir()
+
+    (state / "strategy-shadow.json").write_text(json.dumps({
+        "positions": {
+            "active": {"lifecycle_state": "ACTIVE", "strategy": "late_window_directional_ev"},
+            "pending": {"lifecycle_state": "SETTLEMENT_PENDING", "strategy": "low_price_lottery_ev"},
+        },
+        "orphaned_positions": [
+            {"lifecycle_state": "ORPHANED", "strategy": "late_window_directional_ev"}
+        ],
+        "completed": [],
+        "portfolio_rejections": {},
+    }), encoding="utf-8")
+
+    status = build_status(data, tmp_path / "missing.jsonl", state / "orders.json")
+    lifecycle = status["shadow_lifecycle"]
+
+    assert lifecycle["open_positions"] == 2
+    assert lifecycle["active_positions"] == 1
+    assert lifecycle["settlement_pending"] == 1
+    assert lifecycle["orphaned_positions"] == 1
+    assert len(lifecycle["positions"]) == 2
+

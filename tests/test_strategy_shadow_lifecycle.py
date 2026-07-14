@@ -204,3 +204,63 @@ def test_completed_event_preserves_entry_model_evidence(tmp_path):
     assert complete["estimated_probability"] == .7
     assert complete["net_ev"] == .2
     assert complete["consensus_price"] == 101
+
+def test_opened_position_has_explicit_active_lifecycle_state(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json",
+        tmp_path / "complete.jsonl",
+    )
+
+    assert lifecycle.consume(accepted(), {"m1": market()}) is True
+
+    position = next(iter(lifecycle.data["positions"].values()))
+    assert position["lifecycle_state"] == "ACTIVE"
+
+
+def test_missing_settlement_marks_position_pending_before_orphan_timeout(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json",
+        tmp_path / "complete.jsonl",
+        orphan_after_seconds=900,
+    )
+    lifecycle.consume(accepted(), {"m1": market()})
+
+    assert lifecycle.settle(
+        {"m1": market()},
+        {"assets": {}},
+        now=1200,
+    ) == 0
+
+    position = next(iter(lifecycle.data["positions"].values()))
+    assert position["lifecycle_state"] == "SETTLEMENT_PENDING"
+    assert position["settlement_pending_since"] == 1200
+    assert lifecycle.data["orphaned_positions"] == []
+
+
+def test_unsettled_position_is_orphaned_and_releases_portfolio_capacity(tmp_path):
+    log = tmp_path / "complete.jsonl"
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json",
+        log,
+        orphan_after_seconds=900,
+    )
+    lifecycle.consume(accepted(), {"m1": market()})
+
+    assert lifecycle.settle(
+        {"m1": market()},
+        {"assets": {}},
+        now=2001,
+    ) == 0
+
+    assert lifecycle.data["positions"] == {}
+    assert len(lifecycle.data["orphaned_positions"]) == 1
+
+    orphan = lifecycle.data["orphaned_positions"][0]
+    assert orphan["lifecycle_state"] == "ORPHANED"
+    assert orphan["orphan_reason"] == "settlement_sample_unavailable"
+    assert orphan["real_orders"] == 0
+    assert orphan["real_order_submissions"] == 0
+
+    log_row = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert log_row["event_type"] == "shadow_orphaned"
+

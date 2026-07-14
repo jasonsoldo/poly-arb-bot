@@ -9,6 +9,7 @@ from .logger import JsonlLogger
 
 
 SETTLEMENT_MAX_DELAY_MS = 10_000
+DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS = 900
 
 
 @dataclass(frozen=True)
@@ -45,11 +46,19 @@ class PortfolioLimits:
 
 
 class StrategyShadowLifecycle:
-    def __init__(self, state_path, log_path, limits=None):
+    def __init__(self, state_path, log_path, limits=None, orphan_after_seconds=None):
         self.state_path = Path(state_path)
         self.logger = JsonlLogger(Path(log_path))
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.limits = limits or PortfolioLimits.from_env()
+        self.orphan_after_seconds = float(
+            orphan_after_seconds
+            if orphan_after_seconds is not None
+            else os.getenv(
+                "SHADOW_SETTLEMENT_ORPHAN_AFTER_SECONDS",
+                str(DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS),
+            )
+        )
         self.config_version = "shadow-portfolio-v1"
         self.config_hash = hashlib.sha256(
             json.dumps(asdict(self.limits), sort_keys=True, separators=(",", ":")).encode()
@@ -57,6 +66,7 @@ class StrategyShadowLifecycle:
         self.data = self._load()
         self.data.setdefault("completed_trades", [])
         self.data.setdefault("portfolio_rejections", {})
+        self.data.setdefault("orphaned_positions", [])
         self.data["portfolio_limits"] = asdict(self.limits)
         self.data["config_version"] = self.config_version
         self.data["config_hash"] = self.config_hash
@@ -195,6 +205,7 @@ class StrategyShadowLifecycle:
         self.data["portfolio_rejections"].pop(key, None)
         self.data["positions"][key] = {
             "event_id": row["event_id"], "strategy": strategy,
+            "lifecycle_state": "ACTIVE",
             "market_id": row["market_id"], "asset": row.get("asset", market.get("asset")),
             "timeframe": market.get("interval", row.get("timeframe")),
             "outcome": row.get("outcome", "Both"),
@@ -244,41 +255,103 @@ class StrategyShadowLifecycle:
 
     def settle(self, markets, venue, now):
         completed = 0
+        changed = False
+
         for key, position in list(self.data["positions"].items()):
-            if now < float(position.get("close_ts") or 0):
+            close_ts = float(position.get("close_ts") or 0)
+            if now < close_ts:
                 continue
+
             sample = self._settlement_sample(position, venue)
             start_price = position.get("price_to_beat")
             if start_price is None:
                 start_price = markets.get(position["market_id"], {}).get("open_price")
+
             paired = position["strategy"] == "paired_lock"
-            if not sample or (not paired and start_price is None):
+            settlement_ready = sample is not None and (paired or start_price is not None)
+
+            if not settlement_ready:
+                if position.get("lifecycle_state") != "SETTLEMENT_PENDING":
+                    position["lifecycle_state"] = "SETTLEMENT_PENDING"
+                    position["settlement_pending_since"] = now
+                    changed = True
+
+                if now - close_ts < self.orphan_after_seconds:
+                    continue
+
+                orphan_id = f'{position["event_id"]}:orphaned'
+                orphan = {
+                    **position,
+                    "event_id": orphan_id,
+                    "entry_event_id": position["event_id"],
+                    "event_type": "shadow_orphaned",
+                    "lifecycle_state": "ORPHANED",
+                    "orphaned_at": now,
+                    "orphan_reason": (
+                        "settlement_sample_unavailable"
+                        if sample is None
+                        else "opening_anchor_unavailable"
+                    ),
+                    "real_order_submissions": 0,
+                    "real_orders": 0,
+                }
+                self.logger.write("shadow_orphaned", orphan)
+                self.data["orphaned_positions"] = (
+                    self.data["orphaned_positions"] + [orphan]
+                )[-20000:]
+                del self.data["positions"][key]
+                changed = True
                 continue
+
             winning_outcome = None if paired else (
                 "Up" if float(sample["price"]) >= float(start_price) else "Down"
             )
             if paired:
                 payout = position["target_size"]
             else:
-                payout = position["target_size"] if position["outcome"] == winning_outcome else 0.0
+                payout = (
+                    position["target_size"]
+                    if position["outcome"] == winning_outcome
+                    else 0.0
+                )
+
             pnl = round(payout - position["entry_cost"], 12)
             complete_id = f'{position["event_id"]}:complete'
+
             self.logger.write("shadow_complete", {
-                **position, "event_id": complete_id, "entry_event_id": position["event_id"],
+                **position,
+                "event_id": complete_id,
+                "entry_event_id": position["event_id"],
+                "lifecycle_state": "COMPLETE",
                 "settlement_price": float(sample["price"]),
                 "settlement_timestamp_ms": float(sample["source_timestamp_ms"]),
-                "winning_outcome": winning_outcome, "payout": payout,
-                "realized_simulated_pnl": pnl, "real_order_submissions": 0, "real_orders": 0,
+                "winning_outcome": winning_outcome,
+                "payout": payout,
+                "realized_simulated_pnl": pnl,
+                "real_order_submissions": 0,
+                "real_orders": 0,
             })
-            self.data["completed"] = (self.data["completed"] + [complete_id])[-20000:]
-            self.data["completed_trades"] = (self.data["completed_trades"] + [{
-                "event_id": complete_id, "strategy": position["strategy"],
-                "market_id": position["market_id"], "ts": now, "pnl": pnl,
-            }])[-20000:]
+
+            self.data["completed"] = (
+                self.data["completed"] + [complete_id]
+            )[-20000:]
+            self.data["completed_trades"] = (
+                self.data["completed_trades"] + [{
+                    "event_id": complete_id,
+                    "strategy": position["strategy"],
+                    "market_id": position["market_id"],
+                    "ts": now,
+                    "pnl": pnl,
+                }]
+            )[-20000:]
+
             del self.data["positions"][key]
             completed += 1
-        if completed:
+            changed = True
+
+        if changed:
             self._save()
+
         return completed
 
 

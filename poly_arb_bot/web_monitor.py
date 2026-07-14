@@ -394,6 +394,16 @@ def build_status(data_dir, log_file, state_file):
         "shadow_execution": shadow_execution,
         "shadow_lifecycle": {
             "open_positions": len(lifecycle_state.get("positions", {})),
+            "active_positions": sum(
+                position.get("lifecycle_state", "ACTIVE") == "ACTIVE"
+                for position in lifecycle_state.get("positions", {}).values()
+            ),
+            "settlement_pending": sum(
+                position.get("lifecycle_state") == "SETTLEMENT_PENDING"
+                for position in lifecycle_state.get("positions", {}).values()
+            ),
+            "orphaned_positions": len(lifecycle_state.get("orphaned_positions", [])),
+            "positions": list(lifecycle_state.get("positions", {}).values()),
             "completed_ids": len(lifecycle_state.get("completed", [])),
             "portfolio_rejections": dict(Counter(lifecycle_state.get("portfolio_rejections", {}).values())),
             "portfolio_limits": lifecycle_state.get("portfolio_limits", {}),
