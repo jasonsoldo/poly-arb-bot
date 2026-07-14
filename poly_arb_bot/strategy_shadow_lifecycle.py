@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .ev_shadow import strategy_config
+from .jsonl_history import history_paths, open_history
 from .logger import JsonlLogger
 
 
@@ -92,29 +93,50 @@ class StrategyShadowLifecycle:
             return False
         known = {row.get("event_id"): row for row in self.data["completed_trades"]}
         changed = False
-        with self.logger.path.open(encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                event_id = row.get("event_id")
-                if row.get("event_type") != "shadow_complete" or not event_id:
-                    continue
-                if event_id in known:
-                    trade = known[event_id]
-                    if not trade.get("strategy_config_hash") and row.get("strategy_config_hash"):
-                        trade["strategy_config_hash"] = row["strategy_config_hash"]
+        for log_path in [self.logger.path]:
+            if not log_path.exists():
+                continue
+            with open_history(log_path) as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    event_id = row.get("event_id")
+                    if row.get("event_type") != "shadow_complete" or not event_id:
+                        continue
+                    if event_id in known:
+                        trade = known[event_id]
+                        if not trade.get("strategy_config_hash") and row.get("strategy_config_hash"):
+                            trade["strategy_config_hash"] = row["strategy_config_hash"]
+                            changed = True
+                        continue
+                    self.data["completed_trades"].append({
+                        "event_id": event_id, "strategy": row.get("strategy"),
+                        "market_id": row.get("market_id"), "ts": float(row.get("ts", 0)),
+                        "pnl": float(row.get("realized_simulated_pnl", 0)),
+                        "strategy_config_hash": row.get("strategy_config_hash"),
+                    })
+                    known[event_id] = self.data["completed_trades"][-1]
+                    changed = True
+        missing_hashes = {event_id for event_id, trade in known.items()
+                          if event_id and not trade.get("strategy_config_hash")}
+        for log_path in history_paths(self.logger.path)[:-1]:
+            if not missing_hashes:
+                break
+            with open_history(log_path) as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    event_id = row.get("event_id")
+                    if event_id not in missing_hashes or row.get("event_type") != "shadow_complete":
+                        continue
+                    if row.get("strategy_config_hash"):
+                        known[event_id]["strategy_config_hash"] = row["strategy_config_hash"]
+                        missing_hashes.remove(event_id)
                         changed = True
-                    continue
-                self.data["completed_trades"].append({
-                    "event_id": event_id, "strategy": row.get("strategy"),
-                    "market_id": row.get("market_id"), "ts": float(row.get("ts", 0)),
-                    "pnl": float(row.get("realized_simulated_pnl", 0)),
-                    "strategy_config_hash": row.get("strategy_config_hash"),
-                })
-                known[event_id] = self.data["completed_trades"][-1]
-                changed = True
         self.data["completed_trades"] = self.data["completed_trades"][-20000:]
         return changed
 

@@ -234,6 +234,25 @@ def test_existing_state_trade_hash_is_migrated_from_canonical_log(tmp_path):
     assert lifecycle.data["completed_trades"][0]["strategy_config_hash"] == current_hash
 
 
+def test_existing_state_trade_hash_is_migrated_from_rotated_log(tmp_path):
+    current_hash = strategy_config()[1]
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "positions": {}, "completed": ["done"], "completed_trades": [{
+            "event_id": "done", "strategy": "late_window_directional_ev",
+            "market_id": "m1", "ts": 1000, "pnl": -1,
+        }],
+    }), encoding="utf-8")
+    log = tmp_path / "complete.jsonl"
+    log.write_text("", encoding="utf-8")
+    (tmp_path / "complete.jsonl.1").write_text(json.dumps({
+        "event_id": "done", "event_type": "shadow_complete",
+        "strategy_config_hash": current_hash,
+    }), encoding="utf-8")
+    lifecycle = StrategyShadowLifecycle(state, log)
+    assert lifecycle.data["completed_trades"][0]["strategy_config_hash"] == current_hash
+
+
 def test_completed_event_preserves_entry_model_evidence(tmp_path):
     log = tmp_path / "complete.jsonl"
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)

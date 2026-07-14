@@ -1,4 +1,5 @@
 import json
+import gzip
 
 from poly_arb_bot.strategy_calibration import build_calibration, official_winners
 
@@ -63,3 +64,16 @@ def test_official_winner_requires_closed_binary_resolution():
          "outcomes": '["Up","Down"]', "outcomePrices": '["1","0"]'},
     ]
     assert official_winners(rows) == {"c1": "Down"}
+
+
+def test_calibration_reads_rotated_and_compressed_history_without_duplicates(tmp_path):
+    path = tmp_path / "execution.jsonl"
+    row = {"event_type": "shadow_complete", "event_id": "one", "ts": 1,
+           "strategy": "late_window_directional_ev", "strategy_config_hash": "new"}
+    path.write_text(json.dumps(row), encoding="utf-8")
+    (tmp_path / "execution.jsonl.1").write_text(json.dumps(row), encoding="utf-8")
+    with gzip.open(tmp_path / "execution.jsonl.2.gz", "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(row, event_id="older", ts=0)))
+    report = build_calibration(path, "new")
+    assert report["sample_count"] == 2
+    assert report["duplicate_completed_events"] == 1

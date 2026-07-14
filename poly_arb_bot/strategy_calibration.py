@@ -3,6 +3,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from .http_utils import HttpClient
+from .jsonl_history import history_paths, open_history
 from .polymarket_data import parse_jsonish
 
 
@@ -10,14 +11,17 @@ STRATEGIES = {"late_window_directional_ev", "low_price_lottery_ev"}
 
 
 def _rows(path):
-    with Path(path).open(encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if row.get("event_type") == "shadow_complete" and row.get("strategy") in STRATEGIES:
-                yield row
+    for history_path in history_paths(path):
+        if not history_path.exists():
+            continue
+        with open_history(history_path) as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("event_type") == "shadow_complete" and row.get("strategy") in STRATEGIES:
+                    yield row
 
 
 def _strategy_metrics(rows):
@@ -92,7 +96,15 @@ def fetch_official_winners(condition_ids, base_url="https://gamma-api.polymarket
 
 
 def build_calibration(path, config_hash=None, resolved_outcomes=None):
-    all_rows = list(_rows(path))
+    by_id = {}
+    duplicates = 0
+    for row in _rows(path):
+        event_id = row.get("event_id")
+        if event_id and event_id in by_id:
+            duplicates += 1
+            continue
+        by_id[event_id or f'legacy:{len(by_id)}'] = row
+    all_rows = list(by_id.values())
     if config_hash in {None, "latest"}:
         config_hash = max(all_rows, key=lambda row: float(row.get("ts", 0))).get("strategy_config_hash") if all_rows else None
     rows = [row for row in all_rows if row.get("strategy_config_hash") == config_hash]
@@ -128,6 +140,7 @@ def build_calibration(path, config_hash=None, resolved_outcomes=None):
         "complete_model_samples": len(complete_rows),
         "incomplete_model_samples": len(rows) - len(complete_rows),
         "excluded_other_config": len(all_rows) - len(rows),
+        "duplicate_completed_events": duplicates,
         "independent_close_windows": len({row.get("close_ts") for row in rows}),
         "correlated_close_outcome_groups": sum(len(group) > 1 for group in grouped.values()),
         "direction_mapping_errors": mapping_errors,
