@@ -62,9 +62,9 @@ const AssetConfig ASSETS[] = {
     {"ETH", "ethusdt", "eth/usd", "ETH-USD", "ETH/USD"},
     {"SOL", "solusdt", "sol/usd", "SOL-USD", "SOL/USD"},
     {"XRP", "xrpusdt", "xrp/usd", "XRP-USD", "XRP/USD"},
-    {"BNB", "", "", "", ""},
-    {"DOGE", "", "", "DOGE-USD", "DOGE/USD"},
-    {"HYPE", "", "", "", ""},
+    {"BNB", "bnbusdt", "bnb/usd", "", ""},
+    {"DOGE", "dogeusdt", "doge/usd", "DOGE-USD", "DOGE/USD"},
+    {"HYPE", "", "hype/usd", "", ""},
 };
 
 struct SharedState {
@@ -74,7 +74,11 @@ struct SharedState {
     unsigned long long matched_messages = 0;
     unsigned long long unmatched_messages = 0;
     double engine_latency_us = 0;
+    double last_status_write_ms = 0;
+    unsigned long long status_writes = 0;
 };
+
+constexpr double STATUS_WRITE_INTERVAL_MS = 100;
 
 std::string source_status(const SourceState& source, double timestamp) {
     if (!source.supported) return "UNSUPPORTED";
@@ -116,8 +120,11 @@ double momentum_bps(const SourceState& source, double timestamp, double horizon_
     return (source.samples.back().second / start->second - 1) * 10000;
 }
 
-void write_status_locked(SharedState& shared) {
+void write_status_locked(SharedState& shared, bool force = false) {
     const double timestamp = now_ms();
+    if (!force && timestamp - shared.last_status_write_ms < STATUS_WRITE_INTERVAL_MS) return;
+    shared.last_status_write_ms = timestamp;
+    ++shared.status_writes;
     const std::string temporary = shared.output_path + ".tmp";
     std::ofstream out(temporary, std::ios::trunc);
     out << std::setprecision(15) << "{\"updated_at_ms\":" << timestamp << ",\"assets\":{";
@@ -199,7 +206,8 @@ void write_status_locked(SharedState& shared) {
     }
     out << "},\"engine_latency_us\":" << shared.engine_latency_us
         << ",\"matched_messages\":" << shared.matched_messages
-        << ",\"unmatched_messages\":" << shared.unmatched_messages << "}\n";
+        << ",\"unmatched_messages\":" << shared.unmatched_messages
+        << ",\"status_writes\":" << shared.status_writes << "}\n";
     out.flush(); out.close();
     std::error_code error;
     std::filesystem::rename(temporary, shared.output_path, error);
@@ -230,13 +238,13 @@ void set_connected(SharedState& shared, const std::string& source, bool connecte
         auto& row = asset.second.sources.at(source);
         if (row.supported) row.connected = connected;
     }
-    write_status_locked(shared);
+    write_status_locked(shared, true);
 }
 
 template <typename Handler>
 void websocket_loop(SharedState& shared, const std::string& source, const std::string& host,
                     const std::string& path, const std::string& subscription,
-                    const std::string& linked_source, Handler handler) {
+                    bool text_ping, Handler handler) {
     for (;;) {
         try {
             asio::io_context io;
@@ -248,9 +256,8 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
             if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str())) throw std::runtime_error("SNI failed");
             ws.next_layer().handshake(asio::ssl::stream_base::client);
             ws.handshake(host, path);
-            ws.write(asio::buffer(subscription));
+            if (!subscription.empty()) ws.write(asio::buffer(subscription));
             set_connected(shared, source, true);
-            if (!linked_source.empty()) set_connected(shared, linked_source, true);
             std::cerr << "REFERENCE_CONNECTED source=" << source << "\n";
             double last_ping = now_ms();
             for (;;) {
@@ -260,14 +267,13 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
                 if (raw == "PONG") continue;
                 try { handler(raw); }
                 catch (...) { std::lock_guard<std::mutex> lock(shared.mutex); ++shared.unmatched_messages; }
-                if (!linked_source.empty() && now_ms() - last_ping >= 5000) {
+                if (text_ping && now_ms() - last_ping >= 5000) {
                     ws.write(asio::buffer(std::string("PING")));
                     last_ping = now_ms();
                 }
             }
         } catch (const std::exception& error) {
             set_connected(shared, source, false);
-            if (!linked_source.empty()) set_connected(shared, linked_source, false);
             std::cerr << "REFERENCE_ERROR source=" << source << " message=" << error.what() << " reconnect_s=2\n";
             std::this_thread::sleep_for(std::chrono::seconds(2));
         }
@@ -292,35 +298,48 @@ int main(int argc, char** argv) {
     SharedState shared;
     shared.output_path = argc > 1 ? argv[1] : "data/venue-status.json";
     initialize(shared);
-    { std::lock_guard<std::mutex> lock(shared.mutex); write_status_locked(shared); }
+    { std::lock_guard<std::mutex> lock(shared.mutex); write_status_locked(shared, true); }
 
-    const std::string rtds_sub = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices","type":"update","filters":"btcusdt,ethusdt,solusdt,xrpusdt"},{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
+    const std::string rtds_sub = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
+    const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker";
     const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","DOGE-USD"],"channels":["ticker"]})";
     const std::string kraken_sub = R"({"method":"subscribe","params":{"channel":"ticker","symbol":["BTC/USD","ETH/USD","SOL/USD","XRP/USD","DOGE/USD"]}})";
 
+    std::thread binance([&] {
+        websocket_loop(shared, "binance", "data-stream.binance.vision", binance_path, "", false, [&](const std::string& raw) {
+            const auto row = parse_json(raw);
+            const auto data = row.get_child_optional("data");
+            if (!data) return;
+            std::string symbol = data->get<std::string>("s", "");
+            std::transform(symbol.begin(), symbol.end(), symbol.begin(), ::tolower);
+            const double bid = data->get<double>("b", 0);
+            const double ask = data->get<double>("a", 0);
+            if (!bid || !ask) return;
+            for (const auto& config : ASSETS) if (symbol == config.binance)
+                return publish(shared, config.asset, "binance", (bid + ask) / 2, bid, ask, "");
+        });
+    });
     std::thread rtds([&] {
-        websocket_loop(shared, "binance", "ws-live-data.polymarket.com", "/", rtds_sub, "chainlink", [&](const std::string& raw) {
+        websocket_loop(shared, "chainlink", "ws-live-data.polymarket.com", "/", rtds_sub, true, [&](const std::string& raw) {
             const auto row = parse_json(raw);
             const std::string topic = row.get<std::string>("topic", "");
             std::string symbol = row.get<std::string>("payload.symbol", "");
             std::transform(symbol.begin(), symbol.end(), symbol.begin(), ::tolower);
             for (const auto& config : ASSETS) {
-                if (topic == "crypto_prices" && symbol == config.binance)
-                    return publish(shared, config.asset, "binance", row.get<double>("payload.value"), 0, 0, row.get<std::string>("payload.timestamp", ""));
                 if (topic == "crypto_prices_chainlink" && symbol == config.chainlink)
                     return publish(shared, config.asset, "chainlink", row.get<double>("payload.value"), 0, 0, row.get<std::string>("payload.timestamp", ""));
             }
             std::lock_guard<std::mutex> lock(shared.mutex);
             ++shared.unmatched_messages;
             if (shared.unmatched_messages <= 20) {
-                std::cerr << "REFERENCE_UNMATCHED source=rtds topic=" << topic
+                std::cerr << "REFERENCE_UNMATCHED source=chainlink topic=" << topic
                           << " type=" << row.get<std::string>("type", "")
                           << " symbol=" << symbol << " raw=" << raw.substr(0, 500) << "\n";
             }
         });
     });
     std::thread coinbase([&] {
-        websocket_loop(shared, "coinbase", "ws-feed.exchange.coinbase.com", "/", coinbase_sub, "", [&](const std::string& raw) {
+        websocket_loop(shared, "coinbase", "ws-feed.exchange.coinbase.com", "/", coinbase_sub, false, [&](const std::string& raw) {
             const auto row = parse_json(raw);
             if (row.get<std::string>("type", "") != "ticker") return;
             const std::string symbol = row.get<std::string>("product_id", "");
@@ -329,7 +348,7 @@ int main(int argc, char** argv) {
         });
     });
     std::thread kraken([&] {
-        websocket_loop(shared, "kraken", "ws.kraken.com", "/v2", kraken_sub, "", [&](const std::string& raw) {
+        websocket_loop(shared, "kraken", "ws.kraken.com", "/v2", kraken_sub, false, [&](const std::string& raw) {
             const auto row = parse_json(raw);
             if (row.get<std::string>("channel", "") != "ticker") return;
             const auto data = row.get_child_optional("data");
@@ -340,5 +359,5 @@ int main(int argc, char** argv) {
                 return publish(shared, config.asset, "kraken", tick.get<double>("last"), tick.get<double>("bid", 0), tick.get<double>("ask", 0), tick.get<std::string>("timestamp", ""));
         });
     });
-    rtds.join(); coinbase.join(); kraken.join();
+    binance.join(); rtds.join(); coinbase.join(); kraken.join();
 }

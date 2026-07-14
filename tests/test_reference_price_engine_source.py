@@ -4,8 +4,9 @@ from pathlib import Path
 SOURCE = Path("cpp/reference_price_engine/reference_price_engine.cpp").read_text(encoding="utf-8")
 
 
-def test_reference_engine_subscribes_to_official_binance_and_chainlink_topics():
-    assert '"crypto_prices"' in SOURCE
+def test_reference_engine_subscribes_to_official_binance_and_chainlink_sources():
+    assert 'data-stream.binance.vision' in SOURCE
+    assert '@bookTicker' in SOURCE
     assert '"crypto_prices_chainlink"' in SOURCE
     assert '"btcusdt"' in SOURCE
     assert 'btc/usd' in SOURCE
@@ -57,12 +58,14 @@ def test_reference_engine_emits_normalized_source_and_quorum_state():
         assert field in SOURCE
 
 
-def test_rtds_subscription_contains_only_officially_supported_crypto_symbols():
+def test_rtds_subscription_is_chainlink_only_and_binance_uses_verified_spot_symbols():
     subscription = SOURCE.split('const std::string rtds_sub =', 1)[1].split(';', 1)[0]
-    for symbol in ("btcusdt", "ethusdt", "solusdt", "xrpusdt"):
-        assert symbol in subscription
-    for unsupported in ("bnbusdt", "dogeusdt", "hypeusdt", "doge/usd"):
-        assert unsupported not in subscription
+    assert '"crypto_prices"' not in subscription
+    assert '"crypto_prices_chainlink"' in subscription
+    binance_path = SOURCE.split('const std::string binance_path =', 1)[1].split(';', 1)[0]
+    for symbol in ("btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "dogeusdt"):
+        assert f'{symbol}@bookTicker' in binance_path
+    assert "hypeusdt" not in binance_path
 
 
 def test_rtds_sends_documented_heartbeat_and_logs_unmatched_frame_shape():
@@ -70,3 +73,9 @@ def test_rtds_sends_documented_heartbeat_and_logs_unmatched_frame_shape():
     assert "REFERENCE_UNMATCHED" in SOURCE
     for field in ("topic=", "type=", "symbol="):
         assert field in SOURCE
+
+
+def test_reference_status_file_is_rate_limited_below_tick_frequency():
+    assert "STATUS_WRITE_INTERVAL_MS" in SOURCE
+    assert "last_status_write_ms" in SOURCE
+    assert "force" in SOURCE
