@@ -84,12 +84,26 @@ struct SharedState {
 };
 
 constexpr double STATUS_WRITE_INTERVAL_MS = 100;
+constexpr double DEFAULT_REFERENCE_FRESHNESS_MS = 3000;
+constexpr double COINBASE_REFERENCE_FRESHNESS_MS = 10000;
 
-std::string source_status(const SourceState& source, double timestamp) {
+double source_freshness_limit_ms(const std::string& source_name) {
+    return source_name == "coinbase"
+        ? COINBASE_REFERENCE_FRESHNESS_MS
+        : DEFAULT_REFERENCE_FRESHNESS_MS;
+}
+
+std::string source_status(
+    const std::string& source_name,
+    const SourceState& source,
+    double timestamp
+) {
     if (!source.supported) return "UNSUPPORTED";
     if (!source.connected) return source.received_at ? "DISCONNECTED" : "NOT_RECEIVED";
     if (!source.received_at) return "NOT_RECEIVED";
-    return timestamp - source.received_at <= 3000 ? "FRESH" : "STALE";
+    return timestamp - source.received_at <= source_freshness_limit_ms(source_name)
+        ? "FRESH"
+        : "STALE";
 }
 
 void write_number(std::ostream& out, double value) {
@@ -142,7 +156,7 @@ void write_status_locked(SharedState& shared, bool force = false) {
         std::map<std::string, std::vector<double>> quote_prices;
         for (const auto& item : asset.sources) {
             const auto& source = item.second;
-            if (source_status(source, timestamp) == "FRESH" && source.market_type == "spot" && source.price)
+            if (source_status(item.first, source, timestamp) == "FRESH" && source.market_type == "spot" && source.price)
                 quote_prices[source.quote_currency].push_back(source.price);
         }
         std::map<std::string, double> quote_medians;
@@ -159,7 +173,7 @@ void write_status_locked(SharedState& shared, bool force = false) {
         int model_sample_count = 0;
         for (const auto& item : asset.sources) {
             const auto& source = item.second;
-            if (source_status(source, timestamp) != "FRESH" || !source.price) continue;
+            if (source_status(item.first, source, timestamp) != "FRESH" || !source.price) continue;
             if (item.first == "chainlink") {
                 settlement_reference = source.price;
                 continue;
@@ -197,9 +211,9 @@ void write_status_locked(SharedState& shared, bool force = false) {
             if (!first_source) out << ',';
             first_source = false;
             const auto& source = item.second;
-            const std::string status = source_status(source, timestamp) == "FRESH" &&
+            const std::string status = source_status(item.first, source, timestamp) == "FRESH" &&
                                        source.market_type == "spot" && is_outlier(source)
-                                       ? "OUTLIER" : source_status(source, timestamp);
+                                       ? "OUTLIER" : source_status(item.first, source, timestamp);
             out << '\"' << item.first << "\":{\"supported\":" << (source.supported ? "true" : "false")
                 << ",\"symbol\":\"" << source.symbol
                 << "\",\"market_type\":\"" << source.market_type
@@ -216,8 +230,8 @@ void write_status_locked(SharedState& shared, bool force = false) {
         const auto& chainlink = asset.sources.at("chainlink");
         out << "},\"binance\":"; write_number(out, binance.price);
         out << ",\"chainlink\":"; write_number(out, chainlink.price);
-        out << ",\"binance_status\":\"" << source_status(binance, timestamp)
-            << "\",\"chainlink_status\":\"" << source_status(chainlink, timestamp) << "\""
+        out << ",\"binance_status\":\"" << source_status("binance", binance, timestamp)
+            << "\",\"chainlink_status\":\"" << source_status("chainlink", chainlink, timestamp) << "\""
             << ",\"binance_source_age_ms\":";
         if (binance.received_at) out << std::max(0.0, timestamp - binance.received_at); else out << -1;
         out << ",\"chainlink_source_age_ms\":";

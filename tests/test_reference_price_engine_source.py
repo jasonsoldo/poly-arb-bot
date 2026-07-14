@@ -54,7 +54,6 @@ def test_reference_engine_subscribes_to_official_bybit_and_okx_spot_tickers():
     assert 'get<double>("bid1Price"' in SOURCE
     assert 'get<double>("ask1Price"' in SOURCE
     assert 'get<double>("lastPrice"' in SOURCE
-    assert '<= 3000' in SOURCE
     assert 'ws.okx.com' in SOURCE
     assert '"8443"' in SOURCE
     assert '/ws/v5/public' in SOURCE
@@ -120,3 +119,15 @@ def test_binance_kline_stream_emits_hourly_and_four_hour_close_samples():
     assert 'get<bool>("x"' in SOURCE
     assert 'get<double>("c"' in SOURCE
     assert r'\"timeframe\"' in SOURCE
+
+def test_reference_engine_uses_source_specific_freshness_limits():
+    assert "DEFAULT_REFERENCE_FRESHNESS_MS = 3000" in SOURCE
+    assert "COINBASE_REFERENCE_FRESHNESS_MS = 10000" in SOURCE
+    assert "source_freshness_limit_ms(const std::string& source_name)" in SOURCE
+    assert 'source_name == "coinbase"' in SOURCE
+    assert "source_status(" in SOURCE
+    assert "const std::string& source_name" in SOURCE
+    assert "source_status(item.first, source, timestamp)" in SOURCE
+    assert 'source_status("binance", binance, timestamp)' in SOURCE
+    assert 'source_status("chainlink", chainlink, timestamp)' in SOURCE
+
