@@ -89,7 +89,8 @@ def _jsonl(path, limit=100):
 def _strategy_counts(paths):
     names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
     total = {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
-                    "model_evaluations": 0, "latest_model_evaluated": False} for name in names}
+                    "model_evaluations": 0, "latest_model_evaluated": False,
+                    "unique_opportunities": 0, "active_opportunities": 0} for name in names}
     with _STRATEGY_COUNT_LOCK:
         for path in paths:
             key = str(path.resolve())
@@ -97,6 +98,7 @@ def _strategy_counts(paths):
                 "offset": 0, "size": 0, "seen": set(),
                 "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
                                   "model_evaluations": 0, "latest_model_evaluated": False} for name in names},
+                "active": {name: set() for name in names},
             })
             try:
                 size = path.stat().st_size
@@ -107,6 +109,7 @@ def _strategy_counts(paths):
                     "offset": 0, "size": 0, "seen": set(),
                     "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
                                       "model_evaluations": 0, "latest_model_evaluated": False} for name in names},
+                    "active": {name: set() for name in names},
                 })
             if size > state["offset"]:
                 try:
@@ -130,6 +133,13 @@ def _strategy_counts(paths):
                             accepted = row.get("decision") == "ACCEPT"
                             bucket["accepts"] += int(accepted)
                             bucket["rejections"] += int(not accepted)
+                            opportunity_key = (row.get("market_id"), row.get("outcome", "paired"))
+                            if accepted:
+                                if opportunity_key not in state["active"][strategy]:
+                                    bucket["unique_opportunities"] = bucket.get("unique_opportunities", 0) + 1
+                                state["active"][strategy].add(opportunity_key)
+                            else:
+                                state["active"][strategy].discard(opportunity_key)
                             bucket["model_evaluations"] += int(
                                 strategy != "paired_lock" and row.get("estimated_probability") is not None
                             )
@@ -142,6 +152,8 @@ def _strategy_counts(paths):
             for name in names:
                 for field in ("evaluations", "accepts", "rejections", "model_evaluations"):
                     total[name][field] += state["counts"][name][field]
+                total[name]["unique_opportunities"] += state["counts"][name].get("unique_opportunities", 0)
+                total[name]["active_opportunities"] += len(state["active"][name])
                 total[name]["latest_model_evaluated"] = state["counts"][name]["latest_model_evaluated"]
     return total
 
@@ -292,6 +304,8 @@ def build_status(data_dir, log_file, state_file):
     strategy_counts = _strategy_counts((selected_log, strategy_log))
     strategy_evaluations = sum(row["evaluations"] for row in strategy_counts.values())
     strategy_accepts = sum(row["accepts"] for row in strategy_counts.values())
+    unique_opportunities = sum(row["unique_opportunities"] for row in strategy_counts.values())
+    active_opportunities = sum(row["active_opportunities"] for row in strategy_counts.values())
     strategy_latest = {}
     for item in shadow_events:
         strategy = item.get("strategy", "paired_lock")
@@ -357,7 +371,9 @@ def build_status(data_dir, log_file, state_file):
             "shadow_attempts": sum(item.get("status") == "dry_run" for item in decision_records),
             "shadow_evaluations": strategy_evaluations,
             "fok_passed": report["fok_passed"],
-            "shadow_opportunities": max(strategy_accepts, report["accepts"]),
+            "shadow_accepts": max(strategy_accepts, report["accepts"]),
+            "unique_opportunities": unique_opportunities,
+            "active_opportunities": active_opportunities,
             "simulated_complete": report["performance"]["completed"],
         },
         "shadow_markets": list(latest_shadow.values()),

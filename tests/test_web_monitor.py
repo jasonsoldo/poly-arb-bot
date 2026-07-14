@@ -63,7 +63,9 @@ def test_web_status_summarizes_cpp_shadow_audit(tmp_path):
     status = build_status(tmp_path, log, tmp_path / "state.json")
     assert status["counts"]["shadow_evaluations"] == 1
     assert status["counts"]["fok_passed"] == 1
-    assert status["counts"]["shadow_opportunities"] == 1
+    assert status["counts"]["shadow_accepts"] == 1
+    assert status["counts"]["unique_opportunities"] == 0
+    assert status["counts"]["active_opportunities"] == 0
     assert status["shadow_markets"][0]["event_type"] == "shadow_opportunity"
 
 
@@ -314,9 +316,9 @@ def test_web_status_keeps_three_strategy_statistics_separate(tmp_path):
 
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
 
-    assert status["strategy_counts"]["paired_lock"] == {"evaluations": 1, "accepts": 0, "rejections": 1, "model_evaluations": 0, "latest_model_evaluated": False}
-    assert status["strategy_counts"]["late_window_directional_ev"] == {"evaluations": 1, "accepts": 1, "rejections": 0, "model_evaluations": 1, "latest_model_evaluated": True}
-    assert status["strategy_counts"]["low_price_lottery_ev"] == {"evaluations": 1, "accepts": 0, "rejections": 1, "model_evaluations": 1, "latest_model_evaluated": True}
+    assert status["strategy_counts"]["paired_lock"] == {"evaluations": 1, "accepts": 0, "rejections": 1, "model_evaluations": 0, "latest_model_evaluated": False, "unique_opportunities": 0, "active_opportunities": 0}
+    assert status["strategy_counts"]["late_window_directional_ev"] == {"evaluations": 1, "accepts": 1, "rejections": 0, "model_evaluations": 1, "latest_model_evaluated": True, "unique_opportunities": 1, "active_opportunities": 1}
+    assert status["strategy_counts"]["low_price_lottery_ev"] == {"evaluations": 1, "accepts": 0, "rejections": 1, "model_evaluations": 1, "latest_model_evaluated": True, "unique_opportunities": 0, "active_opportunities": 0}
     assert status["counts"]["shadow_evaluations"] == 3
     assert status["current_pair"]["reason"] == "net_cost_above_threshold"
 
@@ -353,7 +355,22 @@ def test_strategy_count_cache_consumes_only_appended_events(tmp_path):
     assert _strategy_counts((path,))["paired_lock"]["evaluations"] == 1
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"event_id": "2", "event_type": "shadow_eval", "strategy": "paired_lock", "decision": "ACCEPT"}) + "\n")
-    assert _strategy_counts((path,))["paired_lock"] == {"evaluations": 2, "accepts": 1, "rejections": 1, "model_evaluations": 0, "latest_model_evaluated": False}
+    assert _strategy_counts((path,))["paired_lock"] == {"evaluations": 2, "accepts": 1, "rejections": 1, "model_evaluations": 0, "latest_model_evaluated": False, "unique_opportunities": 1, "active_opportunities": 1}
+
+
+def test_continuous_accepts_count_as_one_unique_opportunity(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    rows = [
+        {"event_id": "1", "event_type": "shadow_eval", "strategy": "paired_lock", "market_id": "m1", "decision": "ACCEPT"},
+        {"event_id": "2", "event_type": "shadow_eval", "strategy": "paired_lock", "market_id": "m1", "decision": "ACCEPT"},
+        {"event_id": "3", "event_type": "shadow_eval", "strategy": "paired_lock", "market_id": "m1", "decision": "REJECT"},
+        {"event_id": "4", "event_type": "shadow_eval", "strategy": "paired_lock", "market_id": "m1", "decision": "ACCEPT"},
+    ]
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
+    counts = _strategy_counts((path,))["paired_lock"]
+    assert counts["accepts"] == 3
+    assert counts["unique_opportunities"] == 2
+    assert counts["active_opportunities"] == 1
 
 
 def test_web_exposes_recent_strategy_breakdown_by_asset_and_reason(tmp_path):
