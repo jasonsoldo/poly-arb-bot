@@ -237,3 +237,42 @@ def test_hourly_binance_market_does_not_require_chainlink_settlement_feed():
     assert all(item["settlement_reference"] == 101.0 for item in rows)
     assert all(item["reference_quorum_met"] is True for item in rows)
     assert all(item["reason"] != "settlement_reference_unverified" for item in rows)
+
+def test_ev_shadow_normalizes_inconsistent_start_before_anchor_lookup():
+    markets = {"m1": {"market_id": "m1", "condition_id": "c1", "asset": "BTC",
+                       "interval": "1h", "start_ts": 1100, "close_ts": 4600,
+                       "settlement_source": "binance"}}
+    venue_state = {"assets": {"BTC": {
+        "sources": {"binance": {"supported": True, "status": "FRESH"}},
+        "binance_samples": [{"source_timestamp_ms": 1_000_050, "price": 101, "timeframe": "1h"}],
+    }}}
+    anchors = ev_shadow.capture_opening_prices(markets, venue_state, {}, now_ms=2_000_000)
+    assert anchors["m1"]["start_ts"] == 1000
+    assert anchors["m1"]["price"] == 101
+
+
+def test_model_uses_recomputed_strategy_fresh_consensus():
+    state = venue()
+    state["assets"]["BTC"]["consensus_price"] = None
+    rows = evaluate_market_event(event(), market(), state, now=1000.0)
+    assert all(row["estimated_probability"] is not None for row in rows)
+
+
+def test_explicit_book_age_overrides_legacy_source_timestamp_age():
+    current = event()
+    current["source_age_ms"] = 10_000
+    current["book_age_ms"] = 20
+    rows = evaluate_market_event(current, market(), venue(), now=1000.0)
+    assert all("clob_book_stale" not in row["blocking_reasons"] for row in rows)
+
+
+def test_unsupported_settlement_source_drops_persisted_anchor():
+    markets = {"m1": {"market_id": "m1", "condition_id": "c1", "asset": "DOGE",
+                       "interval": "5m", "start_ts": 1000, "settlement_source": "chainlink"}}
+    existing = {"m1": {"market_id": "m1", "condition_id": "c1", "asset": "DOGE",
+                         "interval": "5m", "start_ts": 1000, "settlement_source": "chainlink",
+                         "price": 0.1, "source": "chainlink", "source_timestamp_ms": 1_000_000}}
+    venue_state = {"assets": {"DOGE": {"sources": {
+        "chainlink": {"supported": False, "status": "UNSUPPORTED"}
+    }}}}
+    assert ev_shadow.capture_opening_prices(markets, venue_state, existing, now_ms=1_001_000) == {}

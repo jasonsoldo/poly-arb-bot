@@ -50,14 +50,13 @@ def strategy_config():
 
 
 def _market_start_ts(market):
-    start_ts = float(market.get("start_ts") or 0)
-    if start_ts > 0:
-        return start_ts
+    explicit_start = float(market.get("start_ts") or 0)
     close_ts = float(market.get("close_ts") or 0)
     duration = INTERVAL_SECONDS.get(market.get("interval"))
-    if close_ts > 0 and duration:
-        return close_ts - duration
-    return 0.0
+    derived_start = close_ts - duration if close_ts > 0 and duration else 0.0
+    if derived_start > 0 and (explicit_start <= 0 or abs(explicit_start - derived_start) > 5):
+        return derived_start
+    return explicit_start if explicit_start > 0 else derived_start
 
 
 def _anchor_identity(market, start_ts=None):
@@ -113,8 +112,12 @@ def capture_opening_prices(markets, venue, existing, now_ms=None):
                 "gamma",
             )
             continue
+        source = market.get("settlement_source")
+        asset_venue = venue.get("assets", {}).get(market.get("asset"), {})
+        source_state = asset_venue.get("sources", {}).get(source, {})
+        source_supported = (not source_state) or (source_state.get("supported", True) and source_state.get("status") != "UNSUPPORTED")
         previous = existing.get(market_id)
-        if _anchor_matches_market(previous, market):
+        if source_supported and _anchor_matches_market(previous, market):
             upgraded = _anchor_identity(market)
             upgraded.update(previous)
             upgraded.setdefault("capture_mode", "legacy_persisted")
@@ -122,15 +125,17 @@ def capture_opening_prices(markets, venue, existing, now_ms=None):
             continue
         if not start_ms or now_ms < start_ms:
             continue
-        source = market.get("settlement_source")
-        if source not in {"binance", "chainlink"}:
+        if source not in {"binance", "chainlink"} or not source_supported:
             continue
-        samples = venue.get("assets", {}).get(market.get("asset"), {}).get(f"{source}_samples", [])
+        samples = list(asset_venue.get(f"{source}_samples", []))
+        samples.extend(asset_venue.get(f"{source}_settlement_samples", []))
+        interval = market.get("interval")
         eligible = [
             row for row in samples
             if start_ms <= float(row.get("source_timestamp_ms", 0))
             <= start_ms + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS
             and row.get("price") is not None
+            and (not row.get("timeframe") or row.get("timeframe") == interval)
         ]
         if eligible:
             sample = min(eligible, key=lambda row: float(row["source_timestamp_ms"]))
@@ -245,6 +250,12 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         if historical:
             model_asset = dict(asset, **historical)
             model_source = "binance_historical_1m"
+    model_asset = dict(
+        model_asset,
+        consensus_price=reference.consensus_price,
+        fast_price=reference.fast_price,
+        settlement_reference=reference.settlement_reference,
+    )
     raw_anchor = (opening_prices or {}).get(market.get("market_id"), {})
     anchor = raw_anchor if _anchor_matches_market(raw_anchor, market) else {}
     price_to_beat = market.get("open_price")
@@ -277,6 +288,8 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                     if now * 1000 > start_ts * 1000 + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS
                     else "price_to_beat_pending"
                 )
+        elif reference.consensus_price is None:
+            probability_block_reason = "consensus_price_unavailable"
         elif not model_asset.get("volatility_per_sqrt_second"):
             probability_block_reason = "volatility_unavailable"
         elif int(model_asset.get("model_sample_count", 0)) < 20:
@@ -318,7 +331,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             model_uncertainty_buffer=float(os.getenv("LOTTERY_MODEL_BUFFER", "0.01")),
             execution_risk_buffer=float(os.getenv("LOTTERY_EXECUTION_BUFFER", "0.005")),
             liquidity=float(event.get(depth_key, event.get("up_fill" if outcome == "Up" else "down_fill", 0))),
-            book_age_ms=float(event.get("source_age_ms", 1e9)),
+            book_age_ms=float(event.get("book_age_ms", event.get("source_age_ms", 1e9))),
             reference_age_ms=reference_age_ms,
             clock_skew_ms=asset.get("clock_skew_ms"),
             minimum_liquidity=float(os.getenv("STRATEGY_MIN_LIQUIDITY", "20")),

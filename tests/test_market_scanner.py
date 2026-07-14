@@ -210,3 +210,13 @@ def test_current_series_events_supports_two_four_hour_windows():
         {"id": "next", "endDate": "2026-07-12T20:00:00Z", "active": True, "closed": False},
     ]
     assert [x["id"] for x in current_series_events(events, now, limit=2, horizon_seconds=28800)] == ["current", "next"]
+
+def test_scanner_normalizes_inconsistent_event_start_from_close_and_interval():
+    event = {"startTime": "2026-07-14T01:00:00Z"}
+    market = {
+        "conditionId": "0xcondition", "question": "XRP Up or Down - test",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-14T04:00:00Z",
+    }
+    spec = MarketScanner().spec_from_market(market, event, interval="4h")
+    assert spec.start_ts == parse_timestamp_seconds("2026-07-14T00:00:00Z")

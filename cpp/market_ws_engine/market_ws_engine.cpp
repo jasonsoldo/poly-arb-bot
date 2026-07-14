@@ -130,7 +130,7 @@ public:
                     double min_profit, double leg_interval_us, double execution_half_life_us,
                     double orphan_loss_per_share, double min_expected_value, const std::string& audit_path,
                     const std::string& markets_path, unsigned long long document_version, const std::string& health_path)
-        : io_(io), ssl_(ssl), resolver_(io), ws_(io, ssl), timer_(io), reload_timer_(io), markets_(std::move(markets)), books_(std::move(books)),
+        : io_(io), ssl_(ssl), resolver_(io), ws_(io, ssl), timer_(io), reload_timer_(io), evaluation_timer_(io), markets_(std::move(markets)), books_(std::move(books)),
           size_(size), fallback_fee_(fee), buffer_per_share_(buffer_per_share), min_profit_(min_profit),
           leg_interval_us_(leg_interval_us), execution_half_life_us_(execution_half_life_us),
           orphan_loss_per_share_(orphan_loss_per_share), min_expected_value_(min_expected_value),
@@ -175,6 +175,7 @@ private:
         }
         schedule_ping();
         schedule_reload();
+        schedule_evaluation();
         do_read();
         std::cout << "connected tokens=" << assets.size() << "\n" << std::flush;
         write_health(true);
@@ -257,11 +258,16 @@ private:
                 continue;
             }
             const double timestamp = now_seconds();
-            const double up_age_ms = (timestamp - up_book.updated_at) * 1000, down_age_ms = (timestamp - down_book.updated_at) * 1000;
-            const bool feed_fresh = timestamp - last_activity_ <= 30;
-            const bool books_synced = feed_fresh;
+            const double up_age_ms = std::max(0.0, (timestamp - up_book.updated_at) * 1000);
+            const double down_age_ms = std::max(0.0, (timestamp - down_book.updated_at) * 1000);
+            const double book_state_age_ms = std::max(up_age_ms, down_age_ms);
+            const double clob_feed_age_ms = std::max(0.0, (timestamp - last_activity_) * 1000);
+            const double effective_book_age_ms = std::min(book_state_age_ms, clob_feed_age_ms);
+            const bool books_synced = effective_book_age_ms <= 750;
             const double seconds_to_close = item.second.close_ts - timestamp;
-            const double source_age_ms = std::max(std::abs(timestamp * 1000 - up_book.source_timestamp_ms), std::abs(timestamp * 1000 - down_book.source_timestamp_ms));
+            const double source_timestamp_age_ms = std::max(
+                std::abs(timestamp * 1000 - up_book.source_timestamp_ms),
+                std::abs(timestamp * 1000 - down_book.source_timestamp_ms));
             auto up = buy_vwap(up_book, size_), down = buy_vwap(down_book, size_);
             const double up_best_ask = best_ask(up_book), down_best_ask = best_ask(down_book);
             const bool fok = up.first >= size_ && down.first >= size_;
@@ -278,7 +284,7 @@ private:
             const double expected_execution_value = both_fill_probability * profit - leg_1_fill_probability * (1 - leg_2_fill_probability) * orphan_leg_loss;
             const bool good = fok && books_synced && seconds_to_close >= 20 && seconds_to_close <= 7200
                               && profit >= min_profit_ && expected_execution_value >= min_expected_value_;
-            const std::string reason = !books_synced ? "books_not_synced" : seconds_to_close < 20 ? "closing_window" : seconds_to_close > 7200 ? "too_early" : up.first < size_ ? "up_depth" : down.first < size_ ? "down_depth" : profit < min_profit_ ? "net_cost_above_threshold" : expected_execution_value < min_expected_value_ ? "execution_value_below_threshold" : "opportunity";
+            const std::string reason = !books_synced ? "clob_book_stale" : seconds_to_close < 20 ? "closing_window" : seconds_to_close > 7200 ? "too_early" : up.first < size_ ? "up_depth" : down.first < size_ ? "down_depth" : profit < min_profit_ ? "net_cost_above_threshold" : expected_execution_value < min_expected_value_ ? "execution_value_below_threshold" : "opportunity";
             if (good && item.second.active_since == 0) item.second.active_since = timestamp;
             if (!good) item.second.active_since = 0;
             if (reason != item.second.last_reason || timestamp - item.second.last_audit >= 5) {
@@ -292,8 +298,12 @@ private:
                                    << "\",\"reason\":\"" << reason << "\",\"fok\":" << (fok ? "true" : "false")
                                    << ",\"seconds_to_close\":" << seconds_to_close << ",\"size\":" << size_
                                    << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
-                                   << ",\"clock_skew_ms\":" << source_age_ms
-                                   << ",\"clock_skew_basis\":\"clob_source_delta_upper_bound\",\"source_age_ms\":" << source_age_ms
+                                   << ",\"clock_skew_ms\":" << source_timestamp_age_ms
+                                   << ",\"clock_skew_basis\":\"clob_source_timestamp_age_diagnostic\",\"source_age_ms\":" << source_timestamp_age_ms
+                                   << ",\"source_timestamp_age_ms\":" << source_timestamp_age_ms
+                                   << ",\"book_age_ms\":" << effective_book_age_ms
+                                   << ",\"book_age_basis\":\"min(book_state_age_ms,clob_feed_age_ms)\""
+                                   << ",\"book_state_age_ms\":" << book_state_age_ms << ",\"clob_feed_age_ms\":" << clob_feed_age_ms
                                    << ",\"up_book_age_ms\":" << up_age_ms << ",\"down_book_age_ms\":" << down_age_ms
                                    << ",\"up_fill\":" << up.first << ",\"down_fill\":" << down.first
                                    << ",\"up_available_depth\":" << available_ask_depth(up_book)
@@ -376,6 +386,15 @@ private:
         });
     }
 
+    void schedule_evaluation() {
+        evaluation_timer_.expires_after(std::chrono::milliseconds(250));
+        evaluation_timer_.async_wait([self = shared_from_this()](beast::error_code ec) {
+            if (ec || self->stopped_) return;
+            self->evaluate();
+            self->schedule_evaluation();
+        });
+    }
+
     void resync_token(const std::string& token, const std::string& reason) {
         auto found = books_.find(token);
         if (found == books_.end()) return;
@@ -444,13 +463,14 @@ private:
     static std::string subscription(const std::vector<std::string>& assets, const std::string& operation) {
         std::string message = "{\"assets_ids\":[";
         for (size_t i = 0; i < assets.size(); ++i) { if (i) message += ','; message += "\"" + assets[i] + "\""; }
-        message += operation.empty() ? "],\"type\":\"market\",\"custom_feature_enabled\":true}" : "],\"operation\":\"subscribe\"}";
+        if (operation.empty()) message += "],\"type\":\"market\",\"custom_feature_enabled\":true}";
+        else message += "],\"operation\":\"" + operation + "\"}";
         return message;
     }
 
     void fail(const char* stage, beast::error_code ec) {
         if (stopped_) return;
-        stopped_ = true; timer_.cancel(); reload_timer_.cancel();
+        stopped_ = true; timer_.cancel(); reload_timer_.cancel(); evaluation_timer_.cancel();
         write_health(false);
         std::cerr << "WS_ERROR stage=" << stage << " code=" << ec.value() << " message=" << ec.message() << "\n";
     }
@@ -463,6 +483,7 @@ private:
     beast::flat_buffer buffer_;
     asio::steady_timer timer_;
     asio::steady_timer reload_timer_;
+    asio::steady_timer evaluation_timer_;
     std::deque<std::string> writes_;
     std::map<std::string, Market> markets_;
     std::map<std::string, Book> books_;

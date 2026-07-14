@@ -98,6 +98,11 @@ class MarketScanner:
         close_ts = parse_timestamp_seconds(first_present(market, ("endDate", "endDateIso", "end_date", "closeTime")))
         if not condition_id or close_ts is None:
             return None
+        duration = INTERVAL_SECONDS.get(interval)
+        if duration:
+            expected_start_ts = close_ts - duration
+            if start_ts is None or abs(float(start_ts) - expected_start_ts) > 5:
+                start_ts = expected_start_ts
 
         return LiveMarketSpec(
             market_id=condition_id,

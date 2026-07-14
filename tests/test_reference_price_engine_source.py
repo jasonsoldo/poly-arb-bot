@@ -50,15 +50,17 @@ def test_reference_engine_subscribes_to_coinbase_and_kraken_spot_tickers():
 def test_reference_engine_subscribes_to_official_bybit_and_okx_spot_tickers():
     assert 'stream.bybit.com' in SOURCE
     assert '/v5/public/spot' in SOURCE
-    assert '"orderbook.1.BTCUSDT"' in SOURCE
-    assert 'get_child_optional("b")' in SOURCE and 'get_child_optional("a")' in SOURCE
+    assert '"tickers.BTCUSDT"' in SOURCE
+    assert 'get<double>("bid1Price"' in SOURCE
+    assert 'get<double>("ask1Price"' in SOURCE
     assert 'ws.okx.com' in SOURCE
     assert '"8443"' in SOURCE
     assert '/ws/v5/public' in SOURCE
     assert '"instId":"BTC-USDT"' in SOURCE
     assert '"bidPx"' in SOURCE and '"askPx"' in SOURCE
-    assert '"HYPE", "", "hype/usd", "", "", "", ""' in SOURCE
-
+    assert '"BNB", "bnbusdt", "", "", "", "BNBUSDT", "BNB-USDT"' in SOURCE
+    assert '"DOGE", "dogeusdt", "", "DOGE-USD", "DOGE/USD", "DOGEUSDT", "DOGE-USDT"' in SOURCE
+    assert '"HYPE", "", "", "", "", "", ""' in SOURCE
 
 def test_reference_engine_emits_normalized_source_and_quorum_state():
     for field in (

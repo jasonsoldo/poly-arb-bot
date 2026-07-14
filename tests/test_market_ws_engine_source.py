@@ -20,7 +20,9 @@ def test_ws_engine_uses_async_read_and_serialized_heartbeat_writes():
 def test_ws_engine_keeps_initial_and_dynamic_subscriptions_distinct():
     assert 'operation.empty()' in SOURCE
     assert '\\"type\\":\\"market\\"' in SOURCE
-    assert '\\"operation\\":\\"subscribe\\"' in SOURCE
+    assert 'else message += "],\\"operation\\":\\"" + operation + "\\"}";' in SOURCE
+    assert 'subscription(added, "subscribe")' in SOURCE
+    assert 'subscription(removed, "unsubscribe")' in SOURCE
 
 
 def test_ws_engine_reconnects_and_audits_rejected_shadow_evaluations():
@@ -46,7 +48,7 @@ def test_ws_engine_writes_structured_shadow_audit():
 
 def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
     assert "ws_snapshot" in SOURCE
-    assert "books_not_synced" in SOURCE
+    assert "clob_book_stale" in SOURCE
     assert "buffer_per_share_" in SOURCE
     assert "min_profit_" in SOURCE
     assert '\\"strategy\\":\\"paired_lock\\"' in SOURCE
@@ -75,13 +77,17 @@ def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
     assert "std::setprecision(15)" in SOURCE
 
 
-def test_static_books_stay_usable_while_websocket_feed_is_live():
-    assert "feed_fresh = timestamp - last_activity_ <= 30" in SOURCE
-    assert "books_synced = feed_fresh" in SOURCE
-    assert "up_age_ms <= 2000" not in SOURCE
-    assert '\\\"up_book_age_ms\\\":' in SOURCE
-    assert '\\\"down_book_age_ms\\\":' in SOURCE
-
+def test_static_books_use_feed_continuity_without_hiding_disconnects():
+    assert "book_state_age_ms" in SOURCE
+    assert "clob_feed_age_ms" in SOURCE
+    assert "effective_book_age_ms = std::min(book_state_age_ms, clob_feed_age_ms)" in SOURCE
+    assert "books_synced = effective_book_age_ms <= 750" in SOURCE
+    assert '\\"book_age_ms\\":' in SOURCE
+    assert '\\"book_age_basis\\":\\"min(book_state_age_ms,clob_feed_age_ms)\\"' in SOURCE
+    assert '\\"up_book_age_ms\\":' in SOURCE
+    assert '\\"down_book_age_ms\\":' in SOURCE
+    assert "schedule_evaluation" in SOURCE
+    assert "std::chrono::milliseconds(250)" in SOURCE
 
 def test_audit_stream_preserves_unix_timestamp_precision():
     assert "audit_ << std::setprecision(15);" in SOURCE
@@ -92,7 +98,8 @@ def test_directional_inputs_use_real_clob_best_ask_slippage_and_imbalance():
                   "down_slippage_per_share", "up_book_imbalance", "down_book_imbalance",
                   "up_available_depth", "down_available_depth"):
         assert field in SOURCE
-    assert "clob_source_delta_upper_bound" in SOURCE
+    assert "clob_source_timestamp_age_diagnostic" in SOURCE
+    assert "source_timestamp_age_ms" in SOURCE
 
 
 def test_health_explains_paired_market_readiness_gap():

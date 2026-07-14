@@ -67,9 +67,9 @@ const AssetConfig ASSETS[] = {
     {"ETH", "ethusdt", "eth/usd", "ETH-USD", "ETH/USD", "ETHUSDT", "ETH-USDT"},
     {"SOL", "solusdt", "sol/usd", "SOL-USD", "SOL/USD", "SOLUSDT", "SOL-USDT"},
     {"XRP", "xrpusdt", "xrp/usd", "XRP-USD", "XRP/USD", "XRPUSDT", "XRP-USDT"},
-    {"BNB", "bnbusdt", "bnb/usd", "", "", "BNBUSDT", "BNB-USDT"},
-    {"DOGE", "dogeusdt", "doge/usd", "DOGE-USD", "DOGE/USD", "DOGEUSDT", "DOGE-USDT"},
-    {"HYPE", "", "hype/usd", "", "", "", ""},
+    {"BNB", "bnbusdt", "", "", "", "BNBUSDT", "BNB-USDT"},
+    {"DOGE", "dogeusdt", "", "DOGE-USD", "DOGE/USD", "DOGEUSDT", "DOGE-USDT"},
+    {"HYPE", "", "", "", "", "", ""},
 };
 
 struct SharedState {
@@ -397,7 +397,7 @@ int main(int argc, char** argv) {
     const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker/btcusdt@kline_1h/ethusdt@kline_1h/solusdt@kline_1h/xrpusdt@kline_1h/bnbusdt@kline_1h/dogeusdt@kline_1h/btcusdt@kline_4h/ethusdt@kline_4h/solusdt@kline_4h/xrpusdt@kline_4h/bnbusdt@kline_4h/dogeusdt@kline_4h";
     const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","DOGE-USD"],"channels":["ticker"]})";
     const std::string kraken_sub = R"({"method":"subscribe","params":{"channel":"ticker","symbol":["BTC/USD","ETH/USD","SOL/USD","XRP/USD","DOGE/USD"]}})";
-    const std::string bybit_sub = R"({"op":"subscribe","args":["orderbook.1.BTCUSDT","orderbook.1.ETHUSDT","orderbook.1.SOLUSDT","orderbook.1.XRPUSDT","orderbook.1.BNBUSDT","orderbook.1.DOGEUSDT"]})";
+    const std::string bybit_sub = R"({"op":"subscribe","args":["tickers.BTCUSDT","tickers.ETHUSDT","tickers.SOLUSDT","tickers.XRPUSDT","tickers.BNBUSDT","tickers.DOGEUSDT"]})";
     const std::string okx_sub = R"({"op":"subscribe","args":[{"channel":"tickers","instId":"BTC-USDT"},{"channel":"tickers","instId":"ETH-USDT"},{"channel":"tickers","instId":"SOL-USDT"},{"channel":"tickers","instId":"XRP-USDT"},{"channel":"tickers","instId":"BNB-USDT"},{"channel":"tickers","instId":"DOGE-USDT"}]})";
 
     std::thread binance([&] {
@@ -474,17 +474,12 @@ int main(int argc, char** argv) {
     std::thread bybit([&] {
         websocket_loop(shared, "bybit", "stream.bybit.com", "443", "/v5/public/spot", bybit_sub, false, [&](const std::string& raw) {
             const auto row = parse_json(raw);
-            if (row.get<std::string>("type", "") != "snapshot") return;
+            if (row.get<std::string>("topic", "").rfind("tickers.", 0) != 0) return;
             const auto data = row.get_child_optional("data");
             if (!data) return;
-            const std::string symbol = data->get<std::string>("s", "");
-            const auto bids = data->get_child_optional("b"), asks = data->get_child_optional("a");
-            if (!bids || !asks || bids->empty() || asks->empty()) return;
-            const auto& bid_level = bids->front().second;
-            const auto& ask_level = asks->front().second;
-            if (bid_level.empty() || ask_level.empty()) return;
-            const double bid = bid_level.front().second.get_value<double>();
-            const double ask = ask_level.front().second.get_value<double>();
+            const std::string symbol = data->get<std::string>("symbol", "");
+            const double bid = data->get<double>("bid1Price", 0);
+            const double ask = data->get<double>("ask1Price", 0);
             if (!bid || !ask) return;
             for (const auto& config : ASSETS) if (symbol == config.bybit)
                 return publish(shared, config.asset, "bybit", (bid + ask) / 2, bid, ask, row.get<std::string>("ts", ""));

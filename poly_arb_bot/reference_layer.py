@@ -64,8 +64,10 @@ def aggregate_reference(quotes, settlement_reference, settlement_verified,
     source_count = len({row.source for row in valid})
     usd_count = len({row.source for row in valid_usd})
     reason = None
-    if source_count < min_sources or usd_count < 1:
+    if source_count < min_sources:
         reason = "insufficient_reference_sources"
+    elif usd_count < 1:
+        reason = "required_usd_spot_source_unavailable"
     elif not settlement_verified or settlement_reference is None:
         reason = "settlement_reference_unavailable"
     elif divergence is not None and divergence > max_divergence_bps:

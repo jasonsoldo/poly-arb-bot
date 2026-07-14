@@ -33,3 +33,10 @@ def test_missing_price_is_not_stale():
     state = aggregate_reference([row], settlement_reference=None, settlement_verified=False)
     assert state.sources[0].status == "NOT_RECEIVED"
     assert state.reference_state == "REFERENCE_BLOCKED"
+
+def test_reference_reports_missing_required_usd_spot_source():
+    state = aggregate_reference([
+        quote("binance", 100, "USDT"), quote("bybit", 100.01, "USDT"),
+    ], settlement_reference=100, settlement_verified=True, max_divergence_bps=100)
+    assert state.reference_quorum_met is False
+    assert state.reference_block_reason == "required_usd_spot_source_unavailable"
