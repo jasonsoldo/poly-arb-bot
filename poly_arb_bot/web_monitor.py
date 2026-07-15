@@ -393,9 +393,11 @@ def build_status(data_dir, log_file, state_file):
     state = _json(state_file, {"client_order_ids": {}})
     shadow_execution = _json(
         data_dir.parent / "state" / "shadow-execution.json",
-        {"state": "IDLE", "processed": [], "audit_offset": 0},
+        {"state": "IDLE", "processed": [], "audit_offset": 0,
+         "real_order_submissions": None, "real_orders": None, "real_fills": None},
     )
-    shadow_execution["real_order_submissions"] = 0
+    for field in ("real_order_submissions", "real_orders", "real_fills"):
+        shadow_execution.setdefault(field, None)
     lifecycle_state = _json(
         data_dir.parent / "state" / "strategy-shadow.json",
         {"positions": {}, "completed": []},
@@ -606,8 +608,9 @@ def build_status(data_dir, log_file, state_file):
             "portfolio_limits": lifecycle_state.get("portfolio_limits", {}),
             "config_version": lifecycle_state.get("config_version"),
             "config_hash": lifecycle_state.get("config_hash"),
-            "real_order_submissions": 0,
-            "real_orders": 0,
+            "real_order_submissions": lifecycle_state.get("real_order_submissions"),
+            "real_orders": lifecycle_state.get("real_orders"),
+            "real_fills": lifecycle_state.get("real_fills"),
         },
         "market_matrix": market_matrix,
         "market_reference_states": market_reference_states,

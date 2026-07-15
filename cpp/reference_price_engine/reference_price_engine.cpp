@@ -15,6 +15,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -54,7 +55,10 @@ struct SourceState {
     std::deque<AnchorSample> settlement_samples;
 };
 
-struct AssetState { std::map<std::string, SourceState> sources; };
+struct AssetState {
+    std::uint64_t revision = 1;
+    std::map<std::string, SourceState> sources;
+};
 
 struct CoinbaseBook {
     std::map<double, double> bids;
@@ -243,6 +247,7 @@ void publish_ipc_locked(SharedState& shared, bool force = false) {
     for (const auto& config : ASSETS) {
         const auto& asset = shared.assets.at(config.asset);
         auto& output = snapshot.assets[config.asset];
+        output.revision = asset.revision;
         std::vector<double> fresh_spot, fresh_usd, volatilities, momentums;
         std::vector<double> model_sample_counts, model_sample_spans;
         std::map<std::string, std::vector<double>> quote_prices;
@@ -503,6 +508,7 @@ void publish(SharedState& shared, const std::string& asset, const std::string& s
     const double received = now_ms();
     std::lock_guard<std::mutex> lock(shared.mutex);
     auto& row = shared.assets.at(asset).sources.at(source);
+    ++shared.assets.at(asset).revision;
     row.price = price; row.bid = bid; row.ask = ask;
     row.source_timestamp = source_timestamp; row.received_at = received; row.connected = true;
     const bool same_model_bucket = !row.samples.empty() &&
@@ -539,6 +545,7 @@ void publish_anchor(SharedState& shared, const std::string& asset, const std::st
     const double received = now_ms();
     std::lock_guard<std::mutex> lock(shared.mutex);
     auto& samples = shared.assets.at(asset).sources.at(source).anchor_samples;
+    ++shared.assets.at(asset).revision;
     samples.push_back({source_timestamp_ms, received, price, timeframe});
     while (samples.size() > 128) samples.pop_front();
     publish_ipc_locked(shared);
@@ -550,6 +557,7 @@ void publish_settlement(SharedState& shared, const std::string& asset, const std
     const double received = now_ms();
     std::lock_guard<std::mutex> lock(shared.mutex);
     auto& samples = shared.assets.at(asset).sources.at(source).settlement_samples;
+    ++shared.assets.at(asset).revision;
     samples.push_back({source_timestamp_ms, received, price, timeframe});
     while (samples.size() > 128) samples.pop_front();
     publish_ipc_locked(shared, true);
@@ -560,7 +568,10 @@ void set_connected(SharedState& shared, const std::string& source, bool connecte
     std::lock_guard<std::mutex> lock(shared.mutex);
     for (auto& asset : shared.assets) {
         auto& row = asset.second.sources.at(source);
-        if (row.supported) row.connected = connected;
+        if (row.supported) {
+            row.connected = connected;
+            ++asset.second.revision;
+        }
     }
     publish_ipc_locked(shared, true);
     write_status_locked(shared, true);
@@ -581,22 +592,53 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
             if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str())) throw std::runtime_error("SNI failed");
             ws.next_layer().handshake(asio::ssl::stream_base::client);
             ws.handshake(host, path);
+            ws.text(true);
             if (!subscription.empty()) ws.write(asio::buffer(subscription));
             set_connected(shared, source, true);
             std::cerr << "REFERENCE_CONNECTED source=" << source << "\n";
-            double last_ping = now_ms();
-            for (;;) {
-                beast::flat_buffer buffer;
-                ws.read(buffer);
-                const std::string raw = beast::buffers_to_string(buffer.data());
-                if (raw == "PONG") continue;
-                try { handler(raw); }
-                catch (...) { std::lock_guard<std::mutex> lock(shared.mutex); ++shared.unmatched_messages; }
-                if (text_ping && now_ms() - last_ping >= 5000) {
-                    ws.write(asio::buffer(std::string("PING")));
-                    last_ping = now_ms();
-                }
-            }
+            beast::flat_buffer buffer;
+            asio::steady_timer heartbeat(io);
+            const std::string ping_message("PING");
+            beast::error_code failure;
+            bool finished = false;
+            auto finish = [&](beast::error_code ec) {
+                if (finished) return;
+                finished = true;
+                failure = ec;
+                heartbeat.cancel();
+                beast::get_lowest_layer(ws).cancel();
+            };
+            std::function<void()> read_next;
+            read_next = [&] {
+                ws.async_read(buffer, [&](beast::error_code ec, std::size_t) {
+                    if (ec) return finish(ec);
+                    const std::string raw = beast::buffers_to_string(buffer.data());
+                    buffer.consume(buffer.size());
+                    if (raw != "PONG") {
+                        try { handler(raw); }
+                        catch (...) {
+                            std::lock_guard<std::mutex> lock(shared.mutex);
+                            ++shared.unmatched_messages;
+                        }
+                    }
+                    read_next();
+                });
+            };
+            std::function<void()> schedule_heartbeat;
+            schedule_heartbeat = [&] {
+                heartbeat.expires_after(std::chrono::seconds(5));
+                heartbeat.async_wait([&](beast::error_code ec) {
+                    if (ec || finished) return;
+                    ws.async_write(asio::buffer(ping_message), [&](beast::error_code write_ec, std::size_t) {
+                        if (write_ec) return finish(write_ec);
+                        schedule_heartbeat();
+                    });
+                });
+            };
+            read_next();
+            if (text_ping) schedule_heartbeat();
+            io.run();
+            if (failure) throw boost::system::system_error(failure);
         } catch (const std::exception& error) {
             set_connected(shared, source, false);
             std::cerr << "REFERENCE_ERROR source=" << source << " message=" << error.what() << " reconnect_s=2\n";

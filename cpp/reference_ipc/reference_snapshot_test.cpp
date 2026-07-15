@@ -23,6 +23,7 @@ Snapshot sample() {
     input.produced_monotonic_ns = 100;
     input.produced_wall_ms = 200;
     auto& asset = input.assets["BTC"];
+    asset.revision = 9;
     asset.fast_price = 64001;
     asset.consensus_price = 64000;
     asset.settlement_reference = 63999;
@@ -55,6 +56,7 @@ void test_round_trip() {
     assert(output.sequence == 7);
     assert(output.producer_session == "session-a");
     assert(output.assets.at("BTC").consensus_price == 64000);
+    assert(output.assets.at("BTC").revision == 9);
     assert(output.assets.at("BTC").clock_skew_ms == 12.5);
     assert(output.assets.at("BTC").sources.at("coinbase").status == "FRESH");
     assert(output.assets.at("BTC").sources.at("coinbase").anchor_samples.size() == 1);
@@ -74,6 +76,11 @@ void test_rejects_zero_sequence() {
     expect_failure([&] { reference_ipc::encode_line(input); });
 }
 
+void test_rejects_zero_asset_revision() {
+    auto input = sample(); input.assets["BTC"].revision = 0;
+    expect_failure([&] { reference_ipc::encode_line(input); });
+}
+
 void test_rejects_excess_anchors() {
     auto input = sample();
     auto& rows = input.assets["BTC"].sources["coinbase"].anchor_samples;
@@ -90,13 +97,21 @@ void test_rejects_malformed_json() {
     expect_failure([] { reference_ipc::decode_line("{not-json}"); });
 }
 
+void test_transport_age_includes_queue_and_post_receive_delay() {
+    assert(reference_ipc::transport_age_ms(1'000'000, 6'000'000, 2.5) == 7.5);
+    assert(reference_ipc::transport_age_ms(0, 6'000'000, 2.5) == 1e9);
+    assert(reference_ipc::transport_age_ms(7'000'000, 6'000'000, 2.5) == 1e9);
+}
+
 int main() {
     test_round_trip();
     test_rejects_missing_version();
     test_rejects_missing_session();
     test_rejects_zero_sequence();
+    test_rejects_zero_asset_revision();
     test_rejects_excess_anchors();
     test_rejects_unknown_status();
     test_rejects_malformed_json();
+    test_transport_age_includes_queue_and_post_receive_delay();
     std::cout << "reference snapshot protocol tests passed\n";
 }

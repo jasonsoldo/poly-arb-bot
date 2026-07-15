@@ -29,6 +29,13 @@ def test_reference_engine_writes_atomic_status_and_reconnects():
     assert r'\"supported\"' in SOURCE
 
 
+def test_reference_engine_versions_assets_independently():
+    assert "revision = 1" in SOURCE
+    assert "++shared.assets.at(asset).revision" in SOURCE
+    assert "++asset.second.revision" in SOURCE
+    assert "output.revision = asset.revision" in SOURCE
+
+
 def test_reference_engine_distinguishes_not_received_from_stale():
     assert "source_status(" in SOURCE
     for status in ("NOT_RECEIVED", "FRESH", "STALE"):
@@ -95,7 +102,10 @@ def test_rtds_subscription_is_chainlink_only_and_binance_uses_verified_spot_symb
 
 
 def test_rtds_sends_documented_heartbeat_and_logs_unmatched_frame_shape():
-    assert 'std::string("PING")' in SOURCE
+    assert 'ping_message("PING")' in SOURCE
+    assert "asio::steady_timer heartbeat" in SOURCE
+    assert "heartbeat.async_wait" in SOURCE
+    assert "ws.async_write" in SOURCE
     assert "REFERENCE_UNMATCHED" in SOURCE
     for field in ("topic=", "type=", "symbol="):
         assert field in SOURCE

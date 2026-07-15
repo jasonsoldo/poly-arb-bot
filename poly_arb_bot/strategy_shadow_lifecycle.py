@@ -73,6 +73,8 @@ class StrategyShadowLifecycle:
             json.dumps(asdict(self.limits), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         self.data = self._load()
+        for field in ("real_order_submissions", "real_orders", "real_fills"):
+            self.data.setdefault(field, 0)
         self.data.setdefault("completed_trades", [])
         self.data.setdefault("portfolio_rejections", {})
         self.data.setdefault("orphaned_positions", [])
@@ -80,12 +82,13 @@ class StrategyShadowLifecycle:
         self.data["config_version"] = self.config_version
         self.data["config_hash"] = self.config_hash
         self._mark_dirty()
-        if self._backfill_completed_trades():
-            self._save(force=True)
+        self._backfill_completed_trades()
+        self._save(force=True)
 
     def _load(self):
         if not self.state_path.exists():
-            return {"positions": {}, "completed": [], "audit_offset": 0, "paired_audit_offset": 0}
+            return {"positions": {}, "completed": [], "audit_offset": 0, "paired_audit_offset": 0,
+                    "real_order_submissions": 0, "real_orders": 0, "real_fills": 0}
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
     def _write_state(self):

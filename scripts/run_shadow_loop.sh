@@ -47,14 +47,29 @@ done
   done
 ) &
 scanner_pid=$!
+reference_pid=""
+execution_pid=""
+ev_pid=""
+trap 'kill "$scanner_pid" "$reference_pid" "$execution_pid" "$ev_pid" 2>/dev/null || true' EXIT INT TERM
+
+reference_socket="${REFERENCE_IPC_PATH:-state/reference-price.sock}"
+mkdir -p "$(dirname "$reference_socket")"
+rm -f "$reference_socket"
 ./build/reference_price_engine data/venue-status.json &
 reference_pid=$!
+for _ in $(seq 1 100); do
+  [[ -S "$reference_socket" ]] && break
+  sleep 0.1
+done
+if [[ ! -S "$reference_socket" ]]; then
+  echo "REFERENCE_IPC_NOT_READY path=$reference_socket" >&2
+  exit 1
+fi
 "$python_bin" -m poly_arb_bot.shadow_execution &
 execution_pid=$!
 EV_SHADOW_MODE=verify "$python_bin" -m poly_arb_bot.ev_shadow \
   logs/strategy-audit.jsonl logs/strategy-parity.jsonl state/ev-shadow-verify.json &
 ev_pid=$!
-trap 'kill "$scanner_pid" "$reference_pid" "$execution_pid" "$ev_pid" 2>/dev/null || true' EXIT INT TERM
 
 echo "SHADOW_LOOP engine_start dynamic_reload_s=5 market_scan_s=$refresh_seconds"
 ./build/market_ws_engine data/live_markets.json "$size" "$fee_rate" logs/shadow-audit.jsonl \

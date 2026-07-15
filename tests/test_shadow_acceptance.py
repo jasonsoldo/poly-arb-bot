@@ -12,8 +12,8 @@ def valid_status():
             "rejection_reasons": {"no_edge": 6, "depth": 2}, "duplicate_events": 0,
         },
         "counts": {"executed_orders": 0},
-        "shadow_execution": {"real_order_submissions": 0},
-        "shadow_lifecycle": {"real_order_submissions": 0, "real_orders": 0},
+        "shadow_execution": {"real_order_submissions": 0, "real_orders": 0, "real_fills": 0},
+        "shadow_lifecycle": {"real_order_submissions": 0, "real_orders": 0, "real_fills": 0},
         "strategy_counts": {
             "paired_lock": {"evaluations": 10, "accepts": 2, "rejections": 8, "model_evaluations": 0},
             "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19, "model_evaluations": 20, "latest_model_evaluated": True},
@@ -49,6 +49,42 @@ def test_acceptance_fails_drift_and_real_order_submission():
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert report["passed"] is False
     assert failed == {"market_readiness", "evaluation_reasons", "real_execution_disabled"}
+
+
+def test_acceptance_fails_any_real_order_or_fill_counter():
+    for section, field in (
+        ("shadow_execution", "real_orders"),
+        ("shadow_execution", "real_fills"),
+        ("shadow_lifecycle", "real_fills"),
+    ):
+        status = valid_status()
+        status[section][field] = 1
+        report = evaluate_status(status)
+        failed = {check["name"] for check in report["checks"] if not check["passed"]}
+        assert "real_execution_disabled" in failed
+
+
+def test_acceptance_fails_when_real_execution_invariant_is_missing():
+    for section, field in (
+        ("shadow_execution", "real_order_submissions"),
+        ("shadow_execution", "real_orders"),
+        ("shadow_execution", "real_fills"),
+        ("shadow_lifecycle", "real_order_submissions"),
+        ("shadow_lifecycle", "real_orders"),
+        ("shadow_lifecycle", "real_fills"),
+    ):
+        status = valid_status()
+        del status[section][field]
+        report = evaluate_status(status)
+        failed = {check["name"] for check in report["checks"] if not check["passed"]}
+        assert "real_execution_disabled" in failed
+
+    status = valid_status()
+    del status["counts"]["executed_orders"]
+    report = evaluate_status(status)
+    assert "real_execution_disabled" in {
+        check["name"] for check in report["checks"] if not check["passed"]
+    }
 
 
 def test_acceptance_fails_when_an_independent_strategy_is_not_running():

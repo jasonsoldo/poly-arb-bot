@@ -17,7 +17,7 @@ def test_reference_ipc_protocol_is_versioned_and_session_scoped():
         "produced_wall_ms",
     ):
         assert field in source
-    assert "PROTOCOL_VERSION = 1" in source
+    assert "PROTOCOL_VERSION = 2" in source
     assert "unsupported reference protocol version" in source
     assert "reference producer session missing" in source
     assert "reference sequence must be positive" in source
@@ -26,6 +26,7 @@ def test_reference_ipc_protocol_is_versioned_and_session_scoped():
 def test_reference_ipc_carries_compact_strategy_and_source_state():
     source = HEADER.read_text(encoding="utf-8")
     for field in (
+        "revision",
         "fast_price",
         "consensus_price",
         "settlement_reference",
@@ -56,6 +57,7 @@ def test_reference_ipc_has_real_round_trip_and_invalid_frame_tests():
         "test_rejects_missing_version",
         "test_rejects_missing_session",
         "test_rejects_zero_sequence",
+        "test_rejects_zero_asset_revision",
         "test_rejects_excess_anchors",
         "test_rejects_unknown_status",
         "test_rejects_malformed_json",

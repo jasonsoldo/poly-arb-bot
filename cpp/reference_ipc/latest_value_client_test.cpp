@@ -133,18 +133,39 @@ void test_fragmented_frame() {
 void test_combined_frames() {
     asio::io_context io;
     const auto path = unique_path();
-    ScriptServer server(io, path, {{reference_ipc::encode_line(snapshot("a", 1)) +
-                                    reference_ipc::encode_line(snapshot("a", 2))}});
+    std::string burst;
+    for (std::uint64_t sequence = 1; sequence <= 200; ++sequence)
+        burst += reference_ipc::encode_line(snapshot("a", sequence));
+    ScriptServer server(io, path, {{std::move(burst)}});
     std::vector<std::uint64_t> received;
     auto client = std::make_shared<reference_ipc::LatestValueClient>(
         io, path, [&](const auto& value) { received.push_back(value.sequence); });
     client->start();
-    run_until(io, [&] { return received.size() == 2; });
-    assert((received == std::vector<std::uint64_t>{1, 2}));
+    run_until(io, [&] { return !received.empty() && received.back() == 200; });
+    assert(received.size() < 200);
+    assert(client->coalesced_frames() + received.size() == 200);
     client->stop();
 }
 
-void test_malformed_frame_is_discarded() {
+void test_large_frame_burst_keeps_up_with_latest_value() {
+    asio::io_context io;
+    const auto path = unique_path();
+    std::string burst;
+    const std::string producer_session(40'000, 's');
+    for (std::uint64_t sequence = 1; sequence <= 20; ++sequence)
+        burst += reference_ipc::encode_line(snapshot(producer_session, sequence));
+    ScriptServer server(io, path, {{std::move(burst)}});
+    std::vector<std::uint64_t> received;
+    auto client = std::make_shared<reference_ipc::LatestValueClient>(
+        io, path, [&](const auto& value) { received.push_back(value.sequence); });
+    client->start();
+    run_until(io, [&] { return !received.empty() && received.back() == 20; });
+    assert(received.size() < 10);
+    assert(client->coalesced_frames() + received.size() == 20);
+    client->stop();
+}
+
+void test_malformed_frame_invalidates_burst() {
     asio::io_context io;
     const auto path = unique_path();
     ScriptServer server(io, path, {{"not-json\n" + reference_ipc::encode_line(snapshot("a", 1))}});
@@ -152,15 +173,41 @@ void test_malformed_frame_is_discarded() {
     auto client = std::make_shared<reference_ipc::LatestValueClient>(
         io, path, [&](const auto&) { ++received; });
     client->start();
-    run_until(io, [&] { return received == 1; });
-    assert(client->protocol_errors() == 1);
+    run_until(io, [&] { return client->protocol_errors() == 1; });
+    assert(received == 0);
+    assert(!client->connected());
+    client->stop();
+}
+
+void test_latest_malformed_frame_is_discarded() {
+    asio::io_context io;
+    const auto path = unique_path();
+    ScriptServer server(io, path, {{reference_ipc::encode_line(snapshot("a", 1)) + "not-json\n"}});
+    std::size_t received = 0;
+    auto client = std::make_shared<reference_ipc::LatestValueClient>(
+        io, path, [&](const auto&) { ++received; });
+    client->start();
+    run_until(io, [&] { return client->protocol_errors() == 1; });
+    assert(received == 0);
+    assert(client->coalesced_frames() == 0);
+    client->stop();
+}
+
+void test_oversized_completed_frame_invalidates_connection() {
+    asio::io_context io;
+    const auto path = unique_path();
+    ScriptServer server(io, path, {{std::string(reference_ipc::LatestValueClient::MAX_FRAME_BYTES + 1, 'x') + "\n"}});
+    auto client = std::make_shared<reference_ipc::LatestValueClient>(io, path, [](const auto&) {});
+    client->start();
+    run_until(io, [&] { return client->protocol_errors() == 1; });
+    assert(!client->connected());
     client->stop();
 }
 
 void test_sequence_rollback_invalidates_connection() {
     asio::io_context io;
     const auto path = unique_path();
-    ScriptServer server(io, path, {{reference_ipc::encode_line(snapshot("a", 2)) +
+    ScriptServer server(io, path, {{reference_ipc::encode_line(snapshot("a", 2)),
                                     reference_ipc::encode_line(snapshot("a", 1))}});
     std::vector<bool> states;
     auto client = std::make_shared<reference_ipc::LatestValueClient>(
@@ -176,7 +223,7 @@ void test_sequence_rollback_invalidates_connection() {
 void test_new_producer_session_is_accepted() {
     asio::io_context io;
     const auto path = unique_path();
-    ScriptServer server(io, path, {{reference_ipc::encode_line(snapshot("a", 9)) +
+    ScriptServer server(io, path, {{reference_ipc::encode_line(snapshot("a", 9)),
                                     reference_ipc::encode_line(snapshot("b", 1))}});
     std::vector<std::string> sessions;
     auto client = std::make_shared<reference_ipc::LatestValueClient>(
@@ -209,7 +256,10 @@ void test_eof_reconnects() {
 int main() {
     test_fragmented_frame();
     test_combined_frames();
-    test_malformed_frame_is_discarded();
+    test_large_frame_burst_keeps_up_with_latest_value();
+    test_malformed_frame_invalidates_burst();
+    test_latest_malformed_frame_is_discarded();
+    test_oversized_completed_frame_invalidates_connection();
     test_sequence_rollback_invalidates_connection();
     test_new_producer_session_is_accepted();
     test_eof_reconnects();

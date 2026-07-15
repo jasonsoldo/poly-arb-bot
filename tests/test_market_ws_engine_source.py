@@ -121,3 +121,24 @@ def test_shadow_event_ids_are_unique_across_process_restarts():
 def test_engine_can_start_from_retained_config_during_gamma_outage():
     assert 'throw std::runtime_error("market document stale")' not in SOURCE
     assert 'market.close_ts <= now_seconds()' in SOURCE
+
+
+def test_directional_evaluation_is_gated_by_input_versions():
+    assert "version = 0" in SOURCE
+    assert "last_strategy_up_version" in SOURCE
+    assert "last_strategy_down_version" in SOURCE
+    assert "last_strategy_reference_revision" in SOURCE
+    assert "last_strategy_time_bucket" in SOURCE
+    assert "++books_[asset].version" in SOURCE
+    assert "++books_[token].version" in SOURCE
+    assert "inputs_unchanged" in SOURCE
+    assert "asset->revision" in SOURCE
+
+
+def test_health_exposes_bounded_local_pipeline_percentiles():
+    assert "RollingMetric" in SOURCE
+    assert '\\"reference_ipc_receive_age_ms_p95\\"' in SOURCE
+    assert '\\"clob_to_strategy_evaluation_us_p95\\"' in SOURCE
+    assert '\\"reference_ipc_receive_age_samples\\"' in SOURCE
+    assert '\\"clob_to_strategy_evaluation_samples\\"' in SOURCE
+    assert '\\"reference_coalesced_frames\\"' in SOURCE

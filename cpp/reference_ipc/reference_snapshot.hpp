@@ -16,7 +16,7 @@
 
 namespace reference_ipc {
 
-constexpr int PROTOCOL_VERSION = 1;
+constexpr int PROTOCOL_VERSION = 2;
 constexpr std::size_t MAX_ANCHORS_PER_SOURCE = 8;
 
 struct AnchorSample {
@@ -42,6 +42,7 @@ struct SourceSnapshot {
 };
 
 struct AssetSnapshot {
+    std::uint64_t revision = 0;
     std::optional<double> fast_price;
     std::optional<double> consensus_price;
     std::optional<double> settlement_reference;
@@ -71,6 +72,16 @@ inline bool known_status(const std::string& status) {
            status == "NOT_RECEIVED" || status == "UNSUPPORTED" || status == "OUTLIER";
 }
 
+inline double transport_age_ms(std::uint64_t produced_monotonic_ns,
+                               std::uint64_t received_monotonic_ns,
+                               double elapsed_after_receive_ms) {
+    if (!produced_monotonic_ns || received_monotonic_ns < produced_monotonic_ns ||
+        !std::isfinite(elapsed_after_receive_ms) || elapsed_after_receive_ms < 0)
+        return 1e9;
+    return (received_monotonic_ns - produced_monotonic_ns) / 1'000'000.0 +
+           elapsed_after_receive_ms;
+}
+
 inline void validate(const Snapshot& snapshot) {
     if (snapshot.protocol_version != PROTOCOL_VERSION)
         throw std::runtime_error("unsupported reference protocol version");
@@ -81,6 +92,8 @@ inline void validate(const Snapshot& snapshot) {
     if (!std::isfinite(snapshot.produced_wall_ms) || snapshot.produced_wall_ms <= 0)
         throw std::runtime_error("reference wall timestamp invalid");
     for (const auto& asset : snapshot.assets) {
+        if (asset.second.revision == 0)
+            throw std::runtime_error("reference asset revision must be positive");
         for (const auto& source : asset.second.sources) {
             if (!known_status(source.second.status))
                 throw std::runtime_error("unknown reference source status");
@@ -148,7 +161,8 @@ inline std::string encode_line(const Snapshot& snapshot) {
         if (!first_asset) out << ',';
         first_asset = false;
         const auto& row = asset.second;
-        out << '"' << escaped(asset.first) << "\":{\"fast_price\":";
+        out << '"' << escaped(asset.first) << "\":{\"revision\":" << row.revision
+            << ",\"fast_price\":";
         write_optional(out, row.fast_price);
         out << ",\"consensus_price\":"; write_optional(out, row.consensus_price);
         out << ",\"settlement_reference\":"; write_optional(out, row.settlement_reference);
@@ -231,6 +245,7 @@ inline Snapshot decode_line(std::string_view line) {
             for (const auto& item : *assets) {
                 AssetSnapshot asset;
                 const auto& row = item.second;
+                asset.revision = row.get<std::uint64_t>("revision", 0);
                 asset.fast_price = optional_number(row, "fast_price");
                 asset.consensus_price = optional_number(row, "consensus_price");
                 asset.settlement_reference = optional_number(row, "settlement_reference");

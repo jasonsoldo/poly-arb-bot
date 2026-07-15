@@ -14,6 +14,14 @@ def evaluate_status(status):
     strategy_names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
     strategy_rows = [strategy_counts.get(name, {}) for name in strategy_names]
     probability_rows = [strategy_counts.get(name, {}) for name in strategy_names[:2]]
+    counts = status.get("counts", {})
+    execution = status.get("shadow_execution", {})
+    lifecycle = status.get("shadow_lifecycle", {})
+    real_counters_zero = all(
+        field in section and type(section[field]) in (int, float) and section[field] == 0
+        for section in (execution, lifecycle)
+        for field in ("real_order_submissions", "real_orders", "real_fills")
+    )
     checks = [
         {"name": "analytics_ready", "passed": not status.get("analytics_refreshing", False)},
         {"name": "market_data_present", "passed": readiness.get("discovered_markets", 0) > 0},
@@ -25,10 +33,10 @@ def evaluate_status(status):
         {"name": "evaluation_reasons",
          "passed": sum(reasons.values()) == shadow.get("rejected_evaluations", 0)},
         {"name": "real_execution_disabled",
-         "passed": status.get("counts", {}).get("executed_orders", 0) == 0 and
-                   status.get("shadow_execution", {}).get("real_order_submissions", 0) == 0 and
-                   status.get("shadow_lifecycle", {}).get("real_order_submissions", 0) == 0 and
-                   status.get("shadow_lifecycle", {}).get("real_orders", 0) == 0},
+         "passed": "executed_orders" in counts and
+                   type(counts["executed_orders"]) in (int, float) and
+                   counts["executed_orders"] == 0 and
+                   real_counters_zero},
         {"name": "event_deduplication", "passed": shadow.get("duplicate_events", 0) == 0},
         {"name": "three_strategy_evaluations",
          "passed": all(row.get("evaluations", 0) > 0 for row in strategy_rows)},

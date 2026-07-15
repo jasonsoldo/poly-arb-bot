@@ -3,6 +3,15 @@ import json
 from poly_arb_bot.shadow_execution import ShadowExecutionStateMachine, process_audit_once
 
 
+def test_shadow_execution_persists_real_order_invariants_on_initialization(tmp_path):
+    state = tmp_path / "state.json"
+    ShadowExecutionStateMachine(state, tmp_path / "audit.jsonl")
+    stored = json.loads(state.read_text(encoding="utf-8"))
+    assert stored["real_order_submissions"] == 0
+    assert stored["real_orders"] == 0
+    assert stored["real_fills"] == 0
+
+
 def test_execution_checkpoints_are_dirty_and_coalesced(tmp_path):
     machine = ShadowExecutionStateMachine(
         tmp_path / "state.json", tmp_path / "events.jsonl",

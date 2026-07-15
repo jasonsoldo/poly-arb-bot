@@ -11,6 +11,7 @@
 #include "../strategy/ev_strategy.hpp"
 #include <openssl/sha.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -42,13 +43,15 @@ struct Book {
     bool initialized = false, ws_snapshot = false;
     double updated_at = 0, source_timestamp_ms = 0;
     std::string hash;
-    unsigned long long generation = 0;
+    unsigned long long generation = 0, version = 0;
 };
 struct Market {
     std::string up, down, last_reason, condition_id, asset, interval, window;
     std::string settlement_source, title;
     std::optional<double> open_price;
     double fee = .07, start_ts = 0, close_ts = 0, active_since = 0, last_audit = 0;
+    unsigned long long last_strategy_up_version = 0, last_strategy_down_version = 0;
+    unsigned long long last_strategy_reference_revision = 0, last_strategy_time_bucket = 0;
     bool accepting_orders = true;
     Market() = default;
     Market(const std::string& up_token, const std::string& down_token) : up(up_token), down(down_token) {}
@@ -174,6 +177,36 @@ struct EffectiveReferenceSource {
     std::string source, symbol, market_type, quote_currency, status;
     std::optional<double> price;
     std::optional<double> age_ms;
+};
+
+template <std::size_t Capacity>
+class RollingMetric {
+public:
+    void add(double value) {
+        if (!std::isfinite(value) || value < 0) return;
+        values_[next_] = value;
+        next_ = (next_ + 1) % Capacity;
+        count_ = std::min(count_ + 1, Capacity);
+        latest_ = value;
+    }
+
+    double latest() const { return latest_; }
+    std::size_t count() const { return count_; }
+
+    double percentile(double fraction) const {
+        if (!count_) return 0;
+        std::vector<double> rows(values_.begin(), values_.begin() + count_);
+        const std::size_t index = std::min(
+            rows.size() - 1,
+            static_cast<std::size_t>(std::llround((rows.size() - 1) * fraction)));
+        std::nth_element(rows.begin(), rows.begin() + index, rows.end());
+        return rows[index];
+    }
+
+private:
+    std::array<double, Capacity> values_{};
+    std::size_t next_ = 0, count_ = 0;
+    double latest_ = 0;
 };
 
 struct ReferenceView {
@@ -410,6 +443,11 @@ private:
     void on_reference_snapshot(const reference_ipc::Snapshot& snapshot) {
         reference_snapshot_ = snapshot;
         reference_receive_at_ = std::chrono::steady_clock::now();
+        const auto receive_ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            reference_receive_at_.time_since_epoch()).count());
+        reference_transport_age_at_receive_ms_ = reference_ipc::transport_age_ms(
+            snapshot.produced_monotonic_ns, receive_ns, 0);
+        reference_ipc_receive_age_ms_.add(reference_transport_age_at_receive_ms_);
         evaluate_reference_strategies();
     }
 
@@ -450,20 +488,37 @@ private:
     }
 
     void evaluate_reference_strategies() {
-        if (stopped_ || reference_snapshot_.producer_session.empty()) return;
+        if (stopped_ || reference_snapshot_.producer_session.empty()) {
+            last_clob_mutation_at_ = {};
+            return;
+        }
+        bool evaluated_any = false;
         const double timestamp = now_seconds();
+        const unsigned long long time_bucket = static_cast<unsigned long long>(timestamp);
         const double transport_age_ms = reference_receive_at_.time_since_epoch().count()
-            ? std::chrono::duration<double, std::milli>(
+            ? reference_transport_age_at_receive_ms_ + std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - reference_receive_at_).count()
             : 1e9;
-        for (const auto& item : markets_) {
-            const Market& market = item.second;
+        for (auto& item : markets_) {
+            Market& market = item.second;
             const Book& up_book = books_.at(market.up);
             const Book& down_book = books_.at(market.down);
             if (!up_book.ws_snapshot || !down_book.ws_snapshot) continue;
             const auto asset_found = reference_snapshot_.assets.find(market.asset);
             const reference_ipc::AssetSnapshot* asset = asset_found == reference_snapshot_.assets.end()
                 ? nullptr : &asset_found->second;
+            const unsigned long long reference_revision = asset ? asset->revision : 0;
+            const bool inputs_unchanged =
+                market.last_strategy_up_version == up_book.version &&
+                market.last_strategy_down_version == down_book.version &&
+                market.last_strategy_reference_revision == reference_revision &&
+                market.last_strategy_time_bucket == time_bucket;
+            if (inputs_unchanged) continue;
+            market.last_strategy_up_version = up_book.version;
+            market.last_strategy_down_version = down_book.version;
+            market.last_strategy_reference_revision = reference_revision;
+            market.last_strategy_time_bucket = time_bucket;
+            evaluated_any = true;
             const ReferenceView reference = asset
                 ? build_reference_view(*asset, market.settlement_source, transport_age_ms, strategy_config_)
                 : ReferenceView{};
@@ -558,6 +613,12 @@ private:
                 }
             }
         }
+        const auto evaluation_finished = std::chrono::steady_clock::now();
+        if (evaluated_any && last_clob_mutation_at_.time_since_epoch().count()) {
+            clob_to_strategy_evaluation_us_.add(std::chrono::duration<double, std::micro>(
+                evaluation_finished - last_clob_mutation_at_).count());
+        }
+        last_clob_mutation_at_ = {};
     }
 
     void emit_strategy_audit(const std::string& market_id, const Market& market,
@@ -756,11 +817,14 @@ private:
             books_[asset].updated_at = now_seconds();
             books_[asset].source_timestamp_ms = message.get<double>("timestamp", 0);
             books_[asset].hash = message.get<std::string>("hash", "");
+            ++books_[asset].version;
+            last_clob_mutation_at_ = std::chrono::steady_clock::now();
             ++book_events_;
         } else if (type == "price_change") {
             const double source_timestamp = message.get<double>("timestamp", 0);
             auto changes = message.get_child_optional("price_changes");
             if (!changes) return;
+            bool changed = false;
             for (const auto& item : *changes) {
                 const auto& row = item.second; const std::string token = row.get<std::string>("asset_id", asset);
                 if (!books_.count(token) || books_[token].generation != generation_) continue;
@@ -776,8 +840,11 @@ private:
                 books_[token].updated_at = now_seconds();
                 books_[token].source_timestamp_ms = source_timestamp;
                 books_[token].hash = row.get<std::string>("hash", books_[token].hash);
+                ++books_[token].version;
+                changed = true;
                 if (crossed(books_[token])) resync_token(token, "crossed_book");
             }
+            if (changed) last_clob_mutation_at_ = std::chrono::steady_clock::now();
             ++price_changes_;
         }
         if (type == "book" || (type == "price_change" && price_changes_ % 100 == 0))
@@ -909,12 +976,27 @@ private:
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
             << ",\"reference_protocol_errors\":" << (reference_client_ ? reference_client_->protocol_errors() : 0)
             << ",\"reference_reconnects\":" << (reference_client_ ? reference_client_->reconnects() : 0)
+            << ",\"reference_coalesced_frames\":" << (reference_client_ ? reference_client_->coalesced_frames() : 0)
             << ",\"strategy_audit_queue\":" << strategy_audit_.queued()
             << ",\"strategy_audit_backpressure\":" << strategy_audit_backpressure_
             << ",\"strategy_evaluations\":" << strategy_evaluation_sequence_
             << ",\"reference_receive_age_ms\":";
         if (reference_receive_age_ms >= 0) out << reference_receive_age_ms;
         else out << "null";
+        out << ",\"reference_ipc_receive_age_ms_latest\":";
+        if (reference_ipc_receive_age_ms_.count()) out << reference_ipc_receive_age_ms_.latest();
+        else out << "null";
+        out << ",\"reference_ipc_receive_age_ms_p95\":";
+        if (reference_ipc_receive_age_ms_.count()) out << reference_ipc_receive_age_ms_.percentile(.95);
+        else out << "null";
+        out << ",\"reference_ipc_receive_age_samples\":" << reference_ipc_receive_age_ms_.count()
+            << ",\"clob_to_strategy_evaluation_us_latest\":";
+        if (clob_to_strategy_evaluation_us_.count()) out << clob_to_strategy_evaluation_us_.latest();
+        else out << "null";
+        out << ",\"clob_to_strategy_evaluation_us_p95\":";
+        if (clob_to_strategy_evaluation_us_.count()) out << clob_to_strategy_evaluation_us_.percentile(.95);
+        else out << "null";
+        out << ",\"clob_to_strategy_evaluation_samples\":" << clob_to_strategy_evaluation_us_.count();
         out
             << ",\"book_events\":" << book_events_ << ",\"price_changes\":" << price_changes_ << "}\n";
         out.close();
@@ -1044,6 +1126,9 @@ private:
     std::shared_ptr<reference_ipc::LatestValueClient> reference_client_;
     reference_ipc::Snapshot reference_snapshot_;
     std::chrono::steady_clock::time_point reference_receive_at_{};
+    double reference_transport_age_at_receive_ms_ = 1e9;
+    std::chrono::steady_clock::time_point last_clob_mutation_at_{};
+    RollingMetric<2048> reference_ipc_receive_age_ms_, clob_to_strategy_evaluation_us_;
     bool reference_connected_ = false;
     std::deque<std::string> writes_;
     std::map<std::string, Market> markets_;

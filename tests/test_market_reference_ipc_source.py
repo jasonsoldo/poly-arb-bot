@@ -12,8 +12,11 @@ def test_reference_client_is_async_bounded_and_reconnecting():
     source = CLIENT.read_text(encoding="utf-8")
     assert "class LatestValueClient" in source
     assert "async_connect" in source
-    assert "async_read_until" in source
+    assert "async_read_some" in source
     assert "MAX_FRAME_BYTES" in source
+    assert "READ_BUFFER_BYTES = 64 * 1024" in source
+    assert "COALESCE_WINDOW{1}" in source
+    assert "coalesced_frames_" in source
     assert "reconnect_timer_" in source
     assert "sequence rollback" in source
     assert "producer_session" in source
@@ -26,7 +29,10 @@ def test_reference_client_has_real_framing_and_session_tests():
     for case in (
         "test_fragmented_frame",
         "test_combined_frames",
-        "test_malformed_frame_is_discarded",
+        "test_large_frame_burst_keeps_up_with_latest_value",
+        "test_malformed_frame_invalidates_burst",
+        "test_latest_malformed_frame_is_discarded",
+        "test_oversized_completed_frame_invalidates_connection",
         "test_sequence_rollback_invalidates_connection",
         "test_new_producer_session_is_accepted",
         "test_eof_reconnects",
@@ -53,3 +59,9 @@ def test_reference_client_test_binary_is_built_on_linux_and_windows():
     for script in (BUILD_SH, BUILD_PS1):
         assert "latest_value_client_test.cpp" in script
         assert "latest_value_client_test" in script
+
+
+def test_windows_production_engines_are_statically_linked():
+    for source in ("market_ws_engine.cpp", "reference_price_engine.cpp"):
+        command = BUILD_PS1.split(source, 1)[0].rsplit("g++", 1)[1]
+        assert "-static -static-libgcc -static-libstdc++" in command

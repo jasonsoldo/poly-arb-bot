@@ -16,10 +16,16 @@ class ShadowExecutionStateMachine:
         self.checkpoint_interval_seconds = float(checkpoint_interval_seconds)
         self._dirty = False
         self._last_checkpoint = time.monotonic()
+        for field in ("real_order_submissions", "real_orders", "real_fills"):
+            if field not in self.data:
+                self.data[field] = 0
+        self._mark_dirty()
+        self._save(force=True)
 
     def _load(self):
         if not self.state_path.exists():
-            return {"state": "IDLE", "processed": [], "audit_offset": 0}
+            return {"state": "IDLE", "processed": [], "audit_offset": 0,
+                    "real_order_submissions": 0, "real_orders": 0, "real_fills": 0}
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
     def _write_state(self):

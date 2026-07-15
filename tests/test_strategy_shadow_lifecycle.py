@@ -5,6 +5,15 @@ from poly_arb_bot.ev_shadow import strategy_config
 from poly_arb_bot.strategy_shadow_lifecycle import PortfolioLimits, StrategyShadowLifecycle, process_audit_once
 
 
+def test_lifecycle_persists_real_order_invariants_on_initialization(tmp_path):
+    state = tmp_path / "state.json"
+    StrategyShadowLifecycle(state, tmp_path / "audit.jsonl")
+    stored = json.loads(state.read_text(encoding="utf-8"))
+    assert stored["real_order_submissions"] == 0
+    assert stored["real_orders"] == 0
+    assert stored["real_fills"] == 0
+
+
 def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up"):
     return {
         "event_id": event_id, "event_type": "shadow_eval", "strategy": strategy,

@@ -1,6 +1,17 @@
-/opt/poly-arb-bot/logs/shadow-audit.jsonl /opt/poly-arb-bot/logs/strategy-audit.jsonl /opt/poly-arb-bot/logs/shadow-execution.jsonl {
+/opt/poly-arb-bot/logs/shadow-audit.jsonl /opt/poly-arb-bot/logs/strategy-audit.jsonl /opt/poly-arb-bot/logs/shadow-execution.jsonl /opt/poly-arb-bot/logs/strategy-parity.jsonl /opt/poly-arb-bot/logs/orders.jsonl {
     daily
     maxsize 256M
+    rotate 30
+    compress
+    missingok
+    notifempty
+    copytruncate
+    su root root
+}
+
+/var/log/poly-arb-bot.log /var/log/poly-arb-bot.err.log /var/log/poly-arb-web.log /var/log/poly-arb-web.err.log {
+    daily
+    maxsize 64M
     rotate 30
     compress
     missingok

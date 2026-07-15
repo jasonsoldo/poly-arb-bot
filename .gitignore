@@ -11,5 +11,11 @@ venv/
 *.log
 data/live_snapshot.json
 data/live_markets.scanned.json
+data/audit-*.jsonl
+data/health-*.json
+data/strategy-*.jsonl
+data/venue-*.json
+data/*-live-markets.json
+data/release-acceptance-*/
 state/
 logs/

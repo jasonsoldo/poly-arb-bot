@@ -140,7 +140,31 @@ def test_web_status_exposes_shadow_execution_state(tmp_path):
     status = build_status(data_dir, tmp_path / "missing.jsonl", state_dir / "orders.json")
 
     assert status["shadow_execution"]["state"] == "ORPHAN_HOLD"
-    assert status["shadow_execution"]["real_order_submissions"] == 0
+    assert status["shadow_execution"]["real_order_submissions"] is None
+
+
+def test_web_status_does_not_mask_real_execution_counters(tmp_path):
+    data_dir = tmp_path / "data"
+    state_dir = tmp_path / "state"
+    data_dir.mkdir()
+    state_dir.mkdir()
+    (state_dir / "shadow-execution.json").write_text(json.dumps({
+        "state": "IDLE", "real_order_submissions": 2,
+        "real_orders": 1, "real_fills": 1,
+    }), encoding="utf-8")
+    (state_dir / "strategy-shadow.json").write_text(json.dumps({
+        "positions": {}, "completed": [],
+        "real_order_submissions": 3, "real_orders": 2, "real_fills": 1,
+    }), encoding="utf-8")
+
+    status = build_status(data_dir, tmp_path / "missing.jsonl", state_dir / "orders.json")
+
+    assert status["shadow_execution"]["real_order_submissions"] == 2
+    assert status["shadow_execution"]["real_orders"] == 1
+    assert status["shadow_execution"]["real_fills"] == 1
+    assert status["shadow_lifecycle"]["real_order_submissions"] == 3
+    assert status["shadow_lifecycle"]["real_orders"] == 2
+    assert status["shadow_lifecycle"]["real_fills"] == 1
 
 
 def test_web_status_uses_full_audit_counts_not_recent_display_window(tmp_path):
