@@ -75,3 +75,21 @@ def aggregate_reference(quotes, settlement_reference, settlement_verified,
     ready = reason is None
     return ReferenceState(normalized, fast, consensus, settlement_reference, source_count, usd_count,
                           divergence, ready, "REFERENCE_READY" if ready else "REFERENCE_BLOCKED", reason)
+
+
+def reference_state_for_asset(asset, settlement_source, maximum_age_ms, file_age_ms=0):
+    sources = []
+    for name, row in asset.get("sources", {}).items():
+        age = row.get("message_age_ms")
+        effective_age = None if age is None else max(0.0, float(age) + file_age_ms)
+        status = row.get("status", "NOT_RECEIVED")
+        if status == "FRESH" and (effective_age is None or effective_age > maximum_age_ms):
+            status = "STALE"
+        sources.append(ReferenceQuote(
+            name, "", row.get("symbol", ""), row.get("market_type", ""),
+            row.get("quote_currency", ""), row.get("price"), row.get("bid"), row.get("ask"),
+            row.get("source_timestamp"), row.get("received_at"), effective_age, status,
+        ))
+    selected = next((row for row in sources if row.source == settlement_source), None)
+    verified = selected is not None and selected.status == "FRESH" and selected.price is not None
+    return aggregate_reference(sources, selected.price if selected else None, verified)

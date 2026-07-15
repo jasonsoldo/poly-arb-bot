@@ -11,6 +11,7 @@ def test_dashboard_uses_paired_lock_execution_and_health_fields():
     assert "expected_execution_value" in source
     assert "BTC UP / DOWN SHADOW SCALPER" not in source
     assert "market_matrix" in source
+    assert "DIR REF" in source
     assert "reference_prices.assets" in source
     for asset in ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"):
         assert asset in source

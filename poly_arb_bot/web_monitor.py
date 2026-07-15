@@ -1,5 +1,6 @@
 import json
 import mimetypes
+import os
 import threading
 import time
 from collections import Counter
@@ -7,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .shadow_report import build_report
+from .reference_layer import reference_state_for_asset
 from .strategy_config import StrategyConfig
 
 
@@ -381,15 +383,51 @@ def build_status(data_dir, log_file, state_file):
     model_edges = [item for item in signals if item.get("model_probability", 0) - item.get("expected_fill_price", 1) > config.min_edge]
     blocked = Counter(reason for item in signals if (reason := _signal_block_reason(item, config)))
     risk_passed = [item for item in signals if _signal_block_reason(item, config) is None]
-    market_matrix = {asset: {interval: {"count": 0, "markets": []} for interval in INTERVALS} for asset in ASSETS}
+    market_matrix = {
+        asset: {
+            interval: {
+                "count": 0, "markets": [], "reference_ready": 0, "reference_blocked": 0,
+            }
+            for interval in INTERVALS
+        }
+        for asset in ASSETS
+    }
+    market_reference_states = {}
+    maximum_reference_age_ms = float(os.getenv("REFERENCE_MAX_AGE_MS", "3000"))
     for market in sorted(markets, key=lambda item: item.get("close_ts", 0)):
         asset, interval = market.get("asset"), market.get("interval")
         if asset in market_matrix and interval in market_matrix[asset]:
             cell = market_matrix[asset][interval]
             entry = dict(market)
             entry["slot"] = "current" if cell["count"] == 0 else "next"
+            reference = reference_state_for_asset(
+                reference_prices.get("assets", {}).get(asset, {}),
+                market.get("settlement_source"),
+                maximum_reference_age_ms,
+            )
+            reference_row = {
+                "market_id": market.get("market_id"),
+                "asset": asset,
+                "interval": interval,
+                "settlement_source": market.get("settlement_source"),
+                "fast_price": reference.fast_price,
+                "consensus_price": reference.consensus_price,
+                "settlement_reference": reference.settlement_reference,
+                "fresh_exchange_source_count": reference.fresh_exchange_source_count,
+                "fresh_usd_spot_source_count": reference.fresh_usd_spot_source_count,
+                "cross_source_divergence_bps": reference.cross_source_divergence_bps,
+                "reference_quorum_met": reference.reference_quorum_met,
+                "reference_state": reference.reference_state,
+                "reference_block_reason": reference.reference_block_reason,
+            }
+            market_reference_states[market.get("market_id")] = reference_row
+            entry["reference"] = reference_row
             cell["markets"].append(entry)
             cell["count"] += 1
+            if reference.reference_quorum_met:
+                cell["reference_ready"] += 1
+            else:
+                cell["reference_blocked"] += 1
     latest_event = next(iter(latest_shadow.values()), None)
     strategy_score = _strategy_score(latest_event)
     strategy_counts, strategy_refreshing = _strategy_counts_for_status((selected_log, strategy_log))
@@ -503,6 +541,7 @@ def build_status(data_dir, log_file, state_file):
             "real_orders": 0,
         },
         "market_matrix": market_matrix,
+        "market_reference_states": market_reference_states,
         "asset_latest_pnl": asset_latest_pnl,
         "analytics_refreshing": analytics_refreshing,
         "system_status": system_status,

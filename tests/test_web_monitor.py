@@ -171,6 +171,40 @@ def test_web_status_builds_seven_by_four_market_matrix(tmp_path):
     assert status["market_matrix"]["HYPE"]["4h"]["count"] == 1
 
 
+def test_web_status_reports_reference_readiness_per_market(tmp_path):
+    now_ms = time.time() * 1000
+    (tmp_path / "live_markets.json").write_text(json.dumps({"markets": [
+        {"market_id": "bnb-1h", "asset": "BNB", "interval": "1h", "settlement_source": "binance"},
+        {"market_id": "bnb-5m", "asset": "BNB", "interval": "5m", "settlement_source": "chainlink"},
+    ]}), encoding="utf-8")
+    (tmp_path / "venue-status.json").write_text(json.dumps({
+        "updated_at_ms": now_ms,
+        "assets": {"BNB": {"sources": {
+            "binance": {
+                "symbol": "bnbusdt", "market_type": "spot", "quote_currency": "USDT",
+                "price": 582.0, "message_age_ms": 100, "status": "FRESH",
+            },
+            "coinbase": {
+                "symbol": "BNB-USD", "market_type": "spot", "quote_currency": "USD",
+                "price": 581.9, "message_age_ms": 100, "status": "FRESH",
+            },
+            "chainlink": {
+                "symbol": "bnb/usd", "market_type": "oracle", "quote_currency": "USD",
+                "price": 581.8, "message_age_ms": 50_000, "status": "FRESH",
+            },
+        }}},
+    }), encoding="utf-8")
+
+    status = build_status(tmp_path, tmp_path / "missing.jsonl", tmp_path / "state.json")
+
+    assert status["market_reference_states"]["bnb-1h"]["reference_state"] == "REFERENCE_READY"
+    assert status["market_reference_states"]["bnb-5m"]["reference_state"] == "REFERENCE_BLOCKED"
+    assert status["market_matrix"]["BNB"]["1h"]["reference_ready"] == 1
+    assert status["market_matrix"]["BNB"]["1h"]["reference_blocked"] == 0
+    assert status["market_matrix"]["BNB"]["5m"]["reference_ready"] == 0
+    assert status["market_matrix"]["BNB"]["5m"]["reference_blocked"] == 1
+
+
 def test_web_status_marks_reference_assets_independently_stale(tmp_path):
     now_ms = time.time() * 1000
     (tmp_path / "venue-status.json").write_text(json.dumps({

@@ -1,3 +1,4 @@
+import poly_arb_bot.reference_layer as reference_layer
 from poly_arb_bot.reference_layer import ReferenceQuote, aggregate_reference
 
 
@@ -40,3 +41,29 @@ def test_reference_reports_missing_required_usd_spot_source():
     ], settlement_reference=100, settlement_verified=True, max_divergence_bps=100)
     assert state.reference_quorum_met is False
     assert state.reference_block_reason == "required_usd_spot_source_unavailable"
+
+
+def test_market_settlement_source_changes_reference_readiness():
+    assert hasattr(reference_layer, "reference_state_for_asset")
+    asset = {"sources": {
+        "binance": {
+            "symbol": "bnbusdt", "market_type": "spot", "quote_currency": "USDT",
+            "price": 582.0, "message_age_ms": 100, "status": "FRESH",
+        },
+        "coinbase": {
+            "symbol": "BNB-USD", "market_type": "spot", "quote_currency": "USD",
+            "price": 581.9, "message_age_ms": 100, "status": "FRESH",
+        },
+        "chainlink": {
+            "symbol": "bnb/usd", "market_type": "oracle", "quote_currency": "USD",
+            "price": 581.8, "message_age_ms": 50_000, "status": "FRESH",
+        },
+    }}
+
+    hourly = reference_layer.reference_state_for_asset(asset, "binance", 3_000)
+    short_window = reference_layer.reference_state_for_asset(asset, "chainlink", 3_000)
+
+    assert hourly.reference_state == "REFERENCE_READY"
+    assert hourly.settlement_reference == 582.0
+    assert short_window.reference_state == "REFERENCE_BLOCKED"
+    assert short_window.reference_block_reason == "settlement_reference_unavailable"
