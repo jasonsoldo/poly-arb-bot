@@ -611,6 +611,12 @@ def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
         ],
         "completed": [],
         "portfolio_rejections": {},
+        "current_risk_halts": {},
+        "would_halt_reasons": {"low_price_lottery_ev": "lottery_consecutive_loss_limit"},
+        "calibration_bypasses": {"lottery_consecutive_loss_limit": 7},
+        "calibration_mode": True,
+        "portfolio_limits_enforced": False,
+        "risk_mode": "CALIBRATION_UNTHROTTLED",
     }), encoding="utf-8")
 
     status = build_status(data, tmp_path / "missing.jsonl", state / "orders.json")
@@ -621,4 +627,10 @@ def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
     assert lifecycle["settlement_pending"] == 1
     assert lifecycle["orphaned_positions"] == 1
     assert len(lifecycle["positions"]) == 2
+    assert lifecycle["calibration_mode"] is True
+    assert lifecycle["current_risk_halts"] == {}
+    assert lifecycle["would_halt_reasons"] == {
+        "low_price_lottery_ev": "lottery_consecutive_loss_limit"
+    }
+    assert lifecycle["calibration_bypasses"] == {"lottery_consecutive_loss_limit": 7}
 

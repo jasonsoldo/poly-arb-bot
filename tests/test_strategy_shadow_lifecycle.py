@@ -47,7 +47,7 @@ def test_repeated_accepts_open_one_position(tmp_path):
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["entry_cost"] == 4.1
     assert position["real_order_submissions"] == 0
-    assert position["config_version"] == "shadow-portfolio-v3"
+    assert position["config_version"] == "shadow-portfolio-v4"
     assert len(position["config_hash"]) == 64
 
 
@@ -199,7 +199,33 @@ def test_strategy_order_size_limits_are_enforced(tmp_path):
     markets = {"m1": market()}
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log, limits)
     assert lifecycle.consume(accepted(), markets) is False
-    assert json.loads(log.read_text().splitlines()[-1])["reason"] == "directional_order_size_limit"
+    reject = json.loads(log.read_text().splitlines()[-1])
+    assert reject["reason"] == "directional_order_size_limit"
+    assert reject["real_fills"] == 0
+
+
+def test_calibration_mode_bypasses_portfolio_limits_and_records_counterfactual(tmp_path):
+    limits = replace(PortfolioLimits(), directional_max_order_size=5)
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl", limits,
+        calibration_mode=True,
+    )
+
+    assert lifecycle.consume(accepted(), {"m1": market()}) is True
+
+    position = next(iter(lifecycle.data["positions"].values()))
+    assert position["risk_mode"] == "CALIBRATION_UNTHROTTLED"
+    assert position["portfolio_limits_enforced"] is False
+    assert position["would_block_reason"] == "directional_order_size_limit"
+    assert lifecycle.data["calibration_bypasses"] == {"directional_order_size_limit": 1}
+    assert lifecycle.data["current_risk_halts"] == {}
+
+
+def test_calibration_mode_can_be_enabled_from_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHADOW_CALIBRATION_MODE", "true")
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    assert lifecycle.data["calibration_mode"] is True
+    assert lifecycle.data["portfolio_limits_enforced"] is False
 
 
 def test_lottery_daily_loss_blocks_new_positions_after_settlement(tmp_path, monkeypatch):

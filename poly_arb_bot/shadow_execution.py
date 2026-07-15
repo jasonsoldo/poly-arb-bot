@@ -143,6 +143,7 @@ def run(audit_path, state_path, log_path, poll_seconds=0.5,
             process_audit_once(audit_path, machine, lifecycle, markets)
             process_strategy_audit_once(strategy_audit_path, lifecycle, markets)
             lifecycle.settle(markets, _json(venue_path, {}), time.time())
+            lifecycle.refresh_risk_status()
             time.sleep(poll_seconds)
     finally:
         machine.flush()

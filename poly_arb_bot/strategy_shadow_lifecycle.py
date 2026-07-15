@@ -51,7 +51,7 @@ class PortfolioLimits:
 
 class StrategyShadowLifecycle:
     def __init__(self, state_path, log_path, limits=None, orphan_after_seconds=None,
-                 checkpoint_interval_seconds=5):
+                 checkpoint_interval_seconds=5, calibration_mode=None):
         self.state_path = Path(state_path)
         self.logger = JsonlLogger(Path(log_path))
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,6 +59,11 @@ class StrategyShadowLifecycle:
         self._dirty = False
         self._last_checkpoint = time.monotonic()
         self.limits = limits or PortfolioLimits.from_env()
+        self.calibration_mode = (
+            str(os.getenv("SHADOW_CALIBRATION_MODE", "0")).strip().lower()
+            in {"1", "true", "yes", "on"}
+            if calibration_mode is None else bool(calibration_mode)
+        )
         self.orphan_after_seconds = float(
             orphan_after_seconds
             if orphan_after_seconds is not None
@@ -67,22 +72,33 @@ class StrategyShadowLifecycle:
                 str(DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS),
             )
         )
-        self.config_version = "shadow-portfolio-v3"
+        self.config_version = "shadow-portfolio-v4"
         self.strategy_config_hash = strategy_config()[1]
+        config_payload = {
+            "calibration_mode": self.calibration_mode,
+            "limits": asdict(self.limits),
+        }
         self.config_hash = hashlib.sha256(
-            json.dumps(asdict(self.limits), sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(config_payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         self.data = self._load()
         for field in ("real_order_submissions", "real_orders", "real_fills"):
             self.data.setdefault(field, 0)
         self.data.setdefault("completed_trades", [])
         self.data.setdefault("portfolio_rejections", {})
+        self.data.setdefault("calibration_bypasses", {})
         self.data.setdefault("orphaned_positions", [])
         self.data["portfolio_limits"] = asdict(self.limits)
+        self.data["calibration_mode"] = self.calibration_mode
+        self.data["portfolio_limits_enforced"] = not self.calibration_mode
+        self.data["risk_mode"] = (
+            "CALIBRATION_UNTHROTTLED" if self.calibration_mode else "PORTFOLIO_LIMITS_ENFORCED"
+        )
         self.data["config_version"] = self.config_version
         self.data["config_hash"] = self.config_hash
         self._mark_dirty()
         self._backfill_completed_trades()
+        self.refresh_risk_status()
         self._save(force=True)
 
     def _load(self):
@@ -185,6 +201,25 @@ class StrategyShadowLifecycle:
             return f"{prefix}_consecutive_loss_limit"
         return None
 
+    def refresh_risk_status(self):
+        would_halt = {}
+        for strategy, daily_limit, consecutive_limit, prefix in (
+            ("late_window_directional_ev", self.limits.directional_max_daily_loss,
+             self.limits.directional_max_consecutive_losses, "directional"),
+            ("low_price_lottery_ev", self.limits.lottery_max_daily_loss,
+             self.limits.lottery_max_consecutive_losses, "lottery"),
+        ):
+            reason = self._loss_block_reason(strategy, daily_limit, consecutive_limit, prefix)
+            if reason:
+                would_halt[strategy] = reason
+        current = {} if self.calibration_mode else would_halt
+        if (self.data.get("current_risk_halts") != current or
+                self.data.get("would_halt_reasons") != would_halt):
+            self.data["current_risk_halts"] = current
+            self.data["would_halt_reasons"] = would_halt
+            self._mark_dirty()
+        return current
+
     def _reject(self, row, reason):
         key = self._key(row)
         if self.data["portfolio_rejections"].get(key) != reason:
@@ -195,7 +230,9 @@ class StrategyShadowLifecycle:
                 "timeframe": row.get("timeframe"), "outcome": row.get("outcome"),
                 "decision": "REJECT", "reason": reason,
                 "config_version": self.config_version, "config_hash": self.config_hash,
-                "real_order_submissions": 0, "real_orders": 0,
+                "risk_mode": self.data["risk_mode"],
+                "portfolio_limits_enforced": not self.calibration_mode,
+                "real_order_submissions": 0, "real_orders": 0, "real_fills": 0,
             })
         self.data["portfolio_rejections"][key] = reason
         self._mark_dirty()
@@ -267,8 +304,12 @@ class StrategyShadowLifecycle:
         fees = 0.0 if paired else float(row.get("fees", 0))
         entry_cost = float(row["net_cost"]) if paired else size * (fill + fees)
         block_reason = self._portfolio_block_reason(row, market, entry_cost)
-        if block_reason:
+        if block_reason and not self.calibration_mode:
             return self._reject(row, block_reason)
+        if block_reason:
+            bypasses = self.data["calibration_bypasses"]
+            bypasses[block_reason] = int(bypasses.get(block_reason, 0)) + 1
+            self._mark_dirty()
         self.data["portfolio_rejections"].pop(key, None)
         self.data["positions"][key] = {
             "event_id": row["event_id"], "strategy": strategy,
@@ -310,6 +351,9 @@ class StrategyShadowLifecycle:
             "settlement_source": market.get("settlement_source"),
             "strategy_config_version": row.get("config_version"),
             "strategy_config_hash": row.get("config_hash"),
+            "risk_mode": self.data["risk_mode"],
+            "portfolio_limits_enforced": not self.calibration_mode,
+            "would_block_reason": block_reason,
             "config_version": self.config_version, "config_hash": self.config_hash,
             "real_order_submissions": 0, "real_orders": 0, "real_fills": 0,
         }
@@ -441,6 +485,7 @@ class StrategyShadowLifecycle:
             durable_transition = True
 
         if changed:
+            self.refresh_risk_status()
             self._mark_dirty()
             self._save(force=durable_transition)
 

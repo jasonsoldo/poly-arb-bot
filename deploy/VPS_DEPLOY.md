@@ -29,6 +29,12 @@ rm -f state/reference-price.sock
 
 Do not add wallet keys or live-order credentials. `POLY_ARB_MODE` must remain `dry_run`.
 
+`SHADOW_CALIBRATION_MODE=1` disables only portfolio sampling throttles in Shadow
+(daily loss, consecutive loss, correlation, position count, and notional limits).
+Market-data, settlement, fee, depth, slippage, freshness, clock, and strategy EV
+checks remain fail closed. Each opened position records `would_block_reason`, and
+real submissions/orders/fills remain zero. Never use this setting for live execution.
+
 ## 3. Build and verify locally on the VPS
 
 ```bash
