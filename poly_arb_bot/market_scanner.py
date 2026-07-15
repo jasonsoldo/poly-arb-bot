@@ -136,7 +136,9 @@ class MarketScanner:
 
     def _asset_from_title(self, title: str) -> Optional[str]:
         for asset in self.assets:
-            if title.startswith(f"{asset} Up or Down"):
+            if title.startswith(f"{asset} Up or Down") or (
+                asset == "Hyperliquid" and title.startswith("HYPE Up or Down")
+            ):
                 return asset
         return None
 
@@ -207,7 +209,8 @@ class MarketScanner:
                 if interval not in INTERVAL_SECONDS:
                     raise ValueError(f"unsupported interval: {interval}")
                 suffix = "hourly" if interval == "1h" else interval
-                rows.append((ASSET_CODES[asset], interval, f"{prefix}-up-or-down-{suffix}"))
+                series_prefix = "solana" if asset == "Solana" and interval == "1h" else prefix
+                rows.append((ASSET_CODES[asset], interval, f"{series_prefix}-up-or-down-{suffix}"))
         return rows
 
     @staticmethod

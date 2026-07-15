@@ -175,6 +175,17 @@ def test_scanner_generates_seven_asset_four_timeframe_matrix():
     assert ("BTC", "5m", "btc-up-or-down-5m") in rows
     assert ("HYPE", "4h", "hype-up-or-down-4h") in rows
     assert ("BTC", "1h", "btc-up-or-down-hourly") in rows
+    assert ("SOL", "1h", "solana-up-or-down-hourly") in rows
+
+
+def test_scanner_accepts_official_hype_market_title():
+    market = {
+        "conditionId": "0xhype", "question": "HYPE Up or Down - July 15, 1AM ET",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-15T02:00:00Z",
+    }
+    spec = MarketScanner().spec_from_market(market, interval="1h", series_id="11289")
+    assert (spec.asset, spec.symbol, spec.series_id) == ("HYPE", "HYPEUSDT", "11289")
 
 
 def test_scanner_identifies_settlement_source_from_official_rules():

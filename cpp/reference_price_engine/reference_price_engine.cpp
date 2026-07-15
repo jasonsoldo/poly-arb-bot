@@ -67,9 +67,9 @@ const AssetConfig ASSETS[] = {
     {"ETH", "ethusdt", "eth/usd", "ETH-USD", "ETH/USD", "ETHUSDT", "ETH-USDT"},
     {"SOL", "solusdt", "sol/usd", "SOL-USD", "SOL/USD", "SOLUSDT", "SOL-USDT"},
     {"XRP", "xrpusdt", "xrp/usd", "XRP-USD", "XRP/USD", "XRPUSDT", "XRP-USDT"},
-    {"BNB", "bnbusdt", "", "", "", "BNBUSDT", "BNB-USDT"},
-    {"DOGE", "dogeusdt", "", "DOGE-USD", "DOGE/USD", "DOGEUSDT", "DOGE-USDT"},
-    {"HYPE", "", "", "", "", "", ""},
+    {"BNB", "bnbusdt", "bnb/usd", "BNB-USD", "BNB/USD", "BNBUSDT", "BNB-USDT"},
+    {"DOGE", "dogeusdt", "doge/usd", "DOGE-USD", "DOGE/USD", "DOGEUSDT", "DOGE-USDT"},
+    {"HYPE", "", "hype/usd", "HYPE-USD", "HYPE/USD", "", "HYPE-USDT"},
 };
 
 struct SharedState {
@@ -429,10 +429,10 @@ int main(int argc, char** argv) {
 
     const std::string rtds_sub = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
     const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker/btcusdt@kline_1h/ethusdt@kline_1h/solusdt@kline_1h/xrpusdt@kline_1h/bnbusdt@kline_1h/dogeusdt@kline_1h/btcusdt@kline_4h/ethusdt@kline_4h/solusdt@kline_4h/xrpusdt@kline_4h/bnbusdt@kline_4h/dogeusdt@kline_4h";
-    const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","DOGE-USD"],"channels":["ticker"]})";
-    const std::string kraken_sub = R"({"method":"subscribe","params":{"channel":"ticker","symbol":["BTC/USD","ETH/USD","SOL/USD","XRP/USD","DOGE/USD"]}})";
+    const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","BNB-USD","DOGE-USD","HYPE-USD"],"channels":["ticker"]})";
+    const std::string kraken_sub = R"({"method":"subscribe","params":{"channel":"ticker","symbol":["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","DOGE/USD","HYPE/USD"]}})";
     const std::string bybit_sub = R"({"op":"subscribe","args":["tickers.BTCUSDT","tickers.ETHUSDT","tickers.SOLUSDT","tickers.XRPUSDT","tickers.BNBUSDT","tickers.DOGEUSDT"]})";
-    const std::string okx_sub = R"({"op":"subscribe","args":[{"channel":"tickers","instId":"BTC-USDT"},{"channel":"tickers","instId":"ETH-USDT"},{"channel":"tickers","instId":"SOL-USDT"},{"channel":"tickers","instId":"XRP-USDT"},{"channel":"tickers","instId":"BNB-USDT"},{"channel":"tickers","instId":"DOGE-USDT"}]})";
+    const std::string okx_sub = R"({"op":"subscribe","args":[{"channel":"tickers","instId":"BTC-USDT"},{"channel":"tickers","instId":"ETH-USDT"},{"channel":"tickers","instId":"SOL-USDT"},{"channel":"tickers","instId":"XRP-USDT"},{"channel":"tickers","instId":"BNB-USDT"},{"channel":"tickers","instId":"DOGE-USDT"},{"channel":"tickers","instId":"HYPE-USDT"}]})";
 
     std::thread binance([&] {
         websocket_loop(shared, "binance", "data-stream.binance.vision", "443", binance_path, "", false, [&](const std::string& raw) {

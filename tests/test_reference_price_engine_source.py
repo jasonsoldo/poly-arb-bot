@@ -59,9 +59,11 @@ def test_reference_engine_subscribes_to_official_bybit_and_okx_spot_tickers():
     assert '/ws/v5/public' in SOURCE
     assert '"instId":"BTC-USDT"' in SOURCE
     assert '"bidPx"' in SOURCE and '"askPx"' in SOURCE
-    assert '"BNB", "bnbusdt", "", "", "", "BNBUSDT", "BNB-USDT"' in SOURCE
-    assert '"DOGE", "dogeusdt", "", "DOGE-USD", "DOGE/USD", "DOGEUSDT", "DOGE-USDT"' in SOURCE
-    assert '"HYPE", "", "", "", "", "", ""' in SOURCE
+    assert '"BNB", "bnbusdt", "bnb/usd", "BNB-USD", "BNB/USD", "BNBUSDT", "BNB-USDT"' in SOURCE
+    assert '"DOGE", "dogeusdt", "doge/usd", "DOGE-USD", "DOGE/USD", "DOGEUSDT", "DOGE-USDT"' in SOURCE
+    assert '"HYPE", "", "hype/usd", "HYPE-USD", "HYPE/USD", "", "HYPE-USDT"' in SOURCE
+    for symbol in ("bnb/usd", "doge/usd", "hype/usd", "BNB-USD", "HYPE-USD", "BNB/USD", "HYPE/USD", "HYPE-USDT"):
+        assert symbol in SOURCE
 
 def test_reference_engine_emits_normalized_source_and_quorum_state():
     for field in (
