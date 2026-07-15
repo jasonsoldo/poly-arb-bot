@@ -9,9 +9,16 @@ def test_cpp_engine_loads_strategy_market_metadata_and_module():
     assert '#include "../strategy/ev_strategy.hpp"' in ENGINE
     for field in (
         "condition_id", "asset", "interval", "window", "start_ts", "open_price",
+        "open_price_source", "open_price_capture_mode", "open_price_source_timestamp_ms",
         "settlement_source", "accepting_orders",
     ):
         assert field in ENGINE
+
+
+def test_cpp_strategy_audit_exposes_price_to_beat_provenance():
+    assert '\\"price_to_beat_source\\"' in ENGINE
+    assert '\\"price_to_beat_capture_mode\\"' in ENGINE
+    assert '\\"price_to_beat_source_timestamp_ms\\"' in ENGINE
 
 
 def test_cpp_engine_emits_four_independent_strategy_evaluations():

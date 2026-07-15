@@ -103,6 +103,16 @@ class MarketScanner:
             expected_start_ts = close_ts - duration
             if start_ts is None or abs(float(start_ts) - expected_start_ts) > 5:
                 start_ts = expected_start_ts
+        metadata = event.get("eventMetadata") or {}
+        open_price_source = metadata.get("priceToBeatSource") if isinstance(metadata, dict) else None
+        open_price_capture_mode = metadata.get("priceToBeatCaptureMode") if isinstance(metadata, dict) else None
+        open_price_source_timestamp_ms = metadata.get("priceToBeatSourceTimestampMs") if isinstance(metadata, dict) else None
+        if open_price is not None:
+            open_price_source = open_price_source or "gamma"
+            open_price_capture_mode = open_price_capture_mode or "gamma_metadata"
+            open_price_source_timestamp_ms = open_price_source_timestamp_ms or (
+                float(start_ts) * 1000 if start_ts is not None else None
+            )
 
         return LiveMarketSpec(
             market_id=condition_id,
@@ -118,6 +128,9 @@ class MarketScanner:
             interval=interval,
             series_id=series_id,
             fee_rate=self._fee_rate(market),
+            open_price_source=open_price_source,
+            open_price_capture_mode=open_price_capture_mode,
+            open_price_source_timestamp_ms=open_price_source_timestamp_ms,
         )
 
     @staticmethod

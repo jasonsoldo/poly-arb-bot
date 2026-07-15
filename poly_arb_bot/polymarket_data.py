@@ -6,9 +6,21 @@ from .http_utils import HttpClient
 
 
 class PolymarketDataClient:
-    def __init__(self, http: HttpClient = None, base_url: str = "https://gamma-api.polymarket.com"):
+    PRICE_VARIANTS = {
+        "5m": "fiveminute",
+        "15m": "fifteen",
+        "1h": "hourly",
+        "4h": "fourhour",
+    }
+
+    def __init__(
+        self, http: HttpClient = None,
+        base_url: str = "https://gamma-api.polymarket.com",
+        website_base_url: str = "https://polymarket.com",
+    ):
         self.http = http or HttpClient(timeout=10.0, user_agent="Mozilla/5.0 poly-arb-bot/0.1")
         self.base_url = base_url
+        self.website_base_url = website_base_url
 
     def events(self, limit: int = 100, offset: int = 0, active: bool = True) -> List[Dict[str, Any]]:
         return self._paged("/events", limit, offset, active)
@@ -27,6 +39,21 @@ class PolymarketDataClient:
     def event_by_id(self, event_id: str) -> Dict[str, Any]:
         response = self.http.get_json(self.base_url, f"/events/{event_id}")
         return response.data if isinstance(response.data, dict) else {}
+
+    def crypto_price(self, symbol: str, start_ts: int, interval: str, close_ts: int) -> Dict[str, Any]:
+        variant = self.PRICE_VARIANTS.get(interval)
+        if not variant:
+            raise ValueError(f"unsupported crypto price interval: {interval}")
+        params = {
+            "symbol": symbol,
+            "eventStartTime": int(start_ts),
+            "variant": variant,
+            "endDate": datetime.fromtimestamp(close_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        data = self.http.get_json(
+            self.website_base_url, "/api/crypto/crypto-price", params,
+        ).data
+        return data if isinstance(data, dict) else {}
 
     def series_by_slug(self, slug: str) -> List[Dict[str, Any]]:
         response = self.http.get_json(

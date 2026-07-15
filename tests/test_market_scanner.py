@@ -68,6 +68,34 @@ def test_scanner_reads_open_price_from_event_metadata():
     spec = MarketScanner().spec_from_market(market, event)
 
     assert spec.open_price == 63048.3179
+    assert spec.open_price_source == "gamma"
+    assert spec.open_price_capture_mode == "gamma_metadata"
+
+
+def test_scanner_keeps_official_open_price_provenance():
+    event = {
+        "eventMetadata": {
+            "priceToBeat": 64765.026,
+            "priceToBeatSource": "polymarket_crypto_price_api",
+            "priceToBeatCaptureMode": "official_open_price_api",
+            "priceToBeatSourceTimestampMs": 1784099400000,
+        }
+    }
+    market = {
+        "conditionId": "0xcondition",
+        "question": "Bitcoin Up or Down - July 15, 3:10AM-3:15AM ET",
+        "outcomes": ["Up", "Down"],
+        "clobTokenIds": ["111", "222"],
+        "eventStartTime": "2026-07-15T07:10:00Z",
+        "endDate": "2026-07-15T07:15:00Z",
+    }
+
+    spec = MarketScanner().spec_from_market(market, event, interval="5m")
+
+    assert spec.open_price == 64765.026
+    assert spec.open_price_source == "polymarket_crypto_price_api"
+    assert spec.open_price_capture_mode == "official_open_price_api"
+    assert spec.open_price_source_timestamp_ms == 1784099400000
 
 
 def test_scanner_generates_updown_slugs_for_interval_boundaries():

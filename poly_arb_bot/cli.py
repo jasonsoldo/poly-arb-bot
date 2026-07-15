@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -213,24 +214,58 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
             continue
         unique[spec.market_id] = spec
         used_tokens.update(tokens)
+    restored = restore_cached_open_prices(list(unique.values()), output_path)
+    unique = {spec.market_id: spec for spec in restored}
     print(f"MARKET_PARSE_DONE candidates={len(specs)} unique_markets={len(unique)}", flush=True)
+    if series_errors:
+        print(
+            f"SCAN_SOURCE_ERROR gamma_errors={series_errors} "
+            f"elapsed_ms={int((time.monotonic() - scan_started) * 1000)} kept=true",
+            flush=True,
+        )
+        return 3
     if remaining() <= 0:
         print(f"SCAN_DEADLINE_EXCEEDED elapsed_ms={int((time.monotonic() - scan_started) * 1000)} kept=true", flush=True)
         return 3
+    network_started = time.monotonic()
+    ptb_workers = max(1, min(16, int(os.getenv("PRICE_TO_BEAT_CONCURRENCY", "16"))))
+    ptb_candidates = sum(
+        spec.open_price is None and bool(spec.start_ts) and spec.start_ts <= now_ts < spec.close_ts
+        for spec in unique.values()
+    )
+    print(
+        f"PRICE_TO_BEAT_START candidates={ptb_candidates} "
+        f"active_workers={min(ptb_workers, ptb_candidates)}", flush=True,
+    )
     clob = PolymarketClobClient()
     diagnostics = {}
     examples = []
-    stage_started = time.monotonic()
     print(
         f"CLOB_VALIDATE_START candidates={len(unique)} active_workers={min(8, len(unique))} "
         f"clob_request_count={1 if unique else 0}", flush=True,
     )
-    valid, rejected = filter_specs_with_orderbooks(list(unique.values()), clob, diagnostics, examples)
+    base_specs = list(unique.values())
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        ptb_future = executor.submit(
+            enrich_open_prices, base_specs, client, int(time.time()), ptb_workers, remaining,
+        )
+        clob_future = executor.submit(
+            filter_specs_with_orderbooks, base_specs, clob, diagnostics, examples,
+        )
+        enriched, ptb_stats = ptb_future.result()
+        valid, rejected = clob_future.result()
+    elapsed_ms = int((time.monotonic() - network_started) * 1000)
     print(
-        f"CLOB_VALIDATE_DONE elapsed_ms={int((time.monotonic() - stage_started) * 1000)} "
+        f"PRICE_TO_BEAT_DONE elapsed_ms={elapsed_ms} "
+        + " ".join(f"{key}={value}" for key, value in ptb_stats.items()),
+        flush=True,
+    )
+    print(
+        f"CLOB_VALIDATE_DONE elapsed_ms={elapsed_ms} "
         f"completed_workers={len(unique)} valid={len(valid)} rejected={rejected}", flush=True,
     )
-    unique = {spec.market_id: spec for spec in valid}
+    enriched_by_id = {spec.market_id: spec for spec in enriched}
+    unique = {spec.market_id: enriched_by_id[spec.market_id] for spec in valid}
     if remaining() <= 0:
         print(f"SCAN_DEADLINE_EXCEEDED elapsed_ms={int((time.monotonic() - scan_started) * 1000)} kept=true", flush=True)
         return 3
@@ -253,6 +288,82 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     if not unique and not rejected:
         print("NO_CURRENT_UPDOWN_MARKETS no current event in configured official recurring series")
     return 0 if unique else 3
+
+
+def restore_cached_open_prices(specs, output_path: Path):
+    try:
+        rows = json.loads(output_path.read_text(encoding="utf-8")).get("markets", [])
+    except (OSError, ValueError, AttributeError):
+        rows = []
+    cached = {
+        (row.get("market_id"), row.get("start_ts")): row
+        for row in rows
+        if row.get("open_price") is not None
+    }
+    restored = []
+    for spec in specs:
+        row = cached.get((spec.market_id, spec.start_ts)) if spec.open_price is None else None
+        if row:
+            restored.append(replace(
+                spec,
+                open_price=float(row["open_price"]),
+                open_price_source=row.get("open_price_source") or "cached_verified_config",
+                open_price_capture_mode=row.get("open_price_capture_mode") or "cached_verified_config",
+                open_price_source_timestamp_ms=row.get("open_price_source_timestamp_ms") or (
+                    float(spec.start_ts) * 1000 if spec.start_ts is not None else None
+                ),
+            ))
+        else:
+            restored.append(spec)
+    return restored
+
+
+def enrich_open_prices(specs, client, now_ts, workers=8, remaining=None):
+    rows = list(specs)
+    candidates = [
+        (index, spec) for index, spec in enumerate(rows)
+        if spec.open_price is None and spec.start_ts is not None
+        and spec.start_ts <= now_ts < spec.close_ts
+    ]
+    stats = {"requested": len(candidates), "enriched": 0, "unavailable": 0, "errors": 0}
+
+    def fetch(item):
+        index, spec = item
+        if remaining is not None:
+            budget = remaining()
+            if budget <= 0:
+                raise TimeoutError("scan_global_deadline")
+            client.http.timeout = min(6.0, budget)
+        data = client.crypto_price(spec.asset, spec.start_ts, spec.interval, spec.close_ts)
+        value = data.get("openPrice")
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            return index, None
+        return index, price if math.isfinite(price) and price > 0 else None
+
+    if candidates:
+        with ThreadPoolExecutor(max_workers=min(workers, len(candidates))) as executor:
+            futures = [executor.submit(fetch, item) for item in candidates]
+            for future in as_completed(futures):
+                try:
+                    index, price = future.result()
+                except (OSError, RuntimeError, TimeoutError, ValueError):
+                    stats["errors"] += 1
+                    continue
+                if price is None:
+                    stats["unavailable"] += 1
+                    continue
+                spec = rows[index]
+                rows[index] = replace(
+                    spec,
+                    open_price=price,
+                    open_price_source="polymarket_crypto_price_api",
+                    open_price_capture_mode="official_open_price_api",
+                    open_price_source_timestamp_ms=float(spec.start_ts) * 1000,
+                )
+                stats["enriched"] += 1
+    return rows, stats
 
 
 def write_market_payload_atomic(output_path: Path, payload, generated_at: int) -> None:

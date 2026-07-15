@@ -23,6 +23,9 @@ class LiveMarketSpec:
     interval: Optional[str] = None
     series_id: Optional[str] = None
     fee_rate: Optional[float] = None
+    open_price_source: Optional[str] = None
+    open_price_capture_mode: Optional[str] = None
+    open_price_source_timestamp_ms: Optional[float] = None
     max_allowed_price: float = 0.99
 
 

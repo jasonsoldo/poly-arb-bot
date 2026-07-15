@@ -113,6 +113,29 @@ def test_events_by_series_window_uses_official_time_filters():
     assert params["order"] == "endDate"
 
 
+def test_crypto_price_uses_official_polymarket_price_endpoint():
+    http = WindowHttp()
+    http.get_json = lambda base_url, path, params: (
+        http.params.append((base_url, path, params)) or
+        HttpResponse({"openPrice": 64765.026, "closePrice": None}, 1, "url")
+    )
+    client = PolymarketDataClient(http=http)
+
+    row = client.crypto_price("BTC", 1784099400, "5m", 1784099700)
+
+    assert row["openPrice"] == 64765.026
+    assert http.params == [(
+        "https://polymarket.com",
+        "/api/crypto/crypto-price",
+        {
+            "symbol": "BTC",
+            "eventStartTime": 1784099400,
+            "variant": "fiveminute",
+            "endDate": "2026-07-15T07:15:00Z",
+        },
+    )]
+
+
 def test_events_window_uses_official_filters_and_pagination():
     http = WindowHttp()
     PolymarketDataClient(http=http).events_in_window(1783900800, 1783929600, limit=100)

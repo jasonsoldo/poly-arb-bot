@@ -47,8 +47,8 @@ struct Book {
 };
 struct Market {
     std::string up, down, last_reason, condition_id, asset, interval, window;
-    std::string settlement_source, title;
-    std::optional<double> open_price;
+    std::string settlement_source, title, open_price_source, open_price_capture_mode;
+    std::optional<double> open_price, open_price_source_timestamp_ms;
     double fee = .07, start_ts = 0, close_ts = 0, active_since = 0, last_audit = 0;
     unsigned long long last_strategy_up_version = 0, last_strategy_down_version = 0;
     unsigned long long last_strategy_reference_revision = 0, last_strategy_time_bucket = 0;
@@ -81,6 +81,12 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
         market.title = row.get<std::string>("title", "");
         market.accepting_orders = row.get<bool>("accepting_orders", true);
         if (const auto value = row.get_optional<double>("open_price")) market.open_price = *value;
+        market.open_price_source = row.get<std::string>("open_price_source", "");
+        if (market.open_price_source == "null") market.open_price_source.clear();
+        market.open_price_capture_mode = row.get<std::string>("open_price_capture_mode", "");
+        if (market.open_price_capture_mode == "null") market.open_price_capture_mode.clear();
+        if (const auto value = row.get_optional<double>("open_price_source_timestamp_ms"))
+            market.open_price_source_timestamp_ms = *value;
         market.window = row.get<std::string>("window", market.start_ts > now_seconds() ? "next" : "current");
         if (market.close_ts <= now_seconds()) continue;
         if (market.up == market.down || tokens.count(market.up) || tokens.count(market.down)) throw std::runtime_error("duplicate market token");
@@ -715,6 +721,16 @@ private:
             << ",\"probability_reference_price\":";
         optional(reference.settlement_reference);
         out << ",\"price_to_beat\":"; optional(input.price_to_beat);
+        out << ",\"price_to_beat_source\":";
+        if (!market.open_price_source.empty())
+            out << '"' << reference_ipc::escaped(market.open_price_source) << '"';
+        else out << "null";
+        out << ",\"price_to_beat_capture_mode\":";
+        if (!market.open_price_capture_mode.empty())
+            out << '"' << reference_ipc::escaped(market.open_price_capture_mode) << '"';
+        else out << "null";
+        out << ",\"price_to_beat_source_timestamp_ms\":";
+        optional(market.open_price_source_timestamp_ms);
         out << ",\"distance_to_price_to_beat\":";
         if (reference.settlement_reference && input.price_to_beat)
             out << *reference.settlement_reference - *input.price_to_beat;

@@ -276,8 +276,11 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
     raw_anchor = (opening_prices or {}).get(market.get("market_id"), {})
     anchor = raw_anchor if _anchor_matches_market(raw_anchor, market) else {}
     price_to_beat = market.get("open_price")
-    price_to_beat_source = "gamma" if price_to_beat is not None else None
-    price_to_beat_capture_mode = "gamma" if price_to_beat is not None else None
+    price_to_beat_source = market.get("open_price_source") if price_to_beat is not None else None
+    price_to_beat_capture_mode = market.get("open_price_capture_mode") if price_to_beat is not None else None
+    if price_to_beat is not None:
+        price_to_beat_source = price_to_beat_source or "gamma"
+        price_to_beat_capture_mode = price_to_beat_capture_mode or "gamma_metadata"
     price_to_beat_source_timestamp_ms = (
         market.get("open_price_source_timestamp_ms")
         or (_market_start_ts(market) * 1000 if price_to_beat is not None else None)
