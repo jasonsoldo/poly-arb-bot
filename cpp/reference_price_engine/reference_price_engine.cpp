@@ -6,6 +6,8 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+#include "../reference_ipc/latest_value_server.hpp"
+#include "../reference_ipc/reference_snapshot.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -17,6 +19,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -139,9 +142,14 @@ struct SharedState {
     double engine_latency_us = 0;
     double last_status_write_ms = 0;
     unsigned long long status_writes = 0;
+    double last_ipc_publish_ms = 0;
+    unsigned long long ipc_sequence = 0;
+    std::string producer_session;
+    std::shared_ptr<reference_ipc::LatestValueServer> reference_publisher;
 };
 
-constexpr double STATUS_WRITE_INTERVAL_MS = 100;
+constexpr double STATUS_WRITE_INTERVAL_MS = 1000;
+constexpr double IPC_PUBLISH_INTERVAL_MS = 20;
 constexpr double DEFAULT_REFERENCE_FRESHNESS_MS = 3000;
 constexpr double COINBASE_REFERENCE_FRESHNESS_MS = 10000;
 constexpr double MODEL_SAMPLE_BUCKET_MS = 1000;
@@ -218,6 +226,113 @@ double momentum_bps(const SourceState& source, double timestamp, double horizon_
     while (start != source.samples.end() && timestamp - start->first > horizon_ms) ++start;
     if (start == source.samples.end() || start->second <= 0) return 0;
     return (source.samples.back().second / start->second - 1) * 10000;
+}
+
+void publish_ipc_locked(SharedState& shared, bool force = false) {
+    const double timestamp = now_ms();
+    if (!shared.reference_publisher ||
+        (!force && timestamp - shared.last_ipc_publish_ms < IPC_PUBLISH_INTERVAL_MS)) return;
+    shared.last_ipc_publish_ms = timestamp;
+    reference_ipc::Snapshot snapshot;
+    snapshot.producer_session = shared.producer_session;
+    snapshot.sequence = ++shared.ipc_sequence;
+    snapshot.produced_monotonic_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    snapshot.produced_wall_ms = timestamp;
+    for (const auto& config : ASSETS) {
+        const auto& asset = shared.assets.at(config.asset);
+        auto& output = snapshot.assets[config.asset];
+        std::vector<double> fresh_spot, fresh_usd, volatilities, momentums;
+        std::vector<double> model_sample_counts, model_sample_spans;
+        std::map<std::string, std::vector<double>> quote_prices;
+        for (const auto& item : asset.sources) {
+            const auto& source = item.second;
+            if (source_status(item.first, source, timestamp) == "FRESH" &&
+                source.market_type == "spot" && source.price)
+                quote_prices[source.quote_currency].push_back(source.price);
+        }
+        std::map<std::string, double> quote_medians;
+        for (const auto& item : quote_prices) quote_medians[item.first] = median(item.second);
+        const auto is_outlier = [&](const SourceState& source) {
+            const auto found = quote_medians.find(source.quote_currency);
+            return found != quote_medians.end() && found->second > 0 &&
+                   std::abs(source.price - found->second) / found->second * 10000 > 100;
+        };
+        double fast_price = 0, settlement_reference = 0;
+        for (const auto& item : asset.sources) {
+            const auto& source = item.second;
+            auto& state = output.sources[item.first];
+            state.symbol = source.symbol;
+            state.market_type = source.market_type;
+            state.quote_currency = source.quote_currency;
+            state.status = source_status(item.first, source, timestamp) == "FRESH" &&
+                           source.market_type == "spot" && is_outlier(source)
+                           ? "OUTLIER" : source_status(item.first, source, timestamp);
+            if (source.price > 0) state.price = source.price;
+            if (source.bid > 0) state.bid = source.bid;
+            if (source.ask > 0) state.ask = source.ask;
+            if (source.received_at > 0) {
+                state.received_at_ms = source.received_at;
+                state.message_age_ms = std::max(0.0, timestamp - source.received_at);
+            }
+            if (!source.source_timestamp.empty()) {
+                try {
+                    double source_ms = std::stod(source.source_timestamp);
+                    if (source_ms > 0 && source_ms < 1e12) source_ms *= 1000;
+                    if (source_ms > 0) state.source_timestamp_ms = source_ms;
+                } catch (...) {}
+            }
+            const auto copy_anchors = [](const auto& input, auto& target) {
+                const auto begin = input.size() > reference_ipc::MAX_ANCHORS_PER_SOURCE
+                    ? input.end() - reference_ipc::MAX_ANCHORS_PER_SOURCE : input.begin();
+                for (auto row = begin; row != input.end(); ++row)
+                    target.push_back({row->source_timestamp_ms, row->received_at, row->price, row->timeframe});
+            };
+            copy_anchors(source.anchor_samples, state.anchor_samples);
+            copy_anchors(source.settlement_samples, state.settlement_samples);
+            if (state.status != "FRESH" || source.price <= 0) continue;
+            if (item.first == "chainlink") {
+                settlement_reference = source.price;
+                continue;
+            }
+            if (source.market_type != "spot" || is_outlier(source)) continue;
+            fresh_spot.push_back(source.price);
+            ++output.fresh_exchange_source_count;
+            if (source.quote_currency == "USD") {
+                fresh_usd.push_back(source.price);
+                ++output.fresh_usd_spot_source_count;
+            }
+            if (!fast_price && (item.first == "binance" || item.first == "bybit" || item.first == "okx"))
+                fast_price = source.price;
+            const double volatility = volatility_per_sqrt_second(source);
+            if (volatility > 0) {
+                volatilities.push_back(volatility);
+                model_sample_counts.push_back(static_cast<double>(source.samples.size()));
+                model_sample_spans.push_back(model_sample_span_seconds(source));
+            }
+            if (source.samples.size() >= 2) momentums.push_back(momentum_bps(source, timestamp));
+        }
+        const double consensus = median(fresh_usd);
+        double divergence = 0;
+        if (fresh_spot.size() > 1) {
+            const auto bounds = std::minmax_element(fresh_spot.begin(), fresh_spot.end());
+            const double center = median(fresh_spot);
+            if (center) divergence = (*bounds.second - *bounds.first) / center * 10000;
+        }
+        if (fast_price > 0) output.fast_price = fast_price;
+        if (consensus > 0) output.consensus_price = consensus;
+        if (settlement_reference > 0) output.settlement_reference = settlement_reference;
+        if (fresh_spot.size() > 1) output.cross_source_divergence_bps = divergence;
+        const double volatility = median(volatilities);
+        if (volatility > 0) output.volatility_per_sqrt_second = volatility;
+        if (!momentums.empty()) output.momentum_bps_30s = median(momentums);
+        output.model_sample_count = static_cast<int>(median(model_sample_counts));
+        output.model_sample_span_seconds = median(model_sample_spans);
+        output.reference_quorum_met = output.fresh_exchange_source_count >= 2 &&
+            output.fresh_usd_spot_source_count >= 1 && settlement_reference > 0 && divergence <= 100;
+    }
+    shared.reference_publisher->publish(reference_ipc::encode_line(snapshot));
 }
 
 void write_status_locked(SharedState& shared, bool force = false) {
@@ -409,6 +524,7 @@ void publish(SharedState& shared, const std::string& asset, const std::string& s
     }
     ++shared.matched_messages;
     shared.engine_latency_us = (now_ms() - received) * 1000;
+    publish_ipc_locked(shared);
     write_status_locked(shared);
 }
 
@@ -419,6 +535,7 @@ void publish_anchor(SharedState& shared, const std::string& asset, const std::st
     auto& samples = shared.assets.at(asset).sources.at(source).anchor_samples;
     samples.push_back({source_timestamp_ms, received, price, timeframe});
     while (samples.size() > 128) samples.pop_front();
+    publish_ipc_locked(shared);
     write_status_locked(shared);
 }
 
@@ -429,6 +546,7 @@ void publish_settlement(SharedState& shared, const std::string& asset, const std
     auto& samples = shared.assets.at(asset).sources.at(source).settlement_samples;
     samples.push_back({source_timestamp_ms, received, price, timeframe});
     while (samples.size() > 128) samples.pop_front();
+    publish_ipc_locked(shared, true);
     write_status_locked(shared, true);
 }
 
@@ -438,6 +556,7 @@ void set_connected(SharedState& shared, const std::string& source, bool connecte
         auto& row = asset.second.sources.at(source);
         if (row.supported) row.connected = connected;
     }
+    publish_ipc_locked(shared, true);
     write_status_locked(shared, true);
 }
 
@@ -499,8 +618,22 @@ void initialize(SharedState& shared) {
 int main(int argc, char** argv) {
     SharedState shared;
     shared.output_path = argc > 1 ? argv[1] : "data/venue-status.json";
+    const std::string reference_socket_path = std::getenv("REFERENCE_IPC_PATH")
+        ? std::getenv("REFERENCE_IPC_PATH") : "state/reference-price.sock";
+    boost::asio::io_context reference_io;
+    auto reference_publisher = std::make_shared<reference_ipc::LatestValueServer>(
+        reference_io, reference_socket_path);
+    reference_publisher->start();
+    shared.reference_publisher = reference_publisher;
+    shared.producer_session = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    std::thread reference_publisher_thread([&] { reference_io.run(); });
     initialize(shared);
-    { std::lock_guard<std::mutex> lock(shared.mutex); write_status_locked(shared, true); }
+    {
+        std::lock_guard<std::mutex> lock(shared.mutex);
+        publish_ipc_locked(shared, true);
+        write_status_locked(shared, true);
+    }
 
     const std::string rtds_sub = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
     const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker/btcusdt@kline_1h/ethusdt@kline_1h/solusdt@kline_1h/xrpusdt@kline_1h/bnbusdt@kline_1h/dogeusdt@kline_1h/btcusdt@kline_4h/ethusdt@kline_4h/solusdt@kline_4h/xrpusdt@kline_4h/bnbusdt@kline_4h/dogeusdt@kline_4h";
@@ -621,4 +754,6 @@ int main(int argc, char** argv) {
         });
     });
     binance.join(); rtds.join(); coinbase.join(); kraken.join(); bybit.join(); okx.join();
+    reference_io.stop();
+    reference_publisher_thread.join();
 }

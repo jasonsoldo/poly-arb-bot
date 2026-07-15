@@ -9,6 +9,12 @@ g++ -std=c++17 -O3 -Wall -Wextra -DBOOST_BIND_GLOBAL_PLACEHOLDERS \
 ./build/reference_snapshot_test
 echo "built and tested build/reference_snapshot_test"
 
+g++ -std=c++17 -O3 -Wall -Wextra -DBOOST_BIND_GLOBAL_PLACEHOLDERS -DBOOST_ERROR_CODE_HEADER_ONLY \
+  cpp/reference_ipc/latest_value_server_test.cpp \
+  -o build/latest_value_server_test -lpthread
+./build/latest_value_server_test
+echo "built and tested build/latest_value_server_test"
+
 g++ -std=c++17 -O3 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
   cpp/pnl_curve_engine/pnl_curve_engine.cpp \
   -o build/pnl_curve_engine
