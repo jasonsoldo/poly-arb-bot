@@ -7,10 +7,12 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+#include "../reference_ipc/latest_value_client.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <fstream>
 #include <filesystem>
@@ -142,10 +144,32 @@ public:
     }
 
     void run() {
+        const char* configured_path = std::getenv("REFERENCE_IPC_PATH");
+        const std::string reference_path = configured_path && *configured_path
+            ? configured_path : "state/reference-price.sock";
+        std::weak_ptr<MarketWsSession> weak_self = shared_from_this();
+        reference_client_ = std::make_shared<reference_ipc::LatestValueClient>(
+            io_, reference_path,
+            [weak_self](const reference_ipc::Snapshot& snapshot) {
+                if (auto self = weak_self.lock()) self->on_reference_snapshot(snapshot);
+            },
+            [weak_self](bool connected) {
+                if (auto self = weak_self.lock()) self->on_reference_state(connected);
+            });
+        reference_client_->start();
         resolver_.async_resolve(host_, "443", beast::bind_front_handler(&MarketWsSession::on_resolve, shared_from_this()));
     }
 
 private:
+    void on_reference_snapshot(const reference_ipc::Snapshot& snapshot) {
+        reference_snapshot_ = snapshot;
+        reference_receive_at_ = std::chrono::steady_clock::now();
+    }
+
+    void on_reference_state(bool connected) {
+        reference_connected_ = connected;
+    }
+
     void on_resolve(beast::error_code ec, tcp::resolver::results_type results) {
         if (ec) return fail("resolve", ec);
         asio::async_connect(beast::get_lowest_layer(ws_), results, beast::bind_front_handler(&MarketWsSession::on_connect, shared_from_this()));
@@ -354,12 +378,25 @@ private:
         const std::string temporary = health_path_ + ".tmp";
         std::ofstream out(temporary, std::ios::trunc);
         out << std::setprecision(15);
+        const double reference_receive_age_ms = reference_receive_at_.time_since_epoch().count()
+            ? std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - reference_receive_at_).count()
+            : -1;
         out << "{\"updated_at\":" << now_seconds() << ",\"ws_connected\":" << (connected ? "true" : "false")
             << ",\"ws_session_id\":" << ws_session_id_ << ",\"subscription_generation\":" << generation_
             << ",\"document_version\":" << document_version_ << ",\"markets\":" << markets_.size()
             << ",\"tokens\":" << books_.size() << ",\"ready_markets\":" << ready
             << ",\"waiting_up_snapshot\":" << waiting_up << ",\"waiting_down_snapshot\":" << waiting_down
             << ",\"last_market_data_at\":" << last_activity_ << ",\"full_resyncs\":" << full_resync_count_
+            << ",\"reference_connected\":" << (reference_connected_ ? "true" : "false")
+            << ",\"reference_sequence\":" << reference_snapshot_.sequence
+            << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
+            << ",\"reference_protocol_errors\":" << (reference_client_ ? reference_client_->protocol_errors() : 0)
+            << ",\"reference_reconnects\":" << (reference_client_ ? reference_client_->reconnects() : 0)
+            << ",\"reference_receive_age_ms\":";
+        if (reference_receive_age_ms >= 0) out << reference_receive_age_ms;
+        else out << "null";
+        out
             << ",\"book_events\":" << book_events_ << ",\"price_changes\":" << price_changes_ << "}\n";
         out.close();
         std::filesystem::rename(temporary, health_path_);
@@ -471,6 +508,7 @@ private:
     void fail(const char* stage, beast::error_code ec) {
         if (stopped_) return;
         stopped_ = true; timer_.cancel(); reload_timer_.cancel(); evaluation_timer_.cancel();
+        if (reference_client_) reference_client_->stop();
         write_health(false);
         std::cerr << "WS_ERROR stage=" << stage << " code=" << ec.value() << " message=" << ec.message() << "\n";
     }
@@ -484,6 +522,10 @@ private:
     asio::steady_timer timer_;
     asio::steady_timer reload_timer_;
     asio::steady_timer evaluation_timer_;
+    std::shared_ptr<reference_ipc::LatestValueClient> reference_client_;
+    reference_ipc::Snapshot reference_snapshot_;
+    std::chrono::steady_clock::time_point reference_receive_at_{};
+    bool reference_connected_ = false;
     std::deque<std::string> writes_;
     std::map<std::string, Market> markets_;
     std::map<std::string, Book> books_;
