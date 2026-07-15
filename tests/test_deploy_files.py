@@ -64,3 +64,10 @@ def test_cpp_build_scripts_run_strategy_tests_and_build_production_engines():
 def test_windows_build_fails_on_native_compile_or_test_error():
     assert "function Assert-NativeSuccess" in BUILD_PS1
     assert BUILD_PS1.count("Assert-NativeSuccess") >= 11
+
+
+def test_strategy_parity_smoke_closes_stdin_in_build_scripts():
+    assert "printf '%s\\n' \"$strategy_smoke\" | ./build/ev_strategy_test" in BUILD_SH
+    assert "$strategySmoke | & .\\build\\ev_strategy_test.exe" in BUILD_PS1
+    for script in (BUILD_SH, BUILD_PS1):
+        assert '"estimated_probability"' in script

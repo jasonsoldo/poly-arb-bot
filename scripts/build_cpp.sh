@@ -24,7 +24,9 @@ echo "built and tested build/latest_value_client_test"
 g++ -std=c++17 -O3 -Wall -Wextra -DBOOST_BIND_GLOBAL_PLACEHOLDERS \
   cpp/strategy/ev_strategy_test.cpp \
   -o build/ev_strategy_test
-./build/ev_strategy_test
+strategy_smoke='{"mode":"probability","consensus_price":101,"price_to_beat":100,"seconds_to_close":60,"volatility_per_sqrt_second":0.001,"model_sample_count":60,"model_sample_span_seconds":60,"momentum_bps_30s":1,"paired_book_imbalance":0}'
+strategy_output="$(printf '%s\n' "$strategy_smoke" | ./build/ev_strategy_test)"
+grep -q '"estimated_probability"' <<< "$strategy_output"
 echo "built and tested build/ev_strategy_test"
 
 g++ -std=c++17 -O3 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
