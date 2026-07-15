@@ -59,6 +59,11 @@ def test_systemd_requires_ntp_and_logrotate_retains_thirty_days():
     assert "NTPSynchronized" in ntp
     assert "rotate 30" in rotation
     assert "copytruncate" in rotation
+    assert "maxsize 256M" in rotation
+    assert "delaycompress" not in rotation
+    env = Path("deploy/env.example").read_text(encoding="utf-8")
+    assert "STRATEGY_ACCEPT_AUDIT_HEARTBEAT_SECONDS=5" in env
+    assert "STRATEGY_REJECT_AUDIT_HEARTBEAT_SECONDS=60" in env
     deploy = Path("deploy/VPS_DEPLOY.md").read_text(encoding="utf-8")
     assert "sudo cp deploy/poly-arb-bot.logrotate /etc/logrotate.d/poly-arb-bot" in deploy
     assert "sudo logrotate -d /etc/logrotate.d/poly-arb-bot" in deploy

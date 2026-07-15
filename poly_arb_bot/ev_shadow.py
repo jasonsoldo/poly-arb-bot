@@ -334,7 +334,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             probability_block_reason = "probability_model_unavailable"
     size = max(float(event.get("size", 0)), 1e-9)
     rows = []
-    config_values, config_hash = strategy_config()
+    _, config_hash = strategy_config()
     for outcome, fill_key, ask_key, fee_key, depth_key, imbalance_key, probability in (
         ("Up", "up_vwap", "up_best_ask", "up_fee", "up_available_depth", "up_book_imbalance", up_probability),
         ("Down", "down_vwap", "down_best_ask", "down_fee", "down_available_depth", "down_book_imbalance", None if up_probability is None else 1 - up_probability),
@@ -418,7 +418,6 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             audit["window"] = market.get("window", "current")
             audit["config_version"] = STRATEGY_CONFIG_VERSION
             audit["config_hash"] = config_hash
-            audit["strategy_config"] = config_values
             rows.append(audit)
     return rows
 
@@ -430,10 +429,33 @@ def _load(path, default):
         return default
 
 
+def _should_emit_audit(row, emission_state):
+    key = "|".join(str(row.get(field, "")) for field in (
+        "market_id", "strategy", "outcome"
+    ))
+    fingerprint = "|".join(str(row.get(field, "")) for field in (
+        "decision", "reason", "config_hash"
+    ))
+    timestamp = float(row.get("ts", time.time()))
+    previous = emission_state.get(key, {})
+    heartbeat = float(os.getenv(
+        "STRATEGY_ACCEPT_AUDIT_HEARTBEAT_SECONDS" if row.get("decision") == "ACCEPT"
+        else "STRATEGY_REJECT_AUDIT_HEARTBEAT_SECONDS",
+        "5" if row.get("decision") == "ACCEPT" else "60",
+    ))
+    if previous.get("fingerprint") == fingerprint and timestamp - float(
+        previous.get("last_emitted_ts", 0)
+    ) < heartbeat:
+        return False
+    emission_state[key] = {"fingerprint": fingerprint, "last_emitted_ts": timestamp}
+    return True
+
+
 def process_once(audit_path, market_path, venue_path, output_path, state_path,
                  historical_models=None):
     state = _load(state_path, {"offset": 0, "processed": []})
     processed = set(state.get("processed", []))
+    emission_state = state.get("emission_state", {})
     markets = {row.get("market_id"): row for row in _load(market_path, {"markets": []}).get("markets", [])}
     venue = _load(venue_path, {})
     opening_prices = capture_opening_prices(markets, venue, state.get("opening_prices", {}))
@@ -459,11 +481,16 @@ def process_once(audit_path, market_path, venue_path, output_path, state_path,
             for row in evaluate_market_event(event, market, venue,
                                              historical_models=historical_models,
                                              opening_prices=opening_prices):
+                if not _should_emit_audit(row, emission_state):
+                    continue
                 target.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
                 emitted += 1
             processed.add(event_id)
         state["offset"] = source.tell()
     state["processed"] = list(processed)[-20000:]
+    state["emission_state"] = dict(sorted(
+        emission_state.items(), key=lambda item: float(item[1].get("last_emitted_ts", 0))
+    )[-5000:])
     state["opening_prices"] = opening_prices
     temporary = state_path.with_suffix(state_path.suffix + ".tmp")
     temporary.parent.mkdir(parents=True, exist_ok=True)

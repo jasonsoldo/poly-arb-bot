@@ -1,8 +1,8 @@
 /opt/poly-arb-bot/logs/shadow-audit.jsonl /opt/poly-arb-bot/logs/strategy-audit.jsonl /opt/poly-arb-bot/logs/shadow-execution.jsonl {
     daily
+    maxsize 256M
     rotate 30
     compress
-    delaycompress
     missingok
     notifempty
     copytruncate

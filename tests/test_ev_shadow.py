@@ -83,6 +83,53 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
         row["up_standardized_distance"] + row["up_momentum_z"] + row["up_imbalance_z"]
     ) for row in rows)
     assert all(row["confidence_type"] == "input_quality_not_historical_accuracy" for row in rows)
+    assert all("strategy_config" not in row for row in rows)
+
+
+def test_process_once_emits_transitions_and_bounded_decision_heartbeats(tmp_path, monkeypatch):
+    audit_path = tmp_path / "shadow-audit.jsonl"
+    market_path = tmp_path / "markets.json"
+    venue_path = tmp_path / "venue.json"
+    output_path = tmp_path / "strategy-audit.jsonl"
+    state_path = tmp_path / "state.json"
+    events = [
+        {"event_id": "p1", "ts": 100, "decision": "REJECT"},
+        {"event_id": "p2", "ts": 101, "decision": "REJECT"},
+        {"event_id": "p3", "ts": 102, "decision": "ACCEPT"},
+        {"event_id": "p4", "ts": 103, "decision": "ACCEPT"},
+        {"event_id": "p5", "ts": 104, "decision": "REJECT"},
+        {"event_id": "p6", "ts": 165, "decision": "REJECT"},
+    ]
+    for row in events:
+        row.update(event_type="shadow_eval", strategy="paired_lock", market_id="m1")
+    audit_path.write_text("\n".join(map(json.dumps, events)) + "\n", encoding="utf-8")
+    market_path.write_text(json.dumps({"markets": [{"market_id": "m1"}]}), encoding="utf-8")
+    venue_path.write_text("{}", encoding="utf-8")
+
+    def fake_evaluate(event, market, venue, **kwargs):
+        decision = event["decision"]
+        return [{
+            "event_id": event["event_id"] + ":directional:Up",
+            "ts": event["ts"], "strategy": "late_window_directional_ev",
+            "market_id": "m1", "outcome": "Up", "decision": decision,
+            "reason": "opportunity" if decision == "ACCEPT" else "too_early",
+            "config_hash": "config",
+        }]
+
+    monkeypatch.setattr(ev_shadow, "evaluate_market_event", fake_evaluate)
+    monkeypatch.setenv("STRATEGY_ACCEPT_AUDIT_HEARTBEAT_SECONDS", "5")
+    monkeypatch.setenv("STRATEGY_REJECT_AUDIT_HEARTBEAT_SECONDS", "60")
+
+    emitted = ev_shadow.process_once(
+        audit_path, market_path, venue_path, output_path, state_path, historical_models={}
+    )
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+
+    assert emitted == 4
+    assert [row["event_id"] for row in rows] == [
+        "p1:directional:Up", "p3:directional:Up",
+        "p5:directional:Up", "p6:directional:Up",
+    ]
 
 
 def test_probability_model_fails_closed_without_volatility_samples():
