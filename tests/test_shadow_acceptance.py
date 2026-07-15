@@ -1,3 +1,6 @@
+import json
+
+import poly_arb_bot.shadow_acceptance as shadow_acceptance
 from poly_arb_bot.shadow_acceptance import evaluate_status
 
 
@@ -88,3 +91,41 @@ def test_acceptance_marks_missing_market_and_audit_data_incomplete():
         row.update(evaluations=0, accepts=0, rejections=0)
     report = evaluate_status(status)
     assert report["status"] == "INCOMPLETE"
+
+
+def test_acceptance_waits_for_background_analytics(monkeypatch, capsys):
+    warming = valid_status()
+    warming["analytics_refreshing"] = True
+    warming["strategy_counts"] = {}
+    ready = valid_status()
+    ready["analytics_refreshing"] = False
+    responses = iter((warming, warming, ready))
+    calls = []
+
+    def fake_build_status(*args):
+        calls.append(args)
+        return next(responses)
+
+    monkeypatch.setattr(shadow_acceptance, "build_status", fake_build_status)
+
+    exit_code = shadow_acceptance.run(analytics_timeout_seconds=1, analytics_poll_seconds=0)
+
+    report = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert report["status"] == "PASS"
+    assert len(calls) == 3
+
+
+def test_acceptance_reports_analytics_timeout_as_incomplete(monkeypatch, capsys):
+    warming = valid_status()
+    warming["analytics_refreshing"] = True
+    warming["strategy_counts"] = {}
+    monkeypatch.setattr(shadow_acceptance, "build_status", lambda *args: warming)
+
+    exit_code = shadow_acceptance.run(analytics_timeout_seconds=0, analytics_poll_seconds=0)
+
+    report = json.loads(capsys.readouterr().out)
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert exit_code == 2
+    assert report["status"] == "INCOMPLETE"
+    assert "analytics_ready" in failed

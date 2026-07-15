@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from pathlib import Path
 
 from .web_monitor import build_status
@@ -13,6 +15,7 @@ def evaluate_status(status):
     strategy_rows = [strategy_counts.get(name, {}) for name in strategy_names]
     probability_rows = [strategy_counts.get(name, {}) for name in strategy_names[:2]]
     checks = [
+        {"name": "analytics_ready", "passed": not status.get("analytics_refreshing", False)},
         {"name": "market_data_present", "passed": readiness.get("discovered_markets", 0) > 0},
         {"name": "audit_data_present", "passed": shadow.get("evaluations", 0) > 0},
         {"name": "market_readiness",
@@ -36,7 +39,7 @@ def evaluate_status(status):
          "passed": all(row.get("model_evaluations", 0) > 0 for row in probability_rows)},
     ]
     passed = all(item["passed"] for item in checks)
-    incomplete_checks = {"market_data_present", "audit_data_present", "three_strategy_evaluations",
+    incomplete_checks = {"analytics_ready", "market_data_present", "audit_data_present", "three_strategy_evaluations",
                          "probability_models_evaluated"}
     incomplete_only = all(item["passed"] or item["name"] in incomplete_checks for item in checks)
     status = "PASS" if passed else "INCOMPLETE" if incomplete_only else "FAIL"
@@ -49,8 +52,18 @@ def evaluate_status(status):
                         "duplicates": shadow.get("duplicate_events", 0)}}
 
 
-def run(data_dir=Path("data"), log_file=Path("logs/shadow-audit.jsonl"), state_file=Path("state/orders.json")):
-    report = evaluate_status(build_status(data_dir, log_file, state_file))
+def run(data_dir=Path("data"), log_file=Path("logs/shadow-audit.jsonl"), state_file=Path("state/orders.json"),
+        analytics_timeout_seconds=None, analytics_poll_seconds=None):
+    timeout = float(analytics_timeout_seconds if analytics_timeout_seconds is not None else
+                    os.getenv("SHADOW_ACCEPTANCE_ANALYTICS_TIMEOUT_SECONDS", "120"))
+    poll = float(analytics_poll_seconds if analytics_poll_seconds is not None else
+                 os.getenv("SHADOW_ACCEPTANCE_ANALYTICS_POLL_SECONDS", "0.25"))
+    deadline = time.monotonic() + max(timeout, 0)
+    status = build_status(data_dir, log_file, state_file)
+    while status.get("analytics_refreshing", False) and time.monotonic() < deadline:
+        time.sleep(max(poll, 0))
+        status = build_status(data_dir, log_file, state_file)
+    report = evaluate_status(status)
     print(json.dumps(report, sort_keys=True))
     return {"PASS": 0, "FAIL": 1, "INCOMPLETE": 2}[report["status"]]
 
