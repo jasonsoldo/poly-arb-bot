@@ -6,7 +6,8 @@ from pathlib import Path
 from .web_monitor import build_status
 
 
-def evaluate_status(status):
+def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
+                    max_clob_to_strategy_p95_us=None):
     readiness = status.get("clob_readiness", {})
     shadow = status.get("shadow_report", {})
     reasons = shadow.get("rejection_reasons", {})
@@ -17,6 +18,31 @@ def evaluate_status(status):
     counts = status.get("counts", {})
     execution = status.get("shadow_execution", {})
     lifecycle = status.get("shadow_lifecycle", {})
+    health = status.get("shadow_health", {})
+    market_data_present = readiness.get("discovered_markets", 0) > 0
+    max_reference_age = float(
+        max_reference_ipc_age_p95_ms if max_reference_ipc_age_p95_ms is not None
+        else os.getenv("MAX_REFERENCE_IPC_AGE_P95_MS", "50")
+    )
+    max_strategy_latency = float(
+        max_clob_to_strategy_p95_us if max_clob_to_strategy_p95_us is not None
+        else os.getenv("MAX_CLOB_TO_STRATEGY_P95_US", "5000")
+    )
+    reference_age_p95 = health.get("reference_ipc_receive_age_ms_p95")
+    strategy_latency_p95 = health.get("clob_to_strategy_evaluation_us_p95")
+    latency_observed = (
+        int(health.get("reference_ipc_receive_age_samples", 0)) > 0
+        and int(health.get("clob_to_strategy_evaluation_samples", 0)) > 0
+        and reference_age_p95 is not None
+        and strategy_latency_p95 is not None
+    )
+    latency_within_budget = (
+        not latency_observed
+        or (
+            float(reference_age_p95) <= max_reference_age
+            and float(strategy_latency_p95) <= max_strategy_latency
+        )
+    )
     real_counters_zero = all(
         field in section and type(section[field]) in (int, float) and section[field] == 0
         for section in (execution, lifecycle)
@@ -24,7 +50,20 @@ def evaluate_status(status):
     )
     checks = [
         {"name": "analytics_ready", "passed": not status.get("analytics_refreshing", False)},
-        {"name": "market_data_present", "passed": readiness.get("discovered_markets", 0) > 0},
+        {"name": "market_data_present", "passed": market_data_present},
+        {"name": "clob_websocket_connected",
+         "passed": not market_data_present or health.get("ws_connected") is True},
+        {"name": "reference_ipc_connected",
+         "passed": not market_data_present or health.get("reference_connected") is True},
+        {"name": "market_health_fresh",
+         "passed": not market_data_present or health.get("stale") is False},
+        {"name": "reference_protocol_integrity",
+         "passed": not market_data_present or health.get("reference_protocol_errors") == 0},
+        {"name": "strategy_audit_no_backpressure",
+         "passed": not market_data_present or health.get("strategy_audit_backpressure") == 0},
+        {"name": "low_latency_observed",
+         "passed": not market_data_present or latency_observed},
+        {"name": "low_latency_budget", "passed": latency_within_budget},
         {"name": "audit_data_present", "passed": shadow.get("evaluations", 0) > 0},
         {"name": "market_readiness",
          "passed": readiness.get("paired_markets_ready", 0) + readiness.get("not_ready", 0) == readiness.get("discovered_markets", 0)},
@@ -47,8 +86,9 @@ def evaluate_status(status):
          "passed": all(row.get("model_evaluations", 0) > 0 for row in probability_rows)},
     ]
     passed = all(item["passed"] for item in checks)
-    incomplete_checks = {"analytics_ready", "market_data_present", "audit_data_present", "three_strategy_evaluations",
-                         "probability_models_evaluated"}
+    incomplete_checks = {"analytics_ready", "market_data_present", "audit_data_present",
+                         "three_strategy_evaluations", "probability_models_evaluated",
+                         "low_latency_observed"}
     incomplete_only = all(item["passed"] or item["name"] in incomplete_checks for item in checks)
     status = "PASS" if passed else "INCOMPLETE" if incomplete_only else "FAIL"
     return {"passed": passed, "status": status, "checks": checks,
@@ -57,7 +97,11 @@ def evaluate_status(status):
                         "evaluations": shadow.get("evaluations", 0),
                         "strategy_evaluations": {name: strategy_counts.get(name, {}).get("evaluations", 0)
                                                  for name in strategy_names},
-                        "duplicates": shadow.get("duplicate_events", 0)}}
+                        "duplicates": shadow.get("duplicate_events", 0),
+                        "reference_ipc_receive_age_ms_p95": reference_age_p95,
+                        "clob_to_strategy_evaluation_us_p95": strategy_latency_p95,
+                        "max_reference_ipc_age_p95_ms": max_reference_age,
+                        "max_clob_to_strategy_p95_us": max_strategy_latency}}
 
 
 def run(data_dir=Path("data"), log_file=Path("logs/shadow-audit.jsonl"), state_file=Path("state/orders.json"),

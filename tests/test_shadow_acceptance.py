@@ -30,6 +30,17 @@ def valid_status():
             "low_price_lottery_ev": {"completed": 0},
             "paired_lock": {"completed": 0},
         },
+        "shadow_health": {
+            "ws_connected": True,
+            "stale": False,
+            "reference_connected": True,
+            "reference_protocol_errors": 0,
+            "strategy_audit_backpressure": 0,
+            "reference_ipc_receive_age_ms_p95": 5.0,
+            "reference_ipc_receive_age_samples": 100,
+            "clob_to_strategy_evaluation_us_p95": 100.0,
+            "clob_to_strategy_evaluation_samples": 100,
+        },
     }
 
 
@@ -116,6 +127,48 @@ def test_acceptance_allows_zero_completed_samples_when_evaluations_are_valid():
     status = valid_status()
     report = evaluate_status(status)
     assert report["status"] == "PASS"
+
+
+def test_acceptance_fails_disconnected_or_corrupt_low_latency_path():
+    status = valid_status()
+    status["shadow_health"].update(
+        ws_connected=False,
+        reference_connected=False,
+        reference_protocol_errors=1,
+        strategy_audit_backpressure=1,
+    )
+    report = evaluate_status(status)
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert {
+        "clob_websocket_connected", "reference_ipc_connected",
+        "reference_protocol_integrity", "strategy_audit_no_backpressure",
+    } <= failed
+    assert report["status"] == "FAIL"
+
+
+def test_acceptance_fails_observed_latency_over_budget():
+    status = valid_status()
+    status["shadow_health"]["reference_ipc_receive_age_ms_p95"] = 51
+    status["shadow_health"]["clob_to_strategy_evaluation_us_p95"] = 5001
+    report = evaluate_status(status)
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert failed == {"low_latency_budget"}
+    assert report["metrics"]["reference_ipc_receive_age_ms_p95"] == 51
+    assert report["metrics"]["clob_to_strategy_evaluation_us_p95"] == 5001
+
+
+def test_acceptance_marks_missing_latency_samples_incomplete():
+    status = valid_status()
+    status["shadow_health"].update(
+        reference_ipc_receive_age_ms_p95=None,
+        reference_ipc_receive_age_samples=0,
+        clob_to_strategy_evaluation_us_p95=None,
+        clob_to_strategy_evaluation_samples=0,
+    )
+    report = evaluate_status(status)
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert failed == {"low_latency_observed"}
+    assert report["status"] == "INCOMPLETE"
 
 
 def test_acceptance_marks_missing_market_and_audit_data_incomplete():

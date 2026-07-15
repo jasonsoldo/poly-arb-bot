@@ -129,13 +129,15 @@ def test_probability_calibration_includes_rejected_fixed_horizon_predictions(tmp
         {"event_type": "shadow_prediction_complete", "event_id": "p1:complete",
          "prediction_event_id": "p1", "ts": 100, "strategy": "late_window_directional_ev",
          "strategy_config_hash": "directional-hash", "probability_model_id": "directional-v1",
-         "market_id": "m1", "close_ts": 120, "estimated_up_probability": .8,
+         "market_id": "m1", "asset": "BTC", "timeframe": "5m", "close_ts": 120,
+         "estimated_up_probability": .8, "market_implied_up_probability": .6,
          "actual_up": 1, "origin_decision": "REJECT", "brier_score": .04,
          "log_loss": .223143551314},
         {"event_type": "shadow_prediction_complete", "event_id": "p2:complete",
          "prediction_event_id": "p2", "ts": 200, "strategy": "late_window_directional_ev",
          "strategy_config_hash": "directional-hash", "probability_model_id": "directional-v1",
-         "market_id": "m2", "close_ts": 220, "estimated_up_probability": .2,
+         "market_id": "m2", "asset": "ETH", "timeframe": "15m", "close_ts": 220,
+         "estimated_up_probability": .2, "market_implied_up_probability": .4,
          "actual_up": 1, "origin_decision": "ACCEPT", "brier_score": .64,
          "log_loss": 1.609437912434},
         {"event_type": "shadow_prediction_complete", "event_id": "p1:complete",
@@ -157,4 +159,11 @@ def test_probability_calibration_includes_rejected_fixed_horizon_predictions(tmp
     assert metrics["expected_up_rate"] == .5
     assert metrics["realized_up_rate"] == 1.0
     assert metrics["brier_score"] == .34
+    assert metrics["market_implied_brier_score"] == .26
+    assert metrics["brier_skill_vs_market"] == round(1 - .34 / .26, 12)
     assert metrics["calibration_buckets"]["0.2-0.3"]["samples"] == 1
+    assert report["by_strategy_asset"]["late_window_directional_ev"]["BTC"]["samples"] == 1
+    assert report["by_strategy_timeframe"]["late_window_directional_ev"]["15m"]["samples"] == 1
+    assert report["by_strategy_asset_timeframe"]["late_window_directional_ev"]["ETH"]["15m"]["samples"] == 1
+    assert report["calibration_status"] == "INSUFFICIENT_DATA"
+    assert report["sufficiency"]["minimum_samples"] == 500

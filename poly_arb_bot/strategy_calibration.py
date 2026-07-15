@@ -1,4 +1,6 @@
 import json
+import math
+import os
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -196,7 +198,10 @@ def _probability_metrics(rows):
         return {
             "samples": 0, "expected_up_rate": None, "realized_up_rate": None,
             "brier_score": None, "log_loss": None, "origin_accepted": 0,
-            "origin_rejected": 0, "calibration_buckets": {},
+            "origin_rejected": 0, "market_implied_samples": 0,
+            "market_implied_brier_score": None, "market_implied_log_loss": None,
+            "brier_skill_vs_market": None, "calibration_buckets": {},
+            "independent_markets": 0, "independent_close_windows": 0,
         }
     buckets = defaultdict(list)
     probabilities = []
@@ -215,18 +220,74 @@ def _probability_metrics(rows):
         }
         for bucket, values in sorted(buckets.items())
     }
+    market_rows = [row for row in rows if row.get("market_implied_up_probability") is not None]
+    market_brier = market_log_loss = None
+    if market_rows:
+        market_brier = sum(
+            (float(row["market_implied_up_probability"]) - int(row["actual_up"])) ** 2
+            for row in market_rows
+        ) / len(market_rows)
+        market_log_loss = sum(
+            -(
+                int(row["actual_up"]) * math.log(min(1 - 1e-12, max(
+                    1e-12, float(row["market_implied_up_probability"]),
+                )))
+                + (1 - int(row["actual_up"])) * math.log(min(1 - 1e-12, max(
+                    1e-12, 1 - float(row["market_implied_up_probability"]),
+                )))
+            )
+            for row in market_rows
+        ) / len(market_rows)
+    model_brier = sum(
+        (probability - actual) ** 2
+        for probability, actual in zip(probabilities, outcomes)
+    ) / len(rows)
     return {
         "samples": len(rows),
         "expected_up_rate": sum(probabilities) / len(rows),
         "realized_up_rate": sum(outcomes) / len(rows),
-        "brier_score": round(sum(
-            (probability - actual) ** 2
-            for probability, actual in zip(probabilities, outcomes)
-        ) / len(rows), 12),
+        "brier_score": round(model_brier, 12),
         "log_loss": round(sum(float(row["log_loss"]) for row in rows) / len(rows), 12),
+        "uninformative_brier_score": 0.25,
+        "uninformative_log_loss": round(math.log(2), 12),
+        "market_implied_samples": len(market_rows),
+        "market_implied_brier_score": round(market_brier, 12) if market_brier is not None else None,
+        "market_implied_log_loss": round(market_log_loss, 12) if market_log_loss is not None else None,
+        "brier_skill_vs_market": (
+            round(1 - model_brier / market_brier, 12)
+            if market_brier is not None and market_brier > 0 else None
+        ),
         "origin_accepted": sum(row.get("origin_decision") == "ACCEPT" for row in rows),
         "origin_rejected": sum(row.get("origin_decision") != "ACCEPT" for row in rows),
         "calibration_buckets": calibration,
+        "independent_markets": len({row.get("market_id") for row in rows}),
+        "independent_close_windows": len({row.get("close_ts") for row in rows}),
+    }
+
+
+def _sufficiency(rows, metrics):
+    minimum_samples = int(os.getenv("CALIBRATION_MIN_SAMPLES", "500"))
+    minimum_close_windows = int(os.getenv("CALIBRATION_MIN_CLOSE_WINDOWS", "100"))
+    minimum_bucket_samples = int(os.getenv("CALIBRATION_MIN_BUCKET_SAMPLES", "30"))
+    bucket_counts = [bucket["samples"] for bucket in metrics["calibration_buckets"].values()]
+    smallest_bucket = min(bucket_counts) if bucket_counts else 0
+    enough_core = (
+        len(rows) >= minimum_samples
+        and metrics["independent_close_windows"] >= minimum_close_windows
+    )
+    status = (
+        "CALIBRATION_READY"
+        if enough_core and smallest_bucket >= minimum_bucket_samples
+        else "PRELIMINARY"
+        if enough_core
+        else "INSUFFICIENT_DATA"
+    )
+    return {
+        "status": status,
+        "minimum_samples": minimum_samples,
+        "minimum_close_windows": minimum_close_windows,
+        "minimum_bucket_samples": minimum_bucket_samples,
+        "smallest_occupied_bucket_samples": smallest_bucket,
     }
 
 
@@ -259,6 +320,56 @@ def build_probability_calibration(path, config_hash=None):
         config_hashes = {strategy: config_hash for strategy in STRATEGIES}
         rows = [row for row in all_rows if row.get("strategy_config_hash") == config_hash]
         selected_hash = config_hash
+    by_strategy = {}
+    for strategy in sorted(STRATEGIES):
+        strategy_rows = [row for row in rows if row.get("strategy") == strategy]
+        metrics = _probability_metrics(strategy_rows)
+        metrics["sufficiency"] = _sufficiency(strategy_rows, metrics)
+        by_strategy[strategy] = metrics
+    strategy_rows = {
+        strategy: [row for row in rows if row.get("strategy") == strategy]
+        for strategy in sorted(STRATEGIES)
+    }
+    by_strategy_asset = {
+        strategy: {
+            asset: _probability_metrics([row for row in selected if row.get("asset") == asset])
+            for asset in sorted({row.get("asset") for row in selected if row.get("asset")})
+        }
+        for strategy, selected in strategy_rows.items()
+    }
+    by_strategy_timeframe = {
+        strategy: {
+            timeframe: _probability_metrics([
+                row for row in selected if row.get("timeframe") == timeframe
+            ])
+            for timeframe in sorted({
+                row.get("timeframe") for row in selected if row.get("timeframe")
+            })
+        }
+        for strategy, selected in strategy_rows.items()
+    }
+    by_strategy_asset_timeframe = {
+        strategy: {
+            asset: {
+                timeframe: _probability_metrics([
+                    row for row in selected
+                    if row.get("asset") == asset and row.get("timeframe") == timeframe
+                ])
+                for timeframe in sorted({
+                    row.get("timeframe") for row in selected
+                    if row.get("asset") == asset and row.get("timeframe")
+                })
+            }
+            for asset in sorted({row.get("asset") for row in selected if row.get("asset")})
+        }
+        for strategy, selected in strategy_rows.items()
+    }
+    statuses = [metrics["sufficiency"]["status"] for metrics in by_strategy.values()]
+    calibration_status = (
+        "CALIBRATION_READY" if statuses and all(status == "CALIBRATION_READY" for status in statuses)
+        else "PRELIMINARY" if statuses and all(status != "INSUFFICIENT_DATA" for status in statuses)
+        else "INSUFFICIENT_DATA"
+    )
     return {
         "config_hash": selected_hash,
         "config_hashes": config_hashes,
@@ -270,12 +381,23 @@ def build_probability_calibration(path, config_hash=None):
         "probability_model_ids": dict(Counter(
             row.get("probability_model_id") or "<missing>" for row in rows
         )),
-        "by_strategy": {
-            strategy: _probability_metrics([
-                row for row in rows if row.get("strategy") == strategy
-            ])
-            for strategy in sorted(STRATEGIES)
+        "calibration_status": calibration_status,
+        "sufficiency": {
+            **{
+                key: value for key, value in
+                by_strategy["late_window_directional_ev"]["sufficiency"].items()
+                if key != "status"
+            },
+            "status": calibration_status,
+            "by_strategy": {
+                strategy: metrics["sufficiency"]["status"]
+                for strategy, metrics in by_strategy.items()
+            },
         },
+        "by_strategy": by_strategy,
+        "by_strategy_asset": by_strategy_asset,
+        "by_strategy_timeframe": by_strategy_timeframe,
+        "by_strategy_asset_timeframe": by_strategy_asset_timeframe,
     }
 
 
