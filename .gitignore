@@ -6,6 +6,7 @@ dist/
 *.egg-info/
 .venv/
 venv/
+.worktrees/
 .env
 *.log
 data/live_snapshot.json
