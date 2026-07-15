@@ -23,6 +23,8 @@ def compiler():
 def test_cpp_strategy_has_independent_models_and_fail_closed_gates():
     source = HEADER.read_text(encoding="utf-8")
     assert "probability_model" in source
+    assert "lottery_probability_model" in source
+    assert "lottery_market_blend_probability" in source
     assert "evaluate_directional" in source
     assert "evaluate_lottery" in source
     assert "outside_time_window" in source

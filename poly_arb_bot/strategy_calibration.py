@@ -106,8 +106,20 @@ def build_calibration(path, config_hash=None, resolved_outcomes=None):
         by_id[event_id or f'legacy:{len(by_id)}'] = row
     all_rows = list(by_id.values())
     if config_hash in {None, "latest"}:
-        config_hash = max(all_rows, key=lambda row: float(row.get("ts", 0))).get("strategy_config_hash") if all_rows else None
-    rows = [row for row in all_rows if row.get("strategy_config_hash") == config_hash]
+        config_hashes = {
+            strategy: max(
+                (row for row in all_rows if row.get("strategy") == strategy),
+                key=lambda row: float(row.get("ts", 0)), default={},
+            ).get("strategy_config_hash")
+            for strategy in STRATEGIES
+        }
+        rows = [row for row in all_rows if
+                row.get("strategy_config_hash") == config_hashes.get(row.get("strategy"))]
+        selected = {value for value in config_hashes.values()}
+        config_hash = next(iter(selected)) if len(selected) == 1 else "latest_by_strategy"
+    else:
+        config_hashes = {strategy: config_hash for strategy in STRATEGIES}
+        rows = [row for row in all_rows if row.get("strategy_config_hash") == config_hash]
     complete_rows = [row for row in rows if all(row.get(field) is not None for field in (
         "estimated_probability", "expected_fill_price", "net_ev", "winning_outcome",
     ))]
@@ -130,7 +142,8 @@ def build_calibration(path, config_hash=None, resolved_outcomes=None):
     ) for strategy in sorted(STRATEGIES)}
     evidence_fields = (
         "event_id", "entry_event_id", "strategy", "strategy_config_hash", "market_id", "condition_id", "asset", "timeframe",
-        "outcome", "close_ts", "estimated_probability", "expected_fill_price", "net_ev",
+        "outcome", "close_ts", "estimated_probability", "raw_estimated_probability",
+        "probability_model_id", "expected_fill_price", "net_ev",
         "price_to_beat", "consensus_price", "settlement_reference",
         "probability_reference_source", "probability_reference_price",
         "seconds_to_close", "settlement_price",
@@ -143,6 +156,7 @@ def build_calibration(path, config_hash=None, resolved_outcomes=None):
     )
     return {
         "config_hash": config_hash,
+        "config_hashes": config_hashes,
         "sample_count": len(rows),
         "complete_model_samples": len(complete_rows),
         "incomplete_model_samples": len(rows) - len(complete_rows),

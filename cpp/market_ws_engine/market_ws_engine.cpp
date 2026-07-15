@@ -130,6 +130,10 @@ strategy::Config strategy_config_from_environment() {
     config.maximum_clock_skew_ms = environment_double("MAX_CLOCK_SKEW_MS", "250");
     config.momentum_z_per_bps = environment_double("MODEL_MOMENTUM_Z_PER_BPS", "0.002");
     config.imbalance_z = environment_double("MODEL_IMBALANCE_Z", "0.25");
+    config.lottery_distance_weight = environment_double("LOTTERY_DISTANCE_WEIGHT", "1.0");
+    config.lottery_momentum_z_per_bps = environment_double("LOTTERY_MOMENTUM_Z_PER_BPS", "0.001");
+    config.lottery_imbalance_z = environment_double("LOTTERY_IMBALANCE_Z", "0.10");
+    config.lottery_market_blend = environment_double("LOTTERY_MARKET_BLEND", "0.50");
     config.minimum_model_sample_span_seconds = environment_double("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60");
     return config;
 }
@@ -143,8 +147,8 @@ std::string sha256_hex(const std::string& payload) {
     return output.str();
 }
 
-std::string strategy_config_hash() {
-    const std::map<std::string, std::string> values = {
+std::string strategy_config_hash(const std::string& strategy_name = "") {
+    std::map<std::string, std::string> values = {
         {"coinbase_reference_max_age_ms", environment_value("COINBASE_REFERENCE_MAX_AGE_MS", "10000")},
         {"directional_latency_buffer", environment_value("DIRECTIONAL_LATENCY_BUFFER", "0.003")},
         {"directional_min_net_ev", environment_value("DIRECTIONAL_MIN_NET_EV", "0.015")},
@@ -155,6 +159,10 @@ std::string strategy_config_hash() {
         {"lottery_min_net_ev", environment_value("LOTTERY_MIN_NET_EV", "0.015")},
         {"lottery_min_price", environment_value("LOTTERY_MIN_PRICE", "0.01")},
         {"lottery_model_buffer", environment_value("LOTTERY_MODEL_BUFFER", "0.01")},
+        {"lottery_distance_weight", environment_value("LOTTERY_DISTANCE_WEIGHT", "1.0")},
+        {"lottery_momentum_z_per_bps", environment_value("LOTTERY_MOMENTUM_Z_PER_BPS", "0.001")},
+        {"lottery_imbalance_z", environment_value("LOTTERY_IMBALANCE_Z", "0.10")},
+        {"lottery_market_blend", environment_value("LOTTERY_MARKET_BLEND", "0.50")},
         {"maximum_book_age_ms", environment_value("CLOB_MAX_BOOK_AGE_MS", "750")},
         {"maximum_clock_skew_ms", environment_value("MAX_CLOCK_SKEW_MS", "250")},
         {"maximum_reference_age_ms", environment_value("REFERENCE_MAX_AGE_MS", "3000")},
@@ -164,6 +172,31 @@ std::string strategy_config_hash() {
         {"momentum_z_per_bps", environment_value("MODEL_MOMENTUM_Z_PER_BPS", "0.002")},
         {"probability_reference", "settlement_reference"},
     };
+    if (!strategy_name.empty()) {
+        const auto relevant = [&](const std::string& key) {
+            const bool common = key == "coinbase_reference_max_age_ms" ||
+                key == "minimum_liquidity" || key == "maximum_slippage" ||
+                key == "maximum_reference_age_ms" || key == "maximum_book_age_ms" ||
+                key == "maximum_clock_skew_ms" || key == "minimum_model_sample_span_seconds" ||
+                key == "probability_reference";
+            if (strategy_name == "late_window_directional_ev") return common ||
+                key == "directional_min_net_ev" || key == "directional_latency_buffer" ||
+                key == "directional_settlement_buffer" || key == "momentum_z_per_bps" ||
+                key == "imbalance_z";
+            if (strategy_name == "low_price_lottery_ev") return common ||
+                key == "lottery_min_price" || key == "lottery_max_price" ||
+                key == "lottery_min_net_ev" || key == "lottery_model_buffer" ||
+                key == "lottery_execution_buffer" || key == "lottery_distance_weight" ||
+                key == "lottery_momentum_z_per_bps" || key == "lottery_imbalance_z" ||
+                key == "lottery_market_blend";
+            return true;
+        };
+        for (auto item = values.begin(); item != values.end();) {
+            if (!relevant(item->first)) item = values.erase(item);
+            else ++item;
+        }
+        values["strategy"] = strategy_name;
+    }
     std::ostringstream encoded;
     encoded << '{';
     bool first = true;
@@ -510,7 +543,8 @@ private:
     }
 
     bool should_emit_strategy(const std::string& key, const strategy::Decision& decision, double timestamp) {
-        const std::string fingerprint = decision.decision + "|" + decision.reason + "|" + strategy_config_hash_;
+        const std::string fingerprint = decision.decision + "|" + decision.reason + "|" +
+            strategy_hash_for(decision.strategy);
         const auto found = strategy_emission_state_.find(key);
         const double heartbeat = decision.decision == "ACCEPT"
             ? strategy_accept_heartbeat_seconds_ : strategy_reject_heartbeat_seconds_;
@@ -518,6 +552,11 @@ private:
             timestamp - found->second.second < heartbeat) return false;
         strategy_emission_state_[key] = {fingerprint, timestamp};
         return true;
+    }
+
+    const std::string& strategy_hash_for(const std::string& strategy_name) const {
+        return strategy_name == "low_price_lottery_ev"
+            ? lottery_strategy_config_hash_ : directional_strategy_config_hash_;
     }
 
     void evaluate_reference_strategies() {
@@ -574,9 +613,10 @@ private:
                 probability_input.momentum_bps_30s = asset->momentum_bps_30s;
             }
             probability_input.paired_book_imbalance = paired_imbalance;
-            const auto probability = strategy::probability_model(probability_input, strategy_config_);
+            const auto directional_probability = strategy::probability_model(probability_input, strategy_config_);
+            const auto lottery_probability = strategy::lottery_probability_model(probability_input, strategy_config_);
             std::string probability_block_reason;
-            if (!probability.estimated_probability) {
+            if (!directional_probability.estimated_probability || !lottery_probability.estimated_probability) {
                 if (!opening_price) probability_block_reason = market.start_ts <= 0
                     ? "price_to_beat_start_time_unavailable"
                     : timestamp * 1000 > market.start_ts * 1000 + 10000
@@ -599,14 +639,17 @@ private:
                 const double ask = best_ask(book);
                 const double fee = std::round(fill.first * rate * fill.second * (1 - fill.second) * 100000) / 100000;
                 const double slippage = ask > 0 ? std::max(0.0, fill.second - ask) : 1e9;
-                const std::optional<double> estimated_probability = !probability.estimated_probability
+                const std::optional<double> directional_raw_probability = !directional_probability.estimated_probability
                     ? std::nullopt
-                    : is_up ? probability.estimated_probability
-                            : std::optional<double>(1 - *probability.estimated_probability);
+                    : is_up ? directional_probability.estimated_probability
+                            : std::optional<double>(1 - *directional_probability.estimated_probability);
+                const std::optional<double> lottery_raw_probability = !lottery_probability.estimated_probability
+                    ? std::nullopt
+                    : is_up ? lottery_probability.estimated_probability
+                            : std::optional<double>(1 - *lottery_probability.estimated_probability);
                 strategy::EvaluationInput input;
                 input.timeframe = market.interval;
                 input.expected_fill_price = fill.second;
-                input.estimated_probability = estimated_probability;
                 input.seconds_to_close = seconds_to_close;
                 input.price_to_beat = opening_price;
                 input.fee_per_share = fee / std::max(size_, 1e-9);
@@ -631,6 +674,12 @@ private:
                 input.maximum_clock_skew_ms = strategy_config_.maximum_clock_skew_ms;
                 for (const std::string strategy_name : {"late_window_directional_ev", "low_price_lottery_ev"}) {
                     input.strategy = strategy_name;
+                    const bool is_lottery = strategy_name == "low_price_lottery_ev";
+                    const auto raw_probability = is_lottery
+                        ? lottery_raw_probability : directional_raw_probability;
+                    input.estimated_probability = is_lottery
+                        ? strategy::lottery_market_blend_probability(raw_probability, ask, strategy_config_)
+                        : raw_probability;
                     strategy::Decision decision = strategy_name == "late_window_directional_ev"
                         ? strategy::evaluate_directional(input, strategy_config_)
                         : strategy::evaluate_lottery(input, strategy_config_);
@@ -642,7 +691,8 @@ private:
                     const std::string key = item.first + "|" + strategy_name + "|" + outcome;
                     if (!should_emit_strategy(key, decision, timestamp)) continue;
                     emit_strategy_audit(item.first, market, outcome, input, probability_input,
-                                        probability, reference, decision, timestamp, ask);
+                                        is_lottery ? lottery_probability : directional_probability,
+                                        raw_probability, reference, decision, timestamp, ask);
                 }
             }
         }
@@ -658,6 +708,7 @@ private:
                              const std::string& outcome, const strategy::EvaluationInput& input,
                              const strategy::ProbabilityInput& model_input,
                              const strategy::ProbabilityOutput& model,
+                             const std::optional<double>& raw_estimated_probability,
                              const ReferenceView& reference, const strategy::Decision& decision,
                              double timestamp, double market_price) {
         const unsigned long long sequence = ++strategy_evaluation_sequence_;
@@ -683,6 +734,7 @@ private:
             << "\",\"market_price\":" << market_price << ",\"expected_fill_price\":"
             << input.expected_fill_price << ",\"estimated_probability\":";
         optional(input.estimated_probability);
+        out << ",\"raw_estimated_probability\":"; optional(raw_estimated_probability);
         out << ",\"market_implied_probability\":" << market_price << ",\"gross_edge\":";
         optional(decision.gross_edge);
         out << ",\"fees\":" << input.fee_per_share << ",\"slippage\":" << input.slippage_per_share
@@ -767,8 +819,13 @@ private:
         if (input.estimated_probability) out << confidence; else out << "null";
         out << ",\"input_quality_score\":";
         if (input.estimated_probability) out << confidence; else out << "null";
+        const bool is_lottery = decision.strategy == "low_price_lottery_ev";
         out << ",\"confidence_type\":\"input_quality_not_historical_accuracy\""
-            << ",\"model_type\":\"configured_distributional_shadow\",\"model_source\":";
+            << ",\"probability_model_id\":\""
+            << (is_lottery ? "lottery_market_blend_v1" : "directional_normal_cdf_v1") << '"'
+            << ",\"model_type\":\""
+            << (is_lottery ? "configured_lottery_market_blend_shadow" : "configured_distributional_shadow")
+            << "\",\"model_source\":";
         if (input.estimated_probability) out << "\"live_multi_source\""; else out << "null";
         out << ",\"settlement_source\":\"" << reference_ipc::escaped(market.settlement_source)
             << "\",\"settlement_source_verified\":" << (input.settlement_source_verified ? "true" : "false")
@@ -784,8 +841,8 @@ private:
             if (index) out << ',';
             out << '"' << reference_ipc::escaped(decision.blocking_reasons[index]) << '"';
         }
-        out << "],\"target_size\":" << size_ << ",\"config_version\":\"shadow-buy-rules-v5\""
-            << ",\"config_hash\":\"" << strategy_config_hash_ << "\""
+        out << "],\"target_size\":" << size_ << ",\"config_version\":\"shadow-buy-rules-v6\""
+            << ",\"config_hash\":\"" << strategy_hash_for(decision.strategy) << "\""
             << ",\"reference_sequence\":" << reference_snapshot_.sequence
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
             << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
@@ -1217,7 +1274,9 @@ private:
     BoundedAuditWriter strategy_audit_;
     std::string markets_path_, health_path_, run_id_;
     strategy::Config strategy_config_ = strategy_config_from_environment();
-    std::string strategy_config_hash_ = strategy_config_hash(), paired_config_hash_;
+    std::string directional_strategy_config_hash_ = strategy_config_hash("late_window_directional_ev");
+    std::string lottery_strategy_config_hash_ = strategy_config_hash("low_price_lottery_ev");
+    std::string paired_config_hash_;
     std::map<std::string, std::pair<std::string, double>> strategy_emission_state_;
     double strategy_accept_heartbeat_seconds_ = 5, strategy_reject_heartbeat_seconds_ = 60;
     double last_health_write_ = 0;
@@ -1230,8 +1289,8 @@ private:
 std::atomic<unsigned long long> MarketWsSession::next_session_id_{0};
 
 int main(int argc, char** argv) {
-    if (argc == 2 && std::string(argv[1]) == "--strategy-config-hash") {
-        std::cout << strategy_config_hash() << "\n";
+    if (argc >= 2 && argc <= 3 && std::string(argv[1]) == "--strategy-config-hash") {
+        std::cout << strategy_config_hash(argc == 3 ? argv[2] : "") << "\n";
         return 0;
     }
     if (argc < 2) { std::cerr << "usage: market_ws_engine <markets.json> [size] [fallback_fee_rate] [audit.jsonl] [buffer_per_share] [min_profit] [leg_interval_us] [execution_half_life_us] [orphan_loss_per_share] [min_expected_value] [health.json] [strategy_audit.jsonl]\n"; return 2; }

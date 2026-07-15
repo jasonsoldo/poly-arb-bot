@@ -25,6 +25,10 @@ struct Config {
     double maximum_clock_skew_ms = 250;
     double momentum_z_per_bps = .002;
     double imbalance_z = .25;
+    double lottery_distance_weight = 1.0;
+    double lottery_momentum_z_per_bps = .001;
+    double lottery_imbalance_z = .10;
+    double lottery_market_blend = .50;
     double minimum_model_sample_span_seconds = 60;
 };
 
@@ -75,6 +79,44 @@ inline ProbabilityOutput probability_model(const ProbabilityInput& row, const Co
     output.up_imbalance_z = imbalance_z;
     output.up_final_model_z = final_z;
     return output;
+}
+
+inline ProbabilityOutput lottery_probability_model(const ProbabilityInput& row, const Config& config = {}) {
+    ProbabilityOutput output;
+    if (!row.settlement_reference || *row.settlement_reference == 0 ||
+        !row.price_to_beat || *row.price_to_beat == 0 ||
+        !row.volatility_per_sqrt_second || *row.volatility_per_sqrt_second == 0 ||
+        row.model_sample_count < 20 ||
+        row.model_sample_span_seconds < config.minimum_model_sample_span_seconds ||
+        row.seconds_to_close <= 0 || !row.momentum_bps_30s || !row.paired_book_imbalance) {
+        return output;
+    }
+    const double scale = *row.volatility_per_sqrt_second * std::sqrt(row.seconds_to_close);
+    if (scale <= 0) return output;
+    const double log_distance = std::log(*row.settlement_reference / *row.price_to_beat);
+    const double standardized = log_distance / scale;
+    const double momentum_z = *row.momentum_bps_30s * config.lottery_momentum_z_per_bps;
+    const double imbalance_z = *row.paired_book_imbalance * config.lottery_imbalance_z;
+    const double final_z = standardized * config.lottery_distance_weight + momentum_z + imbalance_z;
+    output.estimated_probability = std::clamp(
+        .5 * (1 + std::erf(final_z / std::sqrt(2.0))), .001, .999);
+    output.expected_move_log_std = scale;
+    output.reference_log_distance = log_distance;
+    output.up_standardized_distance = standardized;
+    output.up_momentum_z = momentum_z;
+    output.up_imbalance_z = imbalance_z;
+    output.up_final_model_z = final_z;
+    return output;
+}
+
+inline std::optional<double> lottery_market_blend_probability(
+        const std::optional<double>& raw_probability, double market_implied_probability,
+        const Config& config = {}) {
+    if (!raw_probability || !std::isfinite(market_implied_probability)) return std::nullopt;
+    const double weight = std::clamp(config.lottery_market_blend, 0.0, 1.0);
+    return std::clamp(
+        market_implied_probability + weight * (*raw_probability - market_implied_probability),
+        .001, .999);
 }
 
 struct EvaluationInput {

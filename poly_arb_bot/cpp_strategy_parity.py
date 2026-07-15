@@ -2,13 +2,17 @@ import json
 import math
 import subprocess
 
-from .ev_shadow import _up_probability_model
+from .ev_shadow import (
+    _lottery_market_blend_probability,
+    _lottery_up_probability_model,
+    _up_probability_model,
+)
 from .ev_strategies import DirectionalInput, evaluate_directional, evaluate_lottery
 from .reference_layer import ReferenceState
 
 
 def python_result(case):
-    if case["mode"] == "probability":
+    if case["mode"] in {"probability", "lottery_probability"}:
         asset = {
             "settlement_reference": case["settlement_reference"],
             "volatility_per_sqrt_second": case["volatility_per_sqrt_second"],
@@ -16,10 +20,19 @@ def python_result(case):
             "model_sample_span_seconds": case["model_sample_span_seconds"],
             "momentum_bps_30s": case["momentum_bps_30s"],
         }
-        probability, _ = _up_probability_model(
+        model = (_lottery_up_probability_model
+                 if case["mode"] == "lottery_probability" else _up_probability_model)
+        probability, _ = model(
             asset, case["price_to_beat"], case["seconds_to_close"],
             case["paired_book_imbalance"],
         )
+        if case["mode"] == "lottery_probability":
+            return {
+                "raw_estimated_probability": probability,
+                "estimated_probability": _lottery_market_blend_probability(
+                    probability, case["market_implied_probability"],
+                ),
+            }
         return {"estimated_probability": probability}
 
     ready = case.get("reference_quorum_met", True)

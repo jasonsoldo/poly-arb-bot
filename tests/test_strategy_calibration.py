@@ -73,6 +73,29 @@ def test_missing_config_hash_is_json_serializable(tmp_path):
     json.dumps(report, sort_keys=True)
 
 
+def test_latest_calibration_selects_each_strategy_independently(tmp_path):
+    path = tmp_path / "execution.jsonl"
+    rows = [
+        {"event_type": "shadow_complete", "event_id": "d", "ts": 10,
+         "strategy": "late_window_directional_ev", "strategy_config_hash": "directional-v6"},
+        {"event_type": "shadow_complete", "event_id": "l", "ts": 11,
+         "strategy": "low_price_lottery_ev", "strategy_config_hash": "lottery-v6"},
+        {"event_type": "shadow_complete", "event_id": "old", "ts": 1,
+         "strategy": "late_window_directional_ev", "strategy_config_hash": "directional-v5"},
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+    report = build_calibration(path, "latest")
+
+    assert report["config_hash"] == "latest_by_strategy"
+    assert report["config_hashes"] == {
+        "late_window_directional_ev": "directional-v6",
+        "low_price_lottery_ev": "lottery-v6",
+    }
+    assert report["sample_count"] == 2
+    assert report["excluded_other_config"] == 1
+
+
 def test_official_winner_requires_closed_binary_resolution():
     rows = [
         {"conditionId": "c1", "closed": True,

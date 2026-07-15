@@ -64,8 +64,14 @@ def _performance_from_rows(rows):
                        "pnl": pnl, "state": "COMPLETE"})
     ledger.sort(key=lambda item: item["ts"])
     current_hash = strategy_config()[1]
+    current_hashes = {
+        strategy: strategy_config(strategy)[1]
+        for strategy in ("late_window_directional_ev", "low_price_lottery_ev")
+    }
     current = [item for item in ledger if item.get("strategy") == "paired_lock" or
-               item.get("strategy_config_hash") == current_hash]
+               item.get("strategy_config_hash") in {
+                   current_hash, current_hashes.get(item.get("strategy")),
+               }]
     asset_latest_pnl = {}
     for item in current:
         if item.get("asset"):
@@ -91,9 +97,13 @@ def _performance_from_rows(rows):
         "excluded_pre_rule_compliance": len(ledger) - len(current),
         "excluded_other_strategy_config": sum(
             item.get("strategy") != "paired_lock" and
-            item.get("strategy_config_hash") != current_hash for item in ledger
+            item.get("strategy_config_hash") not in {
+                current_hash, current_hashes.get(item.get("strategy")),
+            }
+            for item in ledger
         ),
         "current_strategy_config_hash": current_hash,
+        "current_strategy_config_hashes": current_hashes,
     }
 
 

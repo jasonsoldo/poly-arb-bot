@@ -24,6 +24,7 @@ def test_cpp_strategy_audit_exposes_price_to_beat_provenance():
 def test_cpp_engine_emits_four_independent_strategy_evaluations():
     assert "evaluate_reference_strategies" in ENGINE
     assert "strategy::probability_model" in ENGINE
+    assert "strategy::lottery_probability_model" in ENGINE
     assert "strategy::evaluate_directional" in ENGINE
     assert "strategy::evaluate_lottery" in ENGINE
     assert '"late_window_directional_ev"' in ENGINE
@@ -40,8 +41,15 @@ def test_cpp_strategy_audit_is_shadow_only_and_suppressed():
     assert '\\\"real_orders\\\":0' in ENGINE
     assert '\\\"real_fills\\\":0' in ENGINE
     assert "config_hash" in ENGINE
-    assert "shadow-buy-rules-v5" in ENGINE
+    assert "shadow-buy-rules-v6" in ENGINE
     assert "--strategy-config-hash" in ENGINE
+
+
+def test_strategy_audit_identifies_independent_probability_models():
+    assert '\\\"probability_model_id\\\"' in ENGINE
+    assert '\\\"raw_estimated_probability\\\"' in ENGINE
+    assert "directional_normal_cdf_v1" in ENGINE
+    assert "lottery_market_blend_v1" in ENGINE
 
 
 def test_reference_mutation_drives_strategy_evaluation_without_gating_paired_lock():

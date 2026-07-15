@@ -74,6 +74,10 @@ class StrategyShadowLifecycle:
         )
         self.config_version = "shadow-portfolio-v4"
         self.strategy_config_hash = strategy_config()[1]
+        self.strategy_config_hashes = {
+            strategy: strategy_config(strategy)[1]
+            for strategy in ("late_window_directional_ev", "low_price_lottery_ev")
+        }
         config_payload = {
             "calibration_mode": self.calibration_mode,
             "limits": asdict(self.limits),
@@ -182,9 +186,11 @@ class StrategyShadowLifecycle:
 
     def _loss_block_reason(self, strategy, daily_limit, consecutive_limit, prefix):
         today = int(time.time() // 86400)
+        current_hash = self.strategy_config_hashes[strategy]
+        compatible_hashes = {current_hash, self.strategy_config_hash}
         completed = [trade for trade in self.data["completed_trades"]
                      if trade.get("strategy") == strategy and
-                     trade.get("strategy_config_hash") == self.strategy_config_hash and
+                     trade.get("strategy_config_hash") in compatible_hashes and
                      int(trade.get("ts", 0) // 86400) == today]
         if -sum(min(0.0, float(trade.get("pnl", 0))) for trade in completed) >= daily_limit:
             return f"{prefix}_daily_loss_limit"
@@ -192,7 +198,7 @@ class StrategyShadowLifecycle:
         for trade in reversed(self.data["completed_trades"]):
             if trade.get("strategy") != strategy:
                 continue
-            if trade.get("strategy_config_hash") != self.strategy_config_hash:
+            if trade.get("strategy_config_hash") not in compatible_hashes:
                 continue
             if float(trade.get("pnl", 0)) >= 0:
                 break
@@ -325,6 +331,8 @@ class StrategyShadowLifecycle:
             "generation": row.get("generation"), "session": row.get("session"),
             "evaluation_sequence": row.get("evaluation_sequence"),
             "estimated_probability": row.get("estimated_probability"),
+            "raw_estimated_probability": row.get("raw_estimated_probability"),
+            "probability_model_id": row.get("probability_model_id"),
             "market_implied_probability": row.get("market_implied_probability"),
             "gross_edge": row.get("gross_edge"), "net_ev": row.get("net_ev"),
             "consensus_price": row.get("consensus_price"),

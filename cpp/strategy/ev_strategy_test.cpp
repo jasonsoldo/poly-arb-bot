@@ -30,7 +30,8 @@ int main() {
         std::istringstream input(line);
         ptree row;
         boost::property_tree::read_json(input, row);
-        if (row.get<std::string>("mode") == "probability") {
+        const std::string mode = row.get<std::string>("mode");
+        if (mode == "probability" || mode == "lottery_probability") {
             strategy::ProbabilityInput value;
             value.settlement_reference = optional_number(row, "settlement_reference");
             value.price_to_beat = optional_number(row, "price_to_beat");
@@ -40,9 +41,20 @@ int main() {
             value.model_sample_span_seconds = row.get<double>("model_sample_span_seconds");
             value.momentum_bps_30s = optional_number(row, "momentum_bps_30s");
             value.paired_book_imbalance = optional_number(row, "paired_book_imbalance");
-            const auto output = strategy::probability_model(value);
-            std::cout << "{\"estimated_probability\":";
-            write_optional(output.estimated_probability);
+            const auto output = mode == "probability"
+                ? strategy::probability_model(value)
+                : strategy::lottery_probability_model(value);
+            std::cout << '{';
+            if (mode == "lottery_probability") {
+                std::cout << "\"raw_estimated_probability\":";
+                write_optional(output.estimated_probability);
+                std::cout << ',';
+            }
+            std::cout << "\"estimated_probability\":";
+            write_optional(mode == "lottery_probability"
+                ? strategy::lottery_market_blend_probability(
+                    output.estimated_probability, row.get<double>("market_implied_probability"))
+                : output.estimated_probability);
             std::cout << "}\n";
             continue;
         }

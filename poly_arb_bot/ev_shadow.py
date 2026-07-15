@@ -25,10 +25,10 @@ BINANCE_SYMBOLS = {
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
-STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v5"
+STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v6"
 
 
-def strategy_config():
+def strategy_config(strategy=None):
     values = {
         "directional_min_net_ev": os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015"),
         "directional_latency_buffer": os.getenv("DIRECTIONAL_LATENCY_BUFFER", "0.003"),
@@ -46,9 +46,34 @@ def strategy_config():
         "maximum_clock_skew_ms": os.getenv("MAX_CLOCK_SKEW_MS", "250"),
         "momentum_z_per_bps": os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"),
         "imbalance_z": os.getenv("MODEL_IMBALANCE_Z", "0.25"),
+        "lottery_distance_weight": os.getenv("LOTTERY_DISTANCE_WEIGHT", "1.0"),
+        "lottery_momentum_z_per_bps": os.getenv("LOTTERY_MOMENTUM_Z_PER_BPS", "0.001"),
+        "lottery_imbalance_z": os.getenv("LOTTERY_IMBALANCE_Z", "0.10"),
+        "lottery_market_blend": os.getenv("LOTTERY_MARKET_BLEND", "0.50"),
         "minimum_model_sample_span_seconds": os.getenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"),
         "probability_reference": "settlement_reference",
     }
+    if strategy:
+        common_keys = {
+            "coinbase_reference_max_age_ms", "minimum_liquidity", "maximum_slippage",
+            "maximum_reference_age_ms", "maximum_book_age_ms", "maximum_clock_skew_ms",
+            "minimum_model_sample_span_seconds", "probability_reference",
+        }
+        strategy_keys = {
+            "late_window_directional_ev": {
+                "directional_min_net_ev", "directional_latency_buffer",
+                "directional_settlement_buffer", "momentum_z_per_bps", "imbalance_z",
+            },
+            "low_price_lottery_ev": {
+                "lottery_min_price", "lottery_max_price", "lottery_min_net_ev",
+                "lottery_model_buffer", "lottery_execution_buffer",
+                "lottery_distance_weight", "lottery_momentum_z_per_bps",
+                "lottery_imbalance_z", "lottery_market_blend",
+            },
+        }
+        allowed = common_keys | strategy_keys.get(strategy, set())
+        values = {key: value for key, value in values.items() if key in allowed}
+        values["strategy"] = strategy
     encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
     return values, hashlib.sha256(encoded).hexdigest()
 
@@ -242,6 +267,55 @@ def _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance
     }
 
 
+def _lottery_up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance=None):
+    reference = asset.get("settlement_reference")
+    volatility = asset.get("volatility_per_sqrt_second")
+    samples = int(asset.get("model_sample_count", 0))
+    sample_span = float(asset.get("model_sample_span_seconds") or 0)
+    minimum_span = float(os.getenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"))
+    diagnostics = {
+        "model_sample_span_seconds": sample_span,
+        "minimum_model_sample_span_seconds": minimum_span,
+    }
+    if (not reference or not price_to_beat or not volatility or samples < 20 or
+            sample_span < minimum_span or seconds_to_close <= 0):
+        return None, diagnostics
+    scale = float(volatility) * math.sqrt(seconds_to_close)
+    if scale <= 0:
+        return None, diagnostics
+    momentum = asset.get("momentum_bps_30s")
+    if momentum is None or book_imbalance is None:
+        return None, diagnostics
+    log_distance = math.log(float(reference) / float(price_to_beat))
+    standardized_distance = log_distance / scale
+    momentum_z = float(momentum) * float(os.getenv("LOTTERY_MOMENTUM_Z_PER_BPS", "0.001"))
+    imbalance_z = float(book_imbalance) * float(os.getenv("LOTTERY_IMBALANCE_Z", "0.10"))
+    final_z = (
+        standardized_distance * float(os.getenv("LOTTERY_DISTANCE_WEIGHT", "1.0"))
+        + momentum_z + imbalance_z
+    )
+    probability = min(.999, max(.001, .5 * (1 + math.erf(final_z / math.sqrt(2)))))
+    return probability, {
+        **diagnostics,
+        "volatility_per_sqrt_second": float(volatility),
+        "expected_move_log_std": scale,
+        "reference_log_distance": log_distance,
+        "up_standardized_distance": standardized_distance,
+        "up_momentum_z": momentum_z,
+        "up_imbalance_z": imbalance_z,
+        "up_final_model_z": final_z,
+        "paired_book_imbalance": float(book_imbalance),
+    }
+
+
+def _lottery_market_blend_probability(raw_probability, market_implied_probability):
+    if raw_probability is None or market_implied_probability is None:
+        return None
+    weight = min(1.0, max(0.0, float(os.getenv("LOTTERY_MARKET_BLEND", "0.50"))))
+    return min(.999, max(.001, float(market_implied_probability) +
+                         weight * (float(raw_probability) - float(market_implied_probability))))
+
+
 def _up_probability(asset, price_to_beat, seconds_to_close, book_imbalance=None):
     return _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance)[0]
 
@@ -295,11 +369,14 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
     paired_imbalance = None
     if up_imbalance is not None and down_imbalance is not None:
         paired_imbalance = (float(up_imbalance) - float(down_imbalance)) / 2
-    up_probability, model_diagnostics = _up_probability_model(
+    directional_up_probability, directional_diagnostics = _up_probability_model(
+        model_asset, price_to_beat, seconds_to_close, paired_imbalance,
+    )
+    lottery_up_probability, lottery_diagnostics = _lottery_up_probability_model(
         model_asset, price_to_beat, seconds_to_close, paired_imbalance,
     )
     probability_block_reason = None
-    if up_probability is None:
+    if directional_up_probability is None or lottery_up_probability is None:
         if price_to_beat is None:
             start_ts = _market_start_ts(market)
             if not start_ts:
@@ -326,10 +403,12 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             probability_block_reason = "probability_model_unavailable"
     size = max(float(event.get("size", 0)), 1e-9)
     rows = []
-    _, config_hash = strategy_config()
-    for outcome, fill_key, ask_key, fee_key, depth_key, imbalance_key, probability in (
-        ("Up", "up_vwap", "up_best_ask", "up_fee", "up_available_depth", "up_book_imbalance", up_probability),
-        ("Down", "down_vwap", "down_best_ask", "down_fee", "down_available_depth", "down_book_imbalance", None if up_probability is None else 1 - up_probability),
+    for outcome, fill_key, ask_key, fee_key, depth_key, imbalance_key, directional_raw, lottery_raw in (
+        ("Up", "up_vwap", "up_best_ask", "up_fee", "up_available_depth", "up_book_imbalance",
+         directional_up_probability, lottery_up_probability),
+        ("Down", "down_vwap", "down_best_ask", "down_fee", "down_available_depth", "down_book_imbalance",
+         None if directional_up_probability is None else 1 - directional_up_probability,
+         None if lottery_up_probability is None else 1 - lottery_up_probability),
     ):
         fill = float(event.get(fill_key, 1))
         best_ask = event.get(ask_key)
@@ -348,13 +427,13 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         )
         samples = int(model_asset.get("model_sample_count", 0))
         divergence = reference.cross_source_divergence_bps
-        confidence = None if up_probability is None else max(0.0, min(1.0,
+        confidence = None if directional_up_probability is None else max(0.0, min(1.0,
             min(samples / 120, 1.0) * (1 - min(float(divergence or 0) / 100, 1.0))))
         common = dict(
             market_id=market.get("market_id", ""), condition_id=market.get("condition_id", market.get("market_id", "")),
             asset=market.get("asset", ""), timeframe=market.get("interval", ""), outcome=outcome,
             market_price=float(best_ask) if best_ask is not None else fill,
-            expected_fill_price=fill, estimated_probability=probability,
+            expected_fill_price=fill,
             seconds_to_close=seconds_to_close, price_to_beat=price_to_beat,
             reference=reference, fee_per_share=float(event.get(fee_key, 0)) / size,
             slippage_per_share=slippage,
@@ -389,7 +468,16 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             ("late_window_directional_ev", evaluate_directional),
             ("low_price_lottery_ev", evaluate_lottery),
         ):
-            input_row = DirectionalInput(strategy=strategy, **common)
+            is_lottery = strategy == "low_price_lottery_ev"
+            raw_probability = lottery_raw if is_lottery else directional_raw
+            probability = (
+                _lottery_market_blend_probability(raw_probability, common["market_price"])
+                if is_lottery else raw_probability
+            )
+            diagnostics = lottery_diagnostics if is_lottery else directional_diagnostics
+            input_row = DirectionalInput(
+                strategy=strategy, estimated_probability=probability, **common,
+            )
             if strategy == "late_window_directional_ev":
                 result = evaluator(input_row, float(os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015")))
             else:
@@ -405,10 +493,17 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                 int(event.get("ws_session_id", event.get("session", 0))),
                 int(event.get("evaluation_sequence", 0)), float(event.get("ts", now)),
             )
-            audit["model_type"] = "configured_distributional_shadow"
+            audit["probability_model_id"] = (
+                "lottery_market_blend_v1" if is_lottery else "directional_normal_cdf_v1"
+            )
+            audit["raw_estimated_probability"] = raw_probability
+            audit["model_type"] = (
+                "configured_lottery_market_blend_shadow"
+                if is_lottery else "configured_distributional_shadow"
+            )
             audit["model_sample_count"] = int(model_asset.get("model_sample_count", 0))
-            audit["model_source"] = model_source if up_probability is not None else None
-            audit.update(model_diagnostics)
+            audit["model_source"] = model_source if probability is not None else None
+            audit.update(diagnostics)
             audit["input_quality_score"] = confidence
             audit["confidence_type"] = "input_quality_not_historical_accuracy"
             audit["price_to_beat_source"] = price_to_beat_source
@@ -417,7 +512,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             audit["target_size"] = size
             audit["window"] = market.get("window", "current")
             audit["config_version"] = STRATEGY_CONFIG_VERSION
-            audit["config_hash"] = config_hash
+            audit["config_hash"] = strategy_config(strategy)[1]
             rows.append(audit)
     return rows
 
@@ -578,24 +673,40 @@ def _verify_cpp_strategy_row(row):
         "model_sample_span_seconds": row.get("model_sample_span_seconds", 0),
         "momentum_bps_30s": row.get("momentum_bps_30s"),
     }
-    up_probability, _ = _up_probability_model(
+    is_lottery = row["strategy"] == "low_price_lottery_ev"
+    model = _lottery_up_probability_model if is_lottery else _up_probability_model
+    up_probability, _ = model(
         model_asset, row.get("price_to_beat"), row.get("seconds_to_close", 0),
         row.get("paired_book_imbalance"),
     )
-    expected_probability = up_probability if row.get("outcome") == "Up" else (
+    raw_probability = up_probability if row.get("outcome") == "Up" else (
         None if up_probability is None else 1 - up_probability
     )
-    _, expected_hash = strategy_config()
+    expected_probability = (
+        _lottery_market_blend_probability(raw_probability, row.get("market_implied_probability"))
+        if is_lottery else raw_probability
+    )
+    independent_model_audit = (
+        row.get("config_version") == STRATEGY_CONFIG_VERSION
+        or row.get("probability_model_id") is not None
+    )
+    _, expected_hash = strategy_config(row["strategy"] if independent_model_audit else None)
     expected = {
         "decision": decision.decision, "reason": decision.reason,
         "gross_edge": decision.gross_edge, "net_ev": decision.net_ev,
         "config_hash": expected_hash,
     }
+    if row.get("probability_model_id") is not None:
+        expected["probability_model_id"] = (
+            "lottery_market_blend_v1" if is_lottery else "directional_normal_cdf_v1"
+        )
     if all(row.get(key) is not None for key in (
         "settlement_reference", "volatility_per_sqrt_second", "model_sample_count",
         "model_sample_span_seconds", "momentum_bps_30s", "paired_book_imbalance",
     )):
         expected["estimated_probability"] = expected_probability
+        if "raw_estimated_probability" in row:
+            expected["raw_estimated_probability"] = raw_probability
     mismatches = {}
     for key, expected_value in expected.items():
         actual = row.get(key)
