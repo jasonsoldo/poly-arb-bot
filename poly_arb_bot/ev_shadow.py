@@ -425,6 +425,14 @@ def _load(path, default):
         return default
 
 
+def _write_state(path, state):
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text(json.dumps(state), encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def _should_emit_audit(row, emission_state):
     key = "|".join(str(row.get(field, "")) for field in (
         "market_id", "strategy", "outcome"
@@ -458,8 +466,17 @@ def process_once(audit_path, market_path, venue_path, output_path, state_path,
     audit_path, output_path, state_path = Path(audit_path), Path(output_path), Path(state_path)
     if not audit_path.exists():
         return 0
-    if audit_path.stat().st_size < state.get("offset", 0):
+    stat = audit_path.stat()
+    identity = f"{stat.st_dev}:{stat.st_ino}"
+    previous_identity = state.get("file_identity")
+    changed = opening_prices != state.get("opening_prices", {})
+    if (previous_identity not in {None, identity} or
+            stat.st_size < state.get("offset", 0)):
         state["offset"] = 0
+        changed = True
+    if previous_identity != identity and (previous_identity is not None or stat.st_size > 0):
+        state["file_identity"] = identity
+        changed = True
     emitted = 0
     with audit_path.open(encoding="utf-8") as source, output_path.open("a", encoding="utf-8") as target:
         source.seek(state.get("offset", 0))
@@ -482,7 +499,10 @@ def process_once(audit_path, market_path, venue_path, output_path, state_path,
                 target.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
                 emitted += 1
             processed.add(event_id)
-        state["offset"] = source.tell()
+        offset = source.tell()
+        if offset != state.get("offset"):
+            state["offset"] = offset
+            changed = True
     state["processed"] = list(processed)[-20000:]
     state["emission_state"] = dict(sorted(
         emission_state.items(), key=lambda item: float(item[1].get("last_emitted_ts", 0))
@@ -588,8 +608,17 @@ def process_verification_once(source_path, output_path, state_path):
     state = _load(state_path, {"offset": 0})
     if not source_path.exists():
         return 0
-    if source_path.stat().st_size < int(state.get("offset", 0)):
+    stat = source_path.stat()
+    identity = f"{stat.st_dev}:{stat.st_ino}"
+    previous_identity = state.get("file_identity")
+    changed = False
+    if (previous_identity not in {None, identity} or
+            stat.st_size < int(state.get("offset", 0))):
         state["offset"] = 0
+        changed = True
+    if previous_identity != identity and (previous_identity is not None or stat.st_size > 0):
+        state["file_identity"] = identity
+        changed = True
     mismatches = []
     with source_path.open(encoding="utf-8") as source:
         source.seek(int(state.get("offset", 0)))
@@ -610,16 +639,17 @@ def process_verification_once(source_path, output_path, state_path):
                     "strategy": row.get("strategy"), "market_id": row.get("market_id"),
                     "outcome": row.get("outcome"), "mismatches": differences,
                 })
-        state["offset"] = source.tell()
+        offset = source.tell()
+        if offset != state.get("offset"):
+            state["offset"] = offset
+            changed = True
     if mismatches:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("a", encoding="utf-8") as output:
             for row in mismatches:
                 output.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
-    temporary = state_path.with_suffix(state_path.suffix + ".tmp")
-    temporary.parent.mkdir(parents=True, exist_ok=True)
-    temporary.write_text(json.dumps(state), encoding="utf-8")
-    os.replace(temporary, state_path)
+    if changed:
+        _write_state(state_path, state)
     return len(mismatches)
 
 

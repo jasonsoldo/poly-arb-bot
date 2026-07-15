@@ -50,10 +50,14 @@ class PortfolioLimits:
 
 
 class StrategyShadowLifecycle:
-    def __init__(self, state_path, log_path, limits=None, orphan_after_seconds=None):
+    def __init__(self, state_path, log_path, limits=None, orphan_after_seconds=None,
+                 checkpoint_interval_seconds=5):
         self.state_path = Path(state_path)
         self.logger = JsonlLogger(Path(log_path))
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_interval_seconds = float(checkpoint_interval_seconds)
+        self._dirty = False
+        self._last_checkpoint = time.monotonic()
         self.limits = limits or PortfolioLimits.from_env()
         self.orphan_after_seconds = float(
             orphan_after_seconds
@@ -75,18 +79,35 @@ class StrategyShadowLifecycle:
         self.data["portfolio_limits"] = asdict(self.limits)
         self.data["config_version"] = self.config_version
         self.data["config_hash"] = self.config_hash
+        self._mark_dirty()
         if self._backfill_completed_trades():
-            self._save()
+            self._save(force=True)
 
     def _load(self):
         if not self.state_path.exists():
             return {"positions": {}, "completed": [], "audit_offset": 0, "paired_audit_offset": 0}
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
-    def _save(self):
+    def _write_state(self):
         temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
         temporary.write_text(json.dumps(self.data, indent=2, sort_keys=True), encoding="utf-8")
         os.replace(temporary, self.state_path)
+
+    def _mark_dirty(self):
+        self._dirty = True
+
+    def _save(self, force=False):
+        if not self._dirty:
+            return False
+        if not force and time.monotonic() - self._last_checkpoint < self.checkpoint_interval_seconds:
+            return False
+        self._write_state()
+        self._dirty = False
+        self._last_checkpoint = time.monotonic()
+        return True
+
+    def flush(self):
+        return self._save(force=True)
 
     def _backfill_completed_trades(self):
         if not self.logger.path.exists():
@@ -174,6 +195,7 @@ class StrategyShadowLifecycle:
                 "real_order_submissions": 0, "real_orders": 0,
             })
         self.data["portfolio_rejections"][key] = reason
+        self._mark_dirty()
         self._save()
         return False
 
@@ -288,6 +310,7 @@ class StrategyShadowLifecycle:
             "config_version": self.config_version, "config_hash": self.config_hash,
             "real_order_submissions": 0, "real_orders": 0,
         }
+        self._mark_dirty()
         self._save()
         return True
 
@@ -313,6 +336,7 @@ class StrategyShadowLifecycle:
     def settle(self, markets, venue, now):
         completed = 0
         changed = False
+        durable_transition = False
 
         for key, position in list(self.data["positions"].items()):
             close_ts = float(position.get("close_ts") or 0)
@@ -358,6 +382,7 @@ class StrategyShadowLifecycle:
                 )[-20000:]
                 del self.data["positions"][key]
                 changed = True
+                durable_transition = True
                 continue
 
             winning_outcome = None if paired else (
@@ -406,9 +431,11 @@ class StrategyShadowLifecycle:
             del self.data["positions"][key]
             completed += 1
             changed = True
+            durable_transition = True
 
         if changed:
-            self._save()
+            self._mark_dirty()
+            self._save(force=durable_transition)
 
         return completed
 
@@ -417,8 +444,16 @@ def process_audit_once(audit_path, lifecycle, markets, offset_key="audit_offset"
     audit_path = Path(audit_path)
     if not audit_path.exists():
         return 0
-    if audit_path.stat().st_size < lifecycle.data.get(offset_key, 0):
+    stat = audit_path.stat()
+    identity_key = f"{offset_key}_file_identity"
+    identity = f"{stat.st_dev}:{stat.st_ino}"
+    previous_identity = lifecycle.data.get(identity_key)
+    if (previous_identity and previous_identity != identity) or stat.st_size < lifecycle.data.get(offset_key, 0):
         lifecycle.data[offset_key] = 0
+        lifecycle._mark_dirty()
+    if previous_identity != identity:
+        lifecycle.data[identity_key] = identity
+        lifecycle._mark_dirty()
     opened = 0
     with audit_path.open(encoding="utf-8") as handle:
         handle.seek(lifecycle.data.get(offset_key, 0))
@@ -428,6 +463,9 @@ def process_audit_once(audit_path, lifecycle, markets, offset_key="audit_offset"
             except json.JSONDecodeError:
                 continue
             opened += lifecycle.consume(row, markets)
-        lifecycle.data[offset_key] = handle.tell()
-    lifecycle._save()
+        offset = handle.tell()
+        if offset != lifecycle.data.get(offset_key):
+            lifecycle.data[offset_key] = offset
+            lifecycle._mark_dirty()
+    lifecycle._save(force=bool(opened))
     return opened

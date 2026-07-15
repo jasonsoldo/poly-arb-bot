@@ -410,3 +410,12 @@ def test_cpp_verification_mode_writes_only_parity_mismatches(tmp_path):
     row = json.loads(output.read_text(encoding="utf-8").splitlines()[-1])
     assert row["event_type"] == "strategy_parity_mismatch"
     assert row["source_event_id"] == "cpp-2"
+
+
+def test_verifier_does_not_rewrite_unchanged_checkpoint(tmp_path):
+    source = tmp_path / "strategy-audit.jsonl"
+    output = tmp_path / "parity.jsonl"
+    state = tmp_path / "state.json"
+    source.write_text("", encoding="utf-8")
+    assert ev_shadow.process_verification_once(source, output, state) == 0
+    assert not state.exists()

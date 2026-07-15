@@ -8,21 +8,40 @@ from .strategy_shadow_lifecycle import StrategyShadowLifecycle, process_audit_on
 
 
 class ShadowExecutionStateMachine:
-    def __init__(self, state_path, log_path):
+    def __init__(self, state_path, log_path, checkpoint_interval_seconds=5):
         self.state_path = Path(state_path)
         self.logger = JsonlLogger(Path(log_path))
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
+        self.checkpoint_interval_seconds = float(checkpoint_interval_seconds)
+        self._dirty = False
+        self._last_checkpoint = time.monotonic()
 
     def _load(self):
         if not self.state_path.exists():
             return {"state": "IDLE", "processed": [], "audit_offset": 0}
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
-    def _save(self):
+    def _write_state(self):
         temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
         temporary.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
         os.replace(temporary, self.state_path)
+
+    def _mark_dirty(self):
+        self._dirty = True
+
+    def _save(self, force=False):
+        if not self._dirty:
+            return False
+        if not force and time.monotonic() - self._last_checkpoint < self.checkpoint_interval_seconds:
+            return False
+        self._write_state()
+        self._dirty = False
+        self._last_checkpoint = time.monotonic()
+        return True
+
+    def flush(self):
+        return self._save(force=True)
 
     def _transition(self, state, event_id, market_id, detail=None):
         self.data.update({"state": state, "event_id": event_id, "market_id": market_id, "updated_at": time.time()})
@@ -30,7 +49,7 @@ class ShadowExecutionStateMachine:
             "strategy": "paired_lock", "state": state, "event_id": event_id,
             "market_id": market_id, "detail": detail or {}, "real_order_submitted": False,
         })
-        self._save()
+        self._mark_dirty()
 
     def process(self, opportunity, leg1_result="filled", leg2_result="filled", orphan_action="hold"):
         event_id = opportunity.get("event_id") or f'{opportunity.get("market_id")}:{opportunity.get("ts")}'
@@ -54,7 +73,8 @@ class ShadowExecutionStateMachine:
                 self._transition(f"ORPHAN_{orphan_action.upper()}", event_id, market_id)
         self.data["processed"] = (self.data["processed"] + [event_id])[-10000:]
         self.data["state"] = "IDLE"
-        self._save()
+        self._mark_dirty()
+        self._save(force=True)
         return True
 
 
@@ -62,8 +82,15 @@ def process_audit_once(audit_path, machine, lifecycle=None, markets=None):
     audit_path = Path(audit_path)
     if not audit_path.exists():
         return 0
-    if audit_path.stat().st_size < machine.data.get("audit_offset", 0):
+    stat = audit_path.stat()
+    identity = f"{stat.st_dev}:{stat.st_ino}"
+    previous_identity = machine.data.get("audit_file_identity")
+    if (previous_identity and previous_identity != identity) or stat.st_size < machine.data.get("audit_offset", 0):
         machine.data["audit_offset"] = 0
+        machine._mark_dirty()
+    if previous_identity != identity:
+        machine.data["audit_file_identity"] = identity
+        machine._mark_dirty()
     processed = 0
     with audit_path.open(encoding="utf-8") as handle:
         handle.seek(machine.data.get("audit_offset", 0))
@@ -82,8 +109,11 @@ def process_audit_once(audit_path, machine, lifecycle=None, markets=None):
                 processed += handled
                 if (handled and lifecycle and machine.data.get("last_completed_event_id") == row.get("event_id")):
                     lifecycle.consume(row, markets or {})
-        machine.data["audit_offset"] = handle.tell()
-        machine._save()
+        offset = handle.tell()
+        if offset != machine.data.get("audit_offset"):
+            machine.data["audit_offset"] = offset
+            machine._mark_dirty()
+        machine._save(force=bool(processed))
     return processed
 
 
@@ -101,12 +131,16 @@ def run(audit_path, state_path, log_path, poll_seconds=0.5,
     audit_path = Path(audit_path)
     machine = ShadowExecutionStateMachine(state_path, log_path)
     lifecycle = StrategyShadowLifecycle(strategy_state_path, log_path)
-    while True:
-        markets = {row.get("market_id"): row for row in _json(market_path, {"markets": []}).get("markets", [])}
-        process_audit_once(audit_path, machine, lifecycle, markets)
-        process_strategy_audit_once(strategy_audit_path, lifecycle, markets)
-        lifecycle.settle(markets, _json(venue_path, {}), time.time())
-        time.sleep(poll_seconds)
+    try:
+        while True:
+            markets = {row.get("market_id"): row for row in _json(market_path, {"markets": []}).get("markets", [])}
+            process_audit_once(audit_path, machine, lifecycle, markets)
+            process_strategy_audit_once(strategy_audit_path, lifecycle, markets)
+            lifecycle.settle(markets, _json(venue_path, {}), time.time())
+            time.sleep(poll_seconds)
+    finally:
+        machine.flush()
+        lifecycle.flush()
 
 
 def main():

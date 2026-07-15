@@ -1,6 +1,38 @@
 import json
 
 from poly_arb_bot.shadow_execution import ShadowExecutionStateMachine, process_audit_once
+
+
+def test_execution_checkpoints_are_dirty_and_coalesced(tmp_path):
+    machine = ShadowExecutionStateMachine(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+        checkpoint_interval_seconds=5,
+    )
+    writes = []
+    machine._write_state = lambda: writes.append(dict(machine.data))
+    machine._mark_dirty()
+    machine._save()
+    machine._mark_dirty()
+    machine._save()
+    assert writes == []
+    machine.flush()
+    assert len(writes) == 1
+    machine.flush()
+    assert len(writes) == 1
+
+
+def test_execution_audit_inode_change_resets_cursor(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    audit.write_text("{}\n", encoding="utf-8")
+    machine = ShadowExecutionStateMachine(tmp_path / "state.json", tmp_path / "events.jsonl")
+    process_audit_once(audit, machine)
+    old_identity = machine.data["audit_file_identity"]
+    moved = tmp_path / "old.jsonl"
+    audit.replace(moved)
+    audit.write_text("{}\n{}\n", encoding="utf-8")
+    process_audit_once(audit, machine)
+    assert machine.data["audit_file_identity"] != old_identity
+    assert machine.data["audit_offset"] == audit.stat().st_size
 from poly_arb_bot.strategy_shadow_lifecycle import StrategyShadowLifecycle
 
 

@@ -350,3 +350,21 @@ def test_unsettled_position_is_orphaned_and_releases_portfolio_capacity(tmp_path
     log_row = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
     assert log_row["event_type"] == "shadow_orphaned"
 
+
+def test_lifecycle_checkpoints_are_dirty_and_coalesced(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+        checkpoint_interval_seconds=5,
+    )
+    writes = []
+    lifecycle._write_state = lambda: writes.append(dict(lifecycle.data))
+    lifecycle._mark_dirty()
+    lifecycle._save()
+    lifecycle._mark_dirty()
+    lifecycle._save()
+    assert writes == []
+    lifecycle.flush()
+    assert len(writes) == 1
+    lifecycle.flush()
+    assert len(writes) == 1
+
