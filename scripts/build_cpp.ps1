@@ -20,6 +20,11 @@ g++ -std=c++17 -O3 -Wall -Wextra -DBOOST_BIND_GLOBAL_PLACEHOLDERS -DBOOST_ERROR_
 & .\build\latest_value_client_test.exe
 Write-Host "built and tested build/latest_value_client_test.exe"
 
+g++ -std=c++17 -O3 -Wall -Wextra -DBOOST_BIND_GLOBAL_PLACEHOLDERS `
+  cpp/strategy/ev_strategy_test.cpp `
+  -o build/ev_strategy_test.exe
+Write-Host "built build/ev_strategy_test.exe"
+
 g++ -std=c++17 -O3 -Wall -Wextra -static -static-libgcc -static-libstdc++ `
   cpp/pnl_curve_engine/pnl_curve_engine.cpp `
   -o build/pnl_curve_engine.exe

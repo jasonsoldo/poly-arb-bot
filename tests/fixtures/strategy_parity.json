@@ -1,0 +1,84 @@
+[
+  {
+    "name": "probability_up",
+    "mode": "probability",
+    "consensus_price": 101.0,
+    "price_to_beat": 100.0,
+    "seconds_to_close": 45,
+    "volatility_per_sqrt_second": 0.001,
+    "model_sample_count": 40,
+    "model_sample_span_seconds": 120,
+    "momentum_bps_30s": 2.0,
+    "paired_book_imbalance": 0.2
+  },
+  {
+    "name": "directional_accept_5m",
+    "mode": "evaluate",
+    "strategy": "late_window_directional_ev",
+    "timeframe": "5m",
+    "expected_fill_price": 0.56,
+    "estimated_probability": 0.65,
+    "seconds_to_close": 45
+  },
+  {
+    "name": "directional_time_window_15m",
+    "mode": "evaluate",
+    "strategy": "late_window_directional_ev",
+    "timeframe": "15m",
+    "expected_fill_price": 0.20,
+    "estimated_probability": 0.50,
+    "seconds_to_close": 19
+  },
+  {
+    "name": "directional_reference_blocked",
+    "mode": "evaluate",
+    "strategy": "late_window_directional_ev",
+    "timeframe": "1h",
+    "expected_fill_price": 0.20,
+    "estimated_probability": 0.50,
+    "seconds_to_close": 100,
+    "reference_quorum_met": false,
+    "reference_block_reason": "cross_source_divergence_exceeded"
+  },
+  {
+    "name": "directional_stale_precedence",
+    "mode": "evaluate",
+    "strategy": "late_window_directional_ev",
+    "timeframe": "4h",
+    "expected_fill_price": 0.20,
+    "estimated_probability": null,
+    "seconds_to_close": 100,
+    "book_age_ms": 10000,
+    "price_to_beat": null,
+    "probability_block_reason": "price_to_beat_capture_missed"
+  },
+  {
+    "name": "lottery_accept",
+    "mode": "evaluate",
+    "strategy": "low_price_lottery_ev",
+    "timeframe": "5m",
+    "expected_fill_price": 0.021,
+    "estimated_probability": 0.08,
+    "seconds_to_close": 300
+  },
+  {
+    "name": "lottery_above_limit",
+    "mode": "evaluate",
+    "strategy": "low_price_lottery_ev",
+    "timeframe": "15m",
+    "expected_fill_price": 0.08,
+    "estimated_probability": 0.20,
+    "seconds_to_close": 300
+  },
+  {
+    "name": "lottery_depth_blocked",
+    "mode": "evaluate",
+    "strategy": "low_price_lottery_ev",
+    "timeframe": "5m",
+    "expected_fill_price": 0.03,
+    "estimated_probability": 0.20,
+    "seconds_to_close": 60,
+    "liquidity": 10,
+    "target_depth_ok": false
+  }
+]
