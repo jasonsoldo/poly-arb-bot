@@ -32,8 +32,10 @@ def test_shadow_loop_starts_shadow_execution_state_machine():
     assert '"$execution_pid"' in SCRIPT
 
 
-def test_shadow_loop_starts_independent_ev_shadow_evaluator():
+def test_shadow_loop_starts_cpp_strategy_parity_verifier():
     assert '"$python_bin" -m poly_arb_bot.ev_shadow' in SCRIPT
+    assert "EV_SHADOW_MODE=verify" in SCRIPT
+    assert "logs/strategy-parity.jsonl" in SCRIPT
     assert 'ev_pid=$!' in SCRIPT
     assert '"$ev_pid"' in SCRIPT
 

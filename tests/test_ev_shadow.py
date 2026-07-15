@@ -375,3 +375,38 @@ def test_unsupported_settlement_source_drops_persisted_anchor():
         "chainlink": {"supported": False, "status": "UNSUPPORTED"}
     }}}}
     assert ev_shadow.capture_opening_prices(markets, venue_state, existing, now_ms=1_001_000) == {}
+
+
+def test_cpp_verification_mode_writes_only_parity_mismatches(tmp_path):
+    source = tmp_path / "strategy-audit.jsonl"
+    output = tmp_path / "strategy-parity.jsonl"
+    state = tmp_path / "verify-state.json"
+    base = {
+        "event_id": "cpp-1", "event_type": "shadow_eval",
+        "strategy": "late_window_directional_ev", "timeframe": "5m",
+        "expected_fill_price": .56, "estimated_probability": .65,
+        "seconds_to_close": 45, "price_to_beat": 100,
+        "fees": .01, "slippage": .002, "latency_risk_buffer": .003,
+        "settlement_risk_buffer": .002, "model_uncertainty_buffer": .01,
+        "execution_risk_buffer": .005, "liquidity": 100, "book_age_ms": 50,
+        "reference_age_ms": 50, "clock_skew_ms": 10,
+        "minimum_liquidity": 20, "maximum_slippage": .01,
+        "maximum_reference_age_ms": 3000, "maximum_book_age_ms": 750,
+        "maximum_clock_skew_ms": 250, "market_active": True,
+        "market_tradable": True, "target_depth_ok": True,
+        "momentum_bps_30s": 2, "order_book_imbalance": .1,
+        "reference_quorum_met": True, "settlement_source_verified": True,
+        "decision": "ACCEPT", "reason": "positive_net_ev",
+        "gross_edge": .09, "net_ev": .073,
+        "config_hash": ev_shadow.strategy_config()[1],
+    }
+    source.write_text(json.dumps(base) + "\n", encoding="utf-8")
+    assert ev_shadow.process_verification_once(source, output, state) == 0
+    assert not output.exists() or output.read_text(encoding="utf-8") == ""
+    bad = dict(base, event_id="cpp-2", decision="REJECT")
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(bad) + "\n")
+    assert ev_shadow.process_verification_once(source, output, state) == 1
+    row = json.loads(output.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event_type"] == "strategy_parity_mismatch"
+    assert row["source_event_id"] == "cpp-2"

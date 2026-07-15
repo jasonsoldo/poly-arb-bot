@@ -48,6 +48,7 @@ struct AssetSnapshot {
     std::optional<double> cross_source_divergence_bps;
     std::optional<double> volatility_per_sqrt_second;
     std::optional<double> momentum_bps_30s;
+    std::optional<double> clock_skew_ms;
     int model_sample_count = 0;
     double model_sample_span_seconds = 0;
     bool reference_quorum_met = false;
@@ -154,6 +155,7 @@ inline std::string encode_line(const Snapshot& snapshot) {
         out << ",\"cross_source_divergence_bps\":"; write_optional(out, row.cross_source_divergence_bps);
         out << ",\"volatility_per_sqrt_second\":"; write_optional(out, row.volatility_per_sqrt_second);
         out << ",\"momentum_bps_30s\":"; write_optional(out, row.momentum_bps_30s);
+        out << ",\"clock_skew_ms\":"; write_optional(out, row.clock_skew_ms);
         out << ",\"model_sample_count\":" << row.model_sample_count
             << ",\"model_sample_span_seconds\":" << row.model_sample_span_seconds
             << ",\"reference_quorum_met\":" << (row.reference_quorum_met ? "true" : "false")
@@ -235,6 +237,7 @@ inline Snapshot decode_line(std::string_view line) {
                 asset.cross_source_divergence_bps = optional_number(row, "cross_source_divergence_bps");
                 asset.volatility_per_sqrt_second = optional_number(row, "volatility_per_sqrt_second");
                 asset.momentum_bps_30s = optional_number(row, "momentum_bps_30s");
+                asset.clock_skew_ms = optional_number(row, "clock_skew_ms");
                 asset.model_sample_count = row.get<int>("model_sample_count", 0);
                 asset.model_sample_span_seconds = row.get<double>("model_sample_span_seconds", 0);
                 asset.reference_quorum_met = row.get<bool>("reference_quorum_met", false);

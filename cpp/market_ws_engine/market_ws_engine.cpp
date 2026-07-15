@@ -8,10 +8,13 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include "../reference_ipc/latest_value_client.hpp"
+#include "../strategy/ev_strategy.hpp"
+#include <openssl/sha.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <deque>
 #include <fstream>
@@ -20,6 +23,8 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -40,8 +45,11 @@ struct Book {
     unsigned long long generation = 0;
 };
 struct Market {
-    std::string up, down, last_reason;
-    double fee = .07, close_ts = 0, active_since = 0, last_audit = 0;
+    std::string up, down, last_reason, condition_id, asset, interval, window;
+    std::string settlement_source, title;
+    std::optional<double> open_price;
+    double fee = .07, start_ts = 0, close_ts = 0, active_since = 0, last_audit = 0;
+    bool accepting_orders = true;
     Market() = default;
     Market(const std::string& up_token, const std::string& down_token) : up(up_token), down(down_token) {}
 };
@@ -61,6 +69,16 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
         Market market(row.get<std::string>("up_token_id"), row.get<std::string>("down_token_id"));
         market.fee = row.get<double>("fee_rate");
         market.close_ts = row.get<double>("close_ts", 0);
+        if (const auto value = row.get_optional<double>("start_ts")) market.start_ts = *value;
+        market.condition_id = row.get<std::string>("condition_id", row.get<std::string>("market_id", ""));
+        market.asset = row.get<std::string>("asset", "");
+        market.interval = row.get<std::string>("interval", "");
+        market.settlement_source = row.get<std::string>("settlement_source", "");
+        if (market.settlement_source == "null") market.settlement_source.clear();
+        market.title = row.get<std::string>("title", "");
+        market.accepting_orders = row.get<bool>("accepting_orders", true);
+        if (const auto value = row.get_optional<double>("open_price")) market.open_price = *value;
+        market.window = row.get<std::string>("window", market.start_ts > now_seconds() ? "next" : "current");
         if (market.close_ts <= now_seconds()) continue;
         if (market.up == market.down || tokens.count(market.up) || tokens.count(market.down)) throw std::runtime_error("duplicate market token");
         if (market.fee <= 0) throw std::runtime_error("invalid market fee");
@@ -76,6 +94,167 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
 
 double now_seconds() { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); }
 double number(const ptree& row, const std::string& key) { return row.get<double>(key, 0); }
+
+std::string environment_value(const char* name, const char* fallback) {
+    const char* value = std::getenv(name);
+    return value && *value ? value : fallback;
+}
+
+double environment_double(const char* name, const char* fallback) {
+    return std::stod(environment_value(name, fallback));
+}
+
+strategy::Config strategy_config_from_environment() {
+    strategy::Config config;
+    config.directional_min_net_ev = environment_double("DIRECTIONAL_MIN_NET_EV", "0.015");
+    config.directional_latency_buffer = environment_double("DIRECTIONAL_LATENCY_BUFFER", "0.003");
+    config.directional_settlement_buffer = environment_double("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002");
+    config.lottery_min_price = environment_double("LOTTERY_MIN_PRICE", "0.01");
+    config.lottery_max_price = environment_double("LOTTERY_MAX_PRICE", "0.05");
+    config.lottery_min_net_ev = environment_double("LOTTERY_MIN_NET_EV", "0.015");
+    config.lottery_model_buffer = environment_double("LOTTERY_MODEL_BUFFER", "0.01");
+    config.lottery_execution_buffer = environment_double("LOTTERY_EXECUTION_BUFFER", "0.005");
+    config.minimum_liquidity = environment_double("STRATEGY_MIN_LIQUIDITY", "20");
+    config.maximum_slippage = environment_double("STRATEGY_MAX_SLIPPAGE", "0.01");
+    config.maximum_reference_age_ms = environment_double("REFERENCE_MAX_AGE_MS", "3000");
+    config.maximum_book_age_ms = environment_double("CLOB_MAX_BOOK_AGE_MS", "750");
+    config.maximum_clock_skew_ms = environment_double("MAX_CLOCK_SKEW_MS", "250");
+    config.momentum_z_per_bps = environment_double("MODEL_MOMENTUM_Z_PER_BPS", "0.002");
+    config.imbalance_z = environment_double("MODEL_IMBALANCE_Z", "0.25");
+    config.minimum_model_sample_span_seconds = environment_double("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60");
+    return config;
+}
+
+std::string strategy_config_hash() {
+    const std::map<std::string, std::string> values = {
+        {"coinbase_reference_max_age_ms", environment_value("COINBASE_REFERENCE_MAX_AGE_MS", "10000")},
+        {"directional_latency_buffer", environment_value("DIRECTIONAL_LATENCY_BUFFER", "0.003")},
+        {"directional_min_net_ev", environment_value("DIRECTIONAL_MIN_NET_EV", "0.015")},
+        {"directional_settlement_buffer", environment_value("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002")},
+        {"imbalance_z", environment_value("MODEL_IMBALANCE_Z", "0.25")},
+        {"lottery_execution_buffer", environment_value("LOTTERY_EXECUTION_BUFFER", "0.005")},
+        {"lottery_max_price", environment_value("LOTTERY_MAX_PRICE", "0.05")},
+        {"lottery_min_net_ev", environment_value("LOTTERY_MIN_NET_EV", "0.015")},
+        {"lottery_min_price", environment_value("LOTTERY_MIN_PRICE", "0.01")},
+        {"lottery_model_buffer", environment_value("LOTTERY_MODEL_BUFFER", "0.01")},
+        {"maximum_book_age_ms", environment_value("CLOB_MAX_BOOK_AGE_MS", "750")},
+        {"maximum_clock_skew_ms", environment_value("MAX_CLOCK_SKEW_MS", "250")},
+        {"maximum_reference_age_ms", environment_value("REFERENCE_MAX_AGE_MS", "3000")},
+        {"maximum_slippage", environment_value("STRATEGY_MAX_SLIPPAGE", "0.01")},
+        {"minimum_liquidity", environment_value("STRATEGY_MIN_LIQUIDITY", "20")},
+        {"minimum_model_sample_span_seconds", environment_value("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60")},
+        {"momentum_z_per_bps", environment_value("MODEL_MOMENTUM_Z_PER_BPS", "0.002")},
+    };
+    std::ostringstream encoded;
+    encoded << '{';
+    bool first = true;
+    for (const auto& item : values) {
+        if (!first) encoded << ',';
+        first = false;
+        encoded << '"' << item.first << "\":\"" << reference_ipc::escaped(item.second) << '"';
+    }
+    encoded << '}';
+    const std::string payload = encoded.str();
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(payload.data()), payload.size(), digest);
+    std::ostringstream output;
+    output << std::hex << std::setfill('0');
+    for (unsigned char byte : digest) output << std::setw(2) << static_cast<int>(byte);
+    return output.str();
+}
+
+double median(std::vector<double> values) {
+    if (values.empty()) return 0;
+    std::sort(values.begin(), values.end());
+    const std::size_t middle = values.size() / 2;
+    return values.size() % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+}
+
+struct EffectiveReferenceSource {
+    std::string source, symbol, market_type, quote_currency, status;
+    std::optional<double> price;
+    std::optional<double> age_ms;
+};
+
+struct ReferenceView {
+    std::vector<EffectiveReferenceSource> sources;
+    std::optional<double> fast_price, consensus_price, settlement_reference;
+    std::optional<double> divergence_bps, reference_age_ms, clock_skew_ms;
+    int fresh_exchange_sources = 0, fresh_usd_sources = 0;
+    bool quorum = false, settlement_verified = false;
+    std::string state = "REFERENCE_BLOCKED", reason = "insufficient_reference_sources";
+    double maximum_reference_age_ms = 3000;
+};
+
+ReferenceView build_reference_view(const reference_ipc::AssetSnapshot& asset,
+                                   const std::string& settlement_source,
+                                   double transport_age_ms, const strategy::Config& config) {
+    ReferenceView view;
+    view.maximum_reference_age_ms = config.maximum_reference_age_ms;
+    view.fast_price = asset.fast_price;
+    view.clock_skew_ms = asset.clock_skew_ms;
+    std::vector<double> usd_prices;
+    for (const auto& item : asset.sources) {
+        const auto& source = item.second;
+        const double maximum_age = item.first == "coinbase"
+            ? environment_double("COINBASE_REFERENCE_MAX_AGE_MS", "10000")
+            : config.maximum_reference_age_ms;
+        std::optional<double> age;
+        if (source.message_age_ms) age = *source.message_age_ms + transport_age_ms;
+        std::string status = source.status;
+        if (status == "FRESH" && (!age || *age > maximum_age)) status = "STALE";
+        view.sources.push_back({item.first, source.symbol, source.market_type,
+                                source.quote_currency, status, source.price, age});
+        if (status == "FRESH" && source.market_type == "spot" &&
+            source.quote_currency == "USD" && source.price) usd_prices.push_back(*source.price);
+    }
+    const double usd_center = median(usd_prices);
+    for (auto& source : view.sources) {
+        if (source.status == "FRESH" && source.market_type == "spot" &&
+            source.quote_currency == "USD" && source.price && usd_center > 0 &&
+            std::abs(*source.price - usd_center) / usd_center * 10000 > 100) {
+            source.status = "OUTLIER";
+        }
+    }
+    std::vector<double> valid_prices, valid_usd, reference_ages;
+    for (const auto& source : view.sources) {
+        const bool valid_spot = source.status == "FRESH" && source.market_type == "spot" && source.price;
+        if (valid_spot) {
+            valid_prices.push_back(*source.price);
+            ++view.fresh_exchange_sources;
+            if (source.quote_currency == "USD") {
+                valid_usd.push_back(*source.price);
+                ++view.fresh_usd_sources;
+            }
+        }
+        if (source.source == settlement_source && source.status == "FRESH" && source.price) {
+            view.settlement_reference = source.price;
+            view.settlement_verified = true;
+        }
+        if (source.status == "FRESH" && source.age_ms &&
+            (source.market_type == "spot" || source.source == settlement_source)) {
+            reference_ages.push_back(*source.age_ms);
+            view.maximum_reference_age_ms = std::max(
+                view.maximum_reference_age_ms,
+                source.source == "coinbase"
+                    ? environment_double("COINBASE_REFERENCE_MAX_AGE_MS", "10000")
+                    : config.maximum_reference_age_ms);
+        }
+    }
+    if (!valid_usd.empty()) view.consensus_price = median(valid_usd);
+    if (!reference_ages.empty()) view.reference_age_ms = *std::max_element(reference_ages.begin(), reference_ages.end());
+    if (valid_prices.size() > 1) {
+        const auto bounds = std::minmax_element(valid_prices.begin(), valid_prices.end());
+        const double center = median(valid_prices);
+        if (center > 0) view.divergence_bps = (*bounds.second - *bounds.first) / center * 10000;
+    }
+    if (view.fresh_exchange_sources < 2) view.reason = "insufficient_reference_sources";
+    else if (view.fresh_usd_sources < 1) view.reason = "required_usd_spot_source_unavailable";
+    else if (!view.settlement_verified) view.reason = "settlement_reference_unavailable";
+    else if (view.divergence_bps && *view.divergence_bps > 100) view.reason = "cross_source_divergence_exceeded";
+    else { view.quorum = true; view.state = "REFERENCE_READY"; view.reason.clear(); }
+    return view;
+}
 
 void set_levels(Book& book, const ptree& rows, bool bid, bool clear) {
     auto& side = bid ? book.bids : book.asks;
@@ -125,21 +304,88 @@ std::pair<double, double> buy_vwap(const Book& book, double size) {
     return {filled, filled ? notional / filled : 0};
 }
 
+class BoundedAuditWriter {
+public:
+    explicit BoundedAuditWriter(const std::string& path, std::size_t capacity = 4096)
+        : output_(path, std::ios::app), capacity_(capacity), worker_([this] { run(); }) {
+        failed_.store(!output_);
+    }
+
+    ~BoundedAuditWriter() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        condition_.notify_one();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    bool enqueue(std::string line) {
+        if (failed_.load()) return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (queue_.size() >= capacity_) return false;
+            queue_.push_back(std::move(line));
+        }
+        condition_.notify_one();
+        return true;
+    }
+
+    bool available() const {
+        if (failed_.load()) return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size() < capacity_;
+    }
+    std::size_t queued() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+
+private:
+    void run() {
+        for (;;) {
+            std::deque<std::string> batch;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
+                if (stopping_ && queue_.empty()) break;
+                batch.swap(queue_);
+            }
+            for (const auto& line : batch) output_ << line;
+            output_.flush();
+            if (!output_) failed_.store(true);
+        }
+    }
+
+    std::ofstream output_;
+    const std::size_t capacity_;
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<std::string> queue_;
+    bool stopping_ = false;
+    std::atomic<bool> failed_{false};
+    std::thread worker_;
+};
+
 class MarketWsSession : public std::enable_shared_from_this<MarketWsSession> {
 public:
     MarketWsSession(asio::io_context& io, asio::ssl::context& ssl, std::map<std::string, Market> markets,
                     std::map<std::string, Book> books, double size, double fee, double buffer_per_share,
                     double min_profit, double leg_interval_us, double execution_half_life_us,
                     double orphan_loss_per_share, double min_expected_value, const std::string& audit_path,
-                    const std::string& markets_path, unsigned long long document_version, const std::string& health_path)
+                    const std::string& markets_path, unsigned long long document_version, const std::string& health_path,
+                    const std::string& strategy_audit_path)
         : io_(io), ssl_(ssl), resolver_(io), ws_(io, ssl), timer_(io), reload_timer_(io), evaluation_timer_(io), markets_(std::move(markets)), books_(std::move(books)),
           size_(size), fallback_fee_(fee), buffer_per_share_(buffer_per_share), min_profit_(min_profit),
           leg_interval_us_(leg_interval_us), execution_half_life_us_(execution_half_life_us),
           orphan_loss_per_share_(orphan_loss_per_share), min_expected_value_(min_expected_value),
-          last_activity_(now_seconds()), audit_(audit_path, std::ios::app), markets_path_(markets_path), health_path_(health_path),
+          last_activity_(now_seconds()), audit_(audit_path, std::ios::app), strategy_audit_(strategy_audit_path),
+          markets_path_(markets_path), health_path_(health_path),
           run_id_(std::to_string(static_cast<unsigned long long>(now_seconds() * 1000000))),
           document_version_(document_version), generation_(1), ws_session_id_(++next_session_id_) {
         audit_ << std::setprecision(15);
+        strategy_accept_heartbeat_seconds_ = environment_double("STRATEGY_ACCEPT_AUDIT_HEARTBEAT_SECONDS", "5");
+        strategy_reject_heartbeat_seconds_ = environment_double("STRATEGY_REJECT_AUDIT_HEARTBEAT_SECONDS", "60");
         for (auto& item : books_) item.second.generation = generation_;
     }
 
@@ -164,10 +410,279 @@ private:
     void on_reference_snapshot(const reference_ipc::Snapshot& snapshot) {
         reference_snapshot_ = snapshot;
         reference_receive_at_ = std::chrono::steady_clock::now();
+        evaluate_reference_strategies();
     }
 
     void on_reference_state(bool connected) {
         reference_connected_ = connected;
+    }
+
+    std::optional<double> price_to_beat(const Market& market,
+                                        const reference_ipc::AssetSnapshot* asset) const {
+        if (market.open_price) return market.open_price;
+        if (!asset || market.start_ts <= 0 || now_seconds() < market.start_ts) return std::nullopt;
+        const auto found = asset->sources.find(market.settlement_source);
+        if (found == asset->sources.end()) return std::nullopt;
+        const double start_ms = market.start_ts * 1000;
+        std::optional<reference_ipc::AnchorSample> best;
+        const auto consider = [&](const std::vector<reference_ipc::AnchorSample>& samples) {
+            for (const auto& sample : samples) {
+                if (sample.source_timestamp_ms < start_ms || sample.source_timestamp_ms > start_ms + 10000)
+                    continue;
+                if (!sample.timeframe.empty() && sample.timeframe != market.interval) continue;
+                if (!best || sample.source_timestamp_ms < best->source_timestamp_ms) best = sample;
+            }
+        };
+        consider(found->second.anchor_samples);
+        consider(found->second.settlement_samples);
+        return best ? std::optional<double>(best->price) : std::nullopt;
+    }
+
+    bool should_emit_strategy(const std::string& key, const strategy::Decision& decision, double timestamp) {
+        const std::string fingerprint = decision.decision + "|" + decision.reason + "|" + strategy_config_hash_;
+        const auto found = strategy_emission_state_.find(key);
+        const double heartbeat = decision.decision == "ACCEPT"
+            ? strategy_accept_heartbeat_seconds_ : strategy_reject_heartbeat_seconds_;
+        if (found != strategy_emission_state_.end() && found->second.first == fingerprint &&
+            timestamp - found->second.second < heartbeat) return false;
+        strategy_emission_state_[key] = {fingerprint, timestamp};
+        return true;
+    }
+
+    void evaluate_reference_strategies() {
+        if (stopped_ || reference_snapshot_.producer_session.empty()) return;
+        const double timestamp = now_seconds();
+        const double transport_age_ms = reference_receive_at_.time_since_epoch().count()
+            ? std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - reference_receive_at_).count()
+            : 1e9;
+        for (const auto& item : markets_) {
+            const Market& market = item.second;
+            const Book& up_book = books_.at(market.up);
+            const Book& down_book = books_.at(market.down);
+            if (!up_book.ws_snapshot || !down_book.ws_snapshot) continue;
+            const auto asset_found = reference_snapshot_.assets.find(market.asset);
+            const reference_ipc::AssetSnapshot* asset = asset_found == reference_snapshot_.assets.end()
+                ? nullptr : &asset_found->second;
+            const ReferenceView reference = asset
+                ? build_reference_view(*asset, market.settlement_source, transport_age_ms, strategy_config_)
+                : ReferenceView{};
+            const double up_age_ms = std::max(0.0, (timestamp - up_book.updated_at) * 1000);
+            const double down_age_ms = std::max(0.0, (timestamp - down_book.updated_at) * 1000);
+            const double book_state_age_ms = std::max(up_age_ms, down_age_ms);
+            const double clob_feed_age_ms = std::max(0.0, (timestamp - last_activity_) * 1000);
+            const double book_age_ms = std::min(book_state_age_ms, clob_feed_age_ms);
+            const int seconds_to_close = std::max(0, static_cast<int>(market.close_ts - timestamp));
+            const auto opening_price = price_to_beat(market, asset);
+            const double paired_imbalance = (book_imbalance(up_book) - book_imbalance(down_book)) / 2;
+            strategy::ProbabilityInput probability_input;
+            probability_input.consensus_price = reference.consensus_price;
+            probability_input.price_to_beat = opening_price;
+            probability_input.seconds_to_close = seconds_to_close;
+            if (asset) {
+                probability_input.volatility_per_sqrt_second = asset->volatility_per_sqrt_second;
+                probability_input.model_sample_count = asset->model_sample_count;
+                probability_input.model_sample_span_seconds = asset->model_sample_span_seconds;
+                probability_input.momentum_bps_30s = asset->momentum_bps_30s;
+            }
+            probability_input.paired_book_imbalance = paired_imbalance;
+            const auto probability = strategy::probability_model(probability_input, strategy_config_);
+            std::string probability_block_reason;
+            if (!probability.estimated_probability) {
+                if (!opening_price) probability_block_reason = market.start_ts <= 0
+                    ? "price_to_beat_start_time_unavailable"
+                    : timestamp * 1000 > market.start_ts * 1000 + 10000
+                        ? "price_to_beat_capture_missed" : "price_to_beat_pending";
+                else if (!reference.consensus_price) probability_block_reason = "consensus_price_unavailable";
+                else if (!asset || !asset->volatility_per_sqrt_second) probability_block_reason = "volatility_unavailable";
+                else if (asset->model_sample_count < 20) probability_block_reason = "insufficient_model_samples";
+                else if (asset->model_sample_span_seconds < strategy_config_.minimum_model_sample_span_seconds)
+                    probability_block_reason = "model_sample_span_insufficient";
+                else if (!asset->momentum_bps_30s) probability_block_reason = "momentum_unavailable";
+                else probability_block_reason = "probability_model_unavailable";
+            }
+            const auto up = buy_vwap(up_book, size_);
+            const auto down = buy_vwap(down_book, size_);
+            const double rate = market.fee > 0 ? market.fee : fallback_fee_;
+            for (const std::string outcome : {"Up", "Down"}) {
+                const bool is_up = outcome == "Up";
+                const Book& book = is_up ? up_book : down_book;
+                const auto fill = is_up ? up : down;
+                const double ask = best_ask(book);
+                const double fee = std::round(fill.first * rate * fill.second * (1 - fill.second) * 100000) / 100000;
+                const double slippage = ask > 0 ? std::max(0.0, fill.second - ask) : 1e9;
+                const std::optional<double> estimated_probability = !probability.estimated_probability
+                    ? std::nullopt
+                    : is_up ? probability.estimated_probability
+                            : std::optional<double>(1 - *probability.estimated_probability);
+                strategy::EvaluationInput input;
+                input.timeframe = market.interval;
+                input.expected_fill_price = fill.second;
+                input.estimated_probability = estimated_probability;
+                input.seconds_to_close = seconds_to_close;
+                input.price_to_beat = opening_price;
+                input.fee_per_share = fee / std::max(size_, 1e-9);
+                input.slippage_per_share = slippage;
+                input.liquidity = available_ask_depth(book);
+                input.book_age_ms = book_age_ms;
+                input.reference_age_ms = reference.reference_age_ms;
+                input.clock_skew_ms = reference.clock_skew_ms;
+                input.market_active = market.close_ts > timestamp;
+                input.market_tradable = market.accepting_orders;
+                input.target_depth_ok = fill.first >= size_;
+                input.momentum_bps_30s = asset ? asset->momentum_bps_30s : std::nullopt;
+                input.order_book_imbalance = book_imbalance(book);
+                input.reference_quorum_met = reference.quorum;
+                input.reference_block_reason = reference.reason;
+                input.settlement_source_verified = reference.settlement_verified;
+                input.probability_block_reason = probability_block_reason;
+                input.minimum_liquidity = strategy_config_.minimum_liquidity;
+                input.maximum_slippage = strategy_config_.maximum_slippage;
+                input.maximum_reference_age_ms = reference.maximum_reference_age_ms;
+                input.maximum_book_age_ms = strategy_config_.maximum_book_age_ms;
+                input.maximum_clock_skew_ms = strategy_config_.maximum_clock_skew_ms;
+                for (const std::string strategy_name : {"late_window_directional_ev", "low_price_lottery_ev"}) {
+                    input.strategy = strategy_name;
+                    strategy::Decision decision = strategy_name == "late_window_directional_ev"
+                        ? strategy::evaluate_directional(input, strategy_config_)
+                        : strategy::evaluate_lottery(input, strategy_config_);
+                    if (!strategy_audit_.available()) {
+                        decision.decision = "REJECT";
+                        decision.reason = "audit_backpressure";
+                        decision.blocking_reasons.insert(decision.blocking_reasons.begin(), "audit_backpressure");
+                    }
+                    const std::string key = item.first + "|" + strategy_name + "|" + outcome;
+                    if (!should_emit_strategy(key, decision, timestamp)) continue;
+                    emit_strategy_audit(item.first, market, outcome, input, probability_input,
+                                        probability, reference, decision, timestamp, ask);
+                }
+            }
+        }
+    }
+
+    void emit_strategy_audit(const std::string& market_id, const Market& market,
+                             const std::string& outcome, const strategy::EvaluationInput& input,
+                             const strategy::ProbabilityInput& model_input,
+                             const strategy::ProbabilityOutput& model,
+                             const ReferenceView& reference, const strategy::Decision& decision,
+                             double timestamp, double market_price) {
+        const unsigned long long sequence = ++strategy_evaluation_sequence_;
+        const std::string event_id = run_id_ + ":" + std::to_string(generation_) + ":" +
+            std::to_string(ws_session_id_) + ":" + market_id + ":" + decision.strategy + ":" +
+            outcome + ":" + std::to_string(sequence);
+        std::ostringstream out;
+        out << std::setprecision(15);
+        const auto optional = [&](const std::optional<double>& value) {
+            if (value && std::isfinite(*value)) out << *value;
+            else out << "null";
+        };
+        out << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
+            << ",\"event_id\":\"" << reference_ipc::escaped(event_id)
+            << "\",\"event_type\":\"shadow_eval\",\"strategy\":\"" << decision.strategy
+            << "\",\"market_id\":\"" << reference_ipc::escaped(market_id)
+            << "\",\"condition_id\":\"" << reference_ipc::escaped(market.condition_id)
+            << "\",\"asset\":\"" << reference_ipc::escaped(market.asset)
+            << "\",\"timeframe\":\"" << reference_ipc::escaped(market.interval)
+            << "\",\"window\":\"" << reference_ipc::escaped(market.window)
+            << "\",\"generation\":" << generation_ << ",\"session\":" << ws_session_id_
+            << ",\"evaluation_sequence\":" << sequence << ",\"outcome\":\"" << outcome
+            << "\",\"market_price\":" << market_price << ",\"expected_fill_price\":"
+            << input.expected_fill_price << ",\"estimated_probability\":";
+        optional(input.estimated_probability);
+        out << ",\"market_implied_probability\":" << market_price << ",\"gross_edge\":";
+        optional(decision.gross_edge);
+        out << ",\"fees\":" << input.fee_per_share << ",\"slippage\":" << input.slippage_per_share
+            << ",\"latency_risk_buffer\":" << strategy_config_.directional_latency_buffer
+            << ",\"settlement_risk_buffer\":" << strategy_config_.directional_settlement_buffer
+            << ",\"model_uncertainty_buffer\":" << strategy_config_.lottery_model_buffer
+            << ",\"execution_risk_buffer\":" << strategy_config_.lottery_execution_buffer
+            << ",\"net_ev\":";
+        optional(decision.net_ev);
+        out << ",\"fast_price\":"; optional(reference.fast_price);
+        out << ",\"consensus_price\":"; optional(reference.consensus_price);
+        out << ",\"settlement_reference\":"; optional(reference.settlement_reference);
+        out << ",\"fresh_exchange_source_count\":" << reference.fresh_exchange_sources
+            << ",\"fresh_usd_spot_source_count\":" << reference.fresh_usd_sources
+            << ",\"cross_source_divergence_bps\":";
+        optional(reference.divergence_bps);
+        out << ",\"reference_quorum_met\":" << (reference.quorum ? "true" : "false")
+            << ",\"reference_state\":\"" << reference.state << "\",\"reference_block_reason\":";
+        if (reference.reason.empty()) out << "null";
+        else out << '"' << reference_ipc::escaped(reference.reason) << '"';
+        out << ",\"reference_source_statuses\":[";
+        bool first_source = true;
+        for (const auto& source : reference.sources) {
+            if (!first_source) out << ',';
+            first_source = false;
+            out << "{\"source\":\"" << reference_ipc::escaped(source.source)
+                << "\",\"symbol\":\"" << reference_ipc::escaped(source.symbol)
+                << "\",\"market_type\":\"" << reference_ipc::escaped(source.market_type)
+                << "\",\"quote_currency\":\"" << reference_ipc::escaped(source.quote_currency)
+                << "\",\"price\":"; optional(source.price);
+            out << ",\"effective_age_ms\":"; optional(source.age_ms);
+            out << ",\"status\":\"" << source.status << "\"}";
+        }
+        out << "],\"reference_price\":"; optional(reference.consensus_price);
+        out << ",\"price_to_beat\":"; optional(input.price_to_beat);
+        out << ",\"distance_to_price_to_beat\":";
+        if (reference.consensus_price && input.price_to_beat)
+            out << *reference.consensus_price - *input.price_to_beat;
+        else out << "null";
+        out << ",\"seconds_to_close\":" << input.seconds_to_close
+            << ",\"book_age_ms\":" << input.book_age_ms << ",\"reference_age_ms\":";
+        optional(input.reference_age_ms);
+        out << ",\"clock_skew_ms\":"; optional(input.clock_skew_ms);
+        out << ",\"liquidity\":" << input.liquidity
+            << ",\"minimum_liquidity\":" << input.minimum_liquidity
+            << ",\"target_depth_ok\":" << (input.target_depth_ok ? "true" : "false")
+            << ",\"maximum_slippage\":" << input.maximum_slippage
+            << ",\"maximum_reference_age_ms\":" << input.maximum_reference_age_ms
+            << ",\"maximum_book_age_ms\":" << input.maximum_book_age_ms
+            << ",\"maximum_clock_skew_ms\":" << input.maximum_clock_skew_ms
+            << ",\"momentum_bps_30s\":"; optional(input.momentum_bps_30s);
+        out << ",\"order_book_imbalance\":"; optional(input.order_book_imbalance);
+        out << ",\"paired_book_imbalance\":"; optional(model_input.paired_book_imbalance);
+        out << ",\"volatility_per_sqrt_second\":"; optional(model_input.volatility_per_sqrt_second);
+        out << ",\"model_sample_count\":" << model_input.model_sample_count
+            << ",\"model_sample_span_seconds\":" << model_input.model_sample_span_seconds
+            << ",\"minimum_model_sample_span_seconds\":" << strategy_config_.minimum_model_sample_span_seconds
+            << ",\"expected_move_log_std\":"; optional(model.expected_move_log_std);
+        out << ",\"reference_log_distance\":"; optional(model.reference_log_distance);
+        out << ",\"up_standardized_distance\":"; optional(model.up_standardized_distance);
+        out << ",\"up_momentum_z\":"; optional(model.up_momentum_z);
+        out << ",\"up_imbalance_z\":"; optional(model.up_imbalance_z);
+        out << ",\"up_final_model_z\":"; optional(model.up_final_model_z);
+        const double confidence = input.estimated_probability
+            ? std::clamp(std::min(model_input.model_sample_count / 120.0, 1.0) *
+                (1 - std::min(reference.divergence_bps.value_or(0) / 100, 1.0)), 0.0, 1.0)
+            : 0;
+        out << ",\"confidence\":";
+        if (input.estimated_probability) out << confidence; else out << "null";
+        out << ",\"input_quality_score\":";
+        if (input.estimated_probability) out << confidence; else out << "null";
+        out << ",\"confidence_type\":\"input_quality_not_historical_accuracy\""
+            << ",\"model_type\":\"configured_distributional_shadow\",\"model_source\":";
+        if (input.estimated_probability) out << "\"live_multi_source\""; else out << "null";
+        out << ",\"settlement_source\":\"" << reference_ipc::escaped(market.settlement_source)
+            << "\",\"settlement_source_verified\":" << (input.settlement_source_verified ? "true" : "false")
+            << ",\"market_active\":" << (input.market_active ? "true" : "false")
+            << ",\"market_tradable\":" << (input.market_tradable ? "true" : "false")
+            << ",\"probability_block_reason\":";
+        if (input.probability_block_reason.empty()) out << "null";
+        else out << '"' << reference_ipc::escaped(input.probability_block_reason) << '"';
+        out
+            << ",\"decision\":\"" << decision.decision << "\",\"reason\":\"" << decision.reason
+            << "\",\"blocking_reasons\":[";
+        for (std::size_t index = 0; index < decision.blocking_reasons.size(); ++index) {
+            if (index) out << ',';
+            out << '"' << reference_ipc::escaped(decision.blocking_reasons[index]) << '"';
+        }
+        out << "],\"target_size\":" << size_ << ",\"config_version\":\"shadow-buy-rules-v4\""
+            << ",\"config_hash\":\"" << strategy_config_hash_ << "\""
+            << ",\"reference_sequence\":" << reference_snapshot_.sequence
+            << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
+            << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
+        if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
     }
 
     void on_resolve(beast::error_code ec, tcp::resolver::results_type results) {
@@ -363,6 +878,7 @@ private:
                                        << ",\"fee_rate\":" << rate << ",\"fees\":" << up_fee + down_fee << ",\"net_cost\":" << net_cost << ",\"guaranteed_payout\":" << size_ << ",\"locked_profit\":" << profit
                                        << ",\"fok\":true,\"duration_ms\":" << (timestamp - item.second.active_since) * 1000 << "}\n" << std::flush;
         }
+        evaluate_reference_strategies();
         if (now_seconds() - last_health_write_ >= 1) write_health(true);
     }
 
@@ -393,6 +909,9 @@ private:
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
             << ",\"reference_protocol_errors\":" << (reference_client_ ? reference_client_->protocol_errors() : 0)
             << ",\"reference_reconnects\":" << (reference_client_ ? reference_client_->reconnects() : 0)
+            << ",\"strategy_audit_queue\":" << strategy_audit_.queued()
+            << ",\"strategy_audit_backpressure\":" << strategy_audit_backpressure_
+            << ",\"strategy_evaluations\":" << strategy_evaluation_sequence_
             << ",\"reference_receive_age_ms\":";
         if (reference_receive_age_ms >= 0) out << reference_receive_age_ms;
         else out << "null";
@@ -534,17 +1053,27 @@ private:
     unsigned long long book_events_ = 0, price_changes_ = 0;
     bool stopped_ = false;
     std::ofstream audit_;
+    BoundedAuditWriter strategy_audit_;
     std::string markets_path_, health_path_, run_id_;
+    strategy::Config strategy_config_ = strategy_config_from_environment();
+    std::string strategy_config_hash_ = strategy_config_hash();
+    std::map<std::string, std::pair<std::string, double>> strategy_emission_state_;
+    double strategy_accept_heartbeat_seconds_ = 5, strategy_reject_heartbeat_seconds_ = 60;
     double last_health_write_ = 0;
     unsigned long long document_version_, generation_, ws_session_id_, full_resync_count_ = 0;
     unsigned long long evaluation_sequence_ = 0, opportunity_sequence_ = 0;
+    unsigned long long strategy_evaluation_sequence_ = 0, strategy_audit_backpressure_ = 0;
     static std::atomic<unsigned long long> next_session_id_;
 };
 
 std::atomic<unsigned long long> MarketWsSession::next_session_id_{0};
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::cerr << "usage: market_ws_engine <markets.json> [size] [fallback_fee_rate] [audit.jsonl] [buffer_per_share] [min_profit] [leg_interval_us] [execution_half_life_us] [orphan_loss_per_share] [min_expected_value] [health.json]\n"; return 2; }
+    if (argc == 2 && std::string(argv[1]) == "--strategy-config-hash") {
+        std::cout << strategy_config_hash() << "\n";
+        return 0;
+    }
+    if (argc < 2) { std::cerr << "usage: market_ws_engine <markets.json> [size] [fallback_fee_rate] [audit.jsonl] [buffer_per_share] [min_profit] [leg_interval_us] [execution_half_life_us] [orphan_loss_per_share] [min_expected_value] [health.json] [strategy_audit.jsonl]\n"; return 2; }
     try {
         unsigned long long document_version = 0;
         std::map<std::string, Market> markets = load_markets(argv[1], &document_version);
@@ -558,6 +1087,7 @@ int main(int argc, char** argv) {
         const double orphan_loss_per_share = argc > 9 ? std::stod(argv[9]) : .02;
         const double min_expected_value = argc > 10 ? std::stod(argv[10]) : .01;
         const std::string health_path = argc > 11 ? argv[11] : "data/shadow-health.json";
+        const std::string strategy_audit_path = argc > 12 ? argv[12] : "logs/strategy-audit.jsonl";
         for (;;) {
             asio::io_context io; asio::ssl::context ssl(asio::ssl::context::tls_client);
             ssl.set_default_verify_paths(); ssl.set_verify_mode(asio::ssl::verify_peer);
@@ -566,7 +1096,7 @@ int main(int argc, char** argv) {
             std::cerr << "BOOK_BOOTSTRAP_SKIPPED reason=ws_snapshot_required tokens=" << books.size() << "\n";
             auto session = std::make_shared<MarketWsSession>(io, ssl, markets, std::move(books), size, fee, buffer_per_share,
                 min_profit, leg_interval_us, execution_half_life_us, orphan_loss_per_share, min_expected_value,
-                audit_path, argv[1], document_version, health_path);
+                audit_path, argv[1], document_version, health_path, strategy_audit_path);
             session->run(); io.run();
             std::cerr << "WS_RECONNECT delay_s=2\n";
             std::this_thread::sleep_for(std::chrono::seconds(2));

@@ -99,6 +99,11 @@ struct EvaluationInput {
     std::string reference_block_reason;
     bool settlement_source_verified = true;
     std::string probability_block_reason;
+    double minimum_liquidity = 20;
+    double maximum_slippage = .01;
+    double maximum_reference_age_ms = 3000;
+    double maximum_book_age_ms = 750;
+    double maximum_clock_skew_ms = 250;
 };
 
 struct Decision {
@@ -115,26 +120,26 @@ inline void append_reason(std::vector<std::string>& reasons, const std::string& 
         reasons.push_back(reason);
 }
 
-inline std::vector<std::string> common_rejections(const EvaluationInput& row, const Config& config) {
+inline std::vector<std::string> common_rejections(const EvaluationInput& row) {
     std::vector<std::string> reasons;
     if (!row.market_active || !row.market_tradable) append_reason(reasons, "market_not_tradable");
-    if (row.book_age_ms > config.maximum_book_age_ms) append_reason(reasons, "clob_book_stale");
+    if (row.book_age_ms > row.maximum_book_age_ms) append_reason(reasons, "clob_book_stale");
     if (!row.clock_skew_ms) append_reason(reasons, "clock_skew_unavailable");
-    else if (std::abs(*row.clock_skew_ms) > config.maximum_clock_skew_ms)
+    else if (std::abs(*row.clock_skew_ms) > row.maximum_clock_skew_ms)
         append_reason(reasons, "clock_skew_exceeded");
     if (!row.reference_quorum_met) append_reason(
         reasons, row.reference_block_reason.empty()
             ? "insufficient_reference_sources" : row.reference_block_reason);
     if (!row.settlement_source_verified) append_reason(reasons, "settlement_reference_unverified");
-    if (!row.reference_age_ms || *row.reference_age_ms > config.maximum_reference_age_ms)
+    if (!row.reference_age_ms || *row.reference_age_ms > row.maximum_reference_age_ms)
         append_reason(reasons, "reference_data_stale");
     if (!row.price_to_beat) append_reason(
         reasons, row.probability_block_reason.empty() ? "price_to_beat_missing" : row.probability_block_reason);
     else if (!row.estimated_probability) append_reason(
         reasons, row.probability_block_reason.empty() ? "probability_model_unavailable" : row.probability_block_reason);
-    if (row.liquidity < config.minimum_liquidity) append_reason(reasons, "insufficient_liquidity");
+    if (row.liquidity < row.minimum_liquidity) append_reason(reasons, "insufficient_liquidity");
     if (!row.target_depth_ok) append_reason(reasons, "target_depth_insufficient");
-    if (row.slippage_per_share > config.maximum_slippage) append_reason(reasons, "slippage_exceeded");
+    if (row.slippage_per_share > row.maximum_slippage) append_reason(reasons, "slippage_exceeded");
     if (!row.momentum_bps_30s) append_reason(reasons, "momentum_unavailable");
     if (!row.order_book_imbalance) append_reason(reasons, "order_book_imbalance_unavailable");
     return reasons;
@@ -149,7 +154,7 @@ inline std::optional<std::pair<int, int>> directional_window(const std::string& 
 }
 
 inline Decision evaluate_directional(const EvaluationInput& row, const Config& config = {}) {
-    auto reasons = common_rejections(row, config);
+    auto reasons = common_rejections(row);
     const auto window = directional_window(row.timeframe);
     if (!window || row.seconds_to_close < window->first || row.seconds_to_close > window->second)
         append_reason(reasons, "outside_time_window");
@@ -167,7 +172,7 @@ inline Decision evaluate_directional(const EvaluationInput& row, const Config& c
 }
 
 inline Decision evaluate_lottery(const EvaluationInput& row, const Config& config = {}) {
-    auto reasons = common_rejections(row, config);
+    auto reasons = common_rejections(row);
     if (row.expected_fill_price < config.lottery_min_price || row.expected_fill_price > config.lottery_max_price)
         append_reason(reasons, row.expected_fill_price > config.lottery_max_price
             ? "entry_price_above_limit" : "entry_price_below_limit");

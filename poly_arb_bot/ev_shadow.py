@@ -3,6 +3,7 @@ import hashlib
 import math
 import os
 import statistics
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -15,7 +16,7 @@ from .ev_strategies import (
     evaluate_directional,
     evaluate_lottery,
 )
-from .reference_layer import reference_source_maximum_age_ms, reference_state_for_asset
+from .reference_layer import ReferenceState, reference_source_maximum_age_ms, reference_state_for_asset
 
 
 BINANCE_SYMBOLS = {
@@ -494,7 +495,142 @@ def process_once(audit_path, market_path, venue_path, output_path, state_path,
     return emitted
 
 
+def _verify_cpp_strategy_row(row):
+    reference = ReferenceState(
+        [], row.get("fast_price"), row.get("consensus_price"),
+        row.get("settlement_reference"),
+        int(row.get("fresh_exchange_source_count", 0)),
+        int(row.get("fresh_usd_spot_source_count", 0)),
+        row.get("cross_source_divergence_bps"),
+        bool(row.get("reference_quorum_met")),
+        row.get("reference_state", "REFERENCE_BLOCKED"),
+        row.get("reference_block_reason"),
+    )
+    value = DirectionalInput(
+        strategy=row["strategy"], market_id=row.get("market_id", ""),
+        condition_id=row.get("condition_id", row.get("market_id", "")),
+        asset=row.get("asset", ""), timeframe=row.get("timeframe", ""),
+        outcome=row.get("outcome", ""), market_price=float(row.get("market_price", 0)),
+        expected_fill_price=float(row.get("expected_fill_price", 0)),
+        estimated_probability=row.get("estimated_probability"),
+        seconds_to_close=int(row.get("seconds_to_close", 0)),
+        price_to_beat=row.get("price_to_beat"), reference=reference,
+        fee_per_share=float(row.get("fees", 0)),
+        slippage_per_share=float(row.get("slippage", 0)),
+        latency_risk_buffer=float(row.get("latency_risk_buffer", 0)),
+        settlement_risk_buffer=float(row.get("settlement_risk_buffer", 0)),
+        model_uncertainty_buffer=float(row.get("model_uncertainty_buffer", 0)),
+        execution_risk_buffer=float(row.get("execution_risk_buffer", 0)),
+        liquidity=float(row.get("liquidity", 0)),
+        book_age_ms=float(row.get("book_age_ms", 1e9)),
+        reference_age_ms=row.get("reference_age_ms"), clock_skew_ms=row.get("clock_skew_ms"),
+        minimum_liquidity=float(row.get("minimum_liquidity", 20)),
+        maximum_slippage=float(row.get("maximum_slippage", .01)),
+        maximum_reference_age_ms=float(row.get("maximum_reference_age_ms", 3000)),
+        maximum_book_age_ms=float(row.get("maximum_book_age_ms", 750)),
+        maximum_clock_skew_ms=float(row.get("maximum_clock_skew_ms", 250)),
+        market_active=bool(row.get("market_active")),
+        market_tradable=bool(row.get("market_tradable")),
+        target_depth_ok=bool(row.get("target_depth_ok")),
+        momentum_bps_30s=row.get("momentum_bps_30s"),
+        order_book_imbalance=row.get("order_book_imbalance"),
+        confidence=row.get("confidence"),
+        settlement_source_verified=bool(row.get("settlement_source_verified")),
+        probability_block_reason=row.get("probability_block_reason"),
+        settlement_source=row.get("settlement_source", ""),
+    )
+    if row["strategy"] == "late_window_directional_ev":
+        decision = evaluate_directional(value, float(os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015")))
+    else:
+        decision = evaluate_lottery(
+            value, float(os.getenv("LOTTERY_MIN_PRICE", "0.01")),
+            float(os.getenv("LOTTERY_MAX_PRICE", "0.05")),
+            float(os.getenv("LOTTERY_MIN_NET_EV", "0.015")),
+        )
+    model_asset = {
+        "consensus_price": row.get("consensus_price"),
+        "volatility_per_sqrt_second": row.get("volatility_per_sqrt_second"),
+        "model_sample_count": row.get("model_sample_count", 0),
+        "model_sample_span_seconds": row.get("model_sample_span_seconds", 0),
+        "momentum_bps_30s": row.get("momentum_bps_30s"),
+    }
+    up_probability, _ = _up_probability_model(
+        model_asset, row.get("price_to_beat"), row.get("seconds_to_close", 0),
+        row.get("paired_book_imbalance"),
+    )
+    expected_probability = up_probability if row.get("outcome") == "Up" else (
+        None if up_probability is None else 1 - up_probability
+    )
+    _, expected_hash = strategy_config()
+    expected = {
+        "decision": decision.decision, "reason": decision.reason,
+        "gross_edge": decision.gross_edge, "net_ev": decision.net_ev,
+        "config_hash": expected_hash,
+    }
+    if all(row.get(key) is not None for key in (
+        "consensus_price", "volatility_per_sqrt_second", "model_sample_count",
+        "model_sample_span_seconds", "momentum_bps_30s", "paired_book_imbalance",
+    )):
+        expected["estimated_probability"] = expected_probability
+    mismatches = {}
+    for key, expected_value in expected.items():
+        actual = row.get(key)
+        if isinstance(expected_value, float):
+            if actual is None or not math.isclose(float(actual), expected_value, rel_tol=0, abs_tol=1e-12):
+                mismatches[key] = {"cpp": actual, "python": expected_value}
+        elif actual != expected_value:
+            mismatches[key] = {"cpp": actual, "python": expected_value}
+    return mismatches
+
+
+def process_verification_once(source_path, output_path, state_path):
+    source_path, output_path, state_path = map(Path, (source_path, output_path, state_path))
+    state = _load(state_path, {"offset": 0})
+    if not source_path.exists():
+        return 0
+    if source_path.stat().st_size < int(state.get("offset", 0)):
+        state["offset"] = 0
+    mismatches = []
+    with source_path.open(encoding="utf-8") as source:
+        source.seek(int(state.get("offset", 0)))
+        while line := source.readline():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("event_type") != "shadow_eval" or row.get("strategy") not in {
+                "late_window_directional_ev", "low_price_lottery_ev",
+            }:
+                continue
+            differences = _verify_cpp_strategy_row(row)
+            if differences:
+                mismatches.append({
+                    "ts": time.time(), "event_type": "strategy_parity_mismatch",
+                    "source_event_id": row.get("event_id"),
+                    "strategy": row.get("strategy"), "market_id": row.get("market_id"),
+                    "outcome": row.get("outcome"), "mismatches": differences,
+                })
+        state["offset"] = source.tell()
+    if mismatches:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("a", encoding="utf-8") as output:
+            for row in mismatches:
+                output.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+    temporary = state_path.with_suffix(state_path.suffix + ".tmp")
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text(json.dumps(state), encoding="utf-8")
+    os.replace(temporary, state_path)
+    return len(mismatches)
+
+
 def main():
+    if os.getenv("EV_SHADOW_MODE") == "verify":
+        source = sys.argv[1] if len(sys.argv) > 1 else "logs/strategy-audit.jsonl"
+        output = sys.argv[2] if len(sys.argv) > 2 else "logs/strategy-parity.jsonl"
+        state = sys.argv[3] if len(sys.argv) > 3 else "state/ev-shadow-verify.json"
+        while True:
+            process_verification_once(source, output, state)
+            time.sleep(.5)
     historical_models = load_historical_models()
     while True:
         process_once("logs/shadow-audit.jsonl", "data/live_markets.json", "data/venue-status.json",

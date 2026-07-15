@@ -259,7 +259,7 @@ void publish_ipc_locked(SharedState& shared, bool force = false) {
             return found != quote_medians.end() && found->second > 0 &&
                    std::abs(source.price - found->second) / found->second * 10000 > 100;
         };
-        double fast_price = 0, settlement_reference = 0;
+        double fast_price = 0, settlement_reference = 0, clock_skew_upper_bound_ms = 0;
         for (const auto& item : asset.sources) {
             const auto& source = item.second;
             auto& state = output.sources[item.first];
@@ -297,6 +297,11 @@ void publish_ipc_locked(SharedState& shared, bool force = false) {
                 continue;
             }
             if (source.market_type != "spot" || is_outlier(source)) continue;
+            if (state.source_timestamp_ms && source.received_at > 0) {
+                const double delta = std::abs(source.received_at - *state.source_timestamp_ms);
+                if (!clock_skew_upper_bound_ms || delta < clock_skew_upper_bound_ms)
+                    clock_skew_upper_bound_ms = delta;
+            }
             fresh_spot.push_back(source.price);
             ++output.fresh_exchange_source_count;
             if (source.quote_currency == "USD") {
@@ -327,6 +332,7 @@ void publish_ipc_locked(SharedState& shared, bool force = false) {
         const double volatility = median(volatilities);
         if (volatility > 0) output.volatility_per_sqrt_second = volatility;
         if (!momentums.empty()) output.momentum_bps_30s = median(momentums);
+        if (clock_skew_upper_bound_ms > 0) output.clock_skew_ms = clock_skew_upper_bound_ms;
         output.model_sample_count = static_cast<int>(median(model_sample_counts));
         output.model_sample_span_seconds = median(model_sample_spans);
         output.reference_quorum_met = output.fresh_exchange_source_count >= 2 &&

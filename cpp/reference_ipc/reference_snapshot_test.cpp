@@ -29,6 +29,7 @@ Snapshot sample() {
     asset.cross_source_divergence_bps = 1.2;
     asset.volatility_per_sqrt_second = .0001;
     asset.momentum_bps_30s = 2.5;
+    asset.clock_skew_ms = 12.5;
     asset.model_sample_count = 120;
     asset.model_sample_span_seconds = 119;
     asset.reference_quorum_met = true;
@@ -54,6 +55,7 @@ void test_round_trip() {
     assert(output.sequence == 7);
     assert(output.producer_session == "session-a");
     assert(output.assets.at("BTC").consensus_price == 64000);
+    assert(output.assets.at("BTC").clock_skew_ms == 12.5);
     assert(output.assets.at("BTC").sources.at("coinbase").status == "FRESH");
     assert(output.assets.at("BTC").sources.at("coinbase").anchor_samples.size() == 1);
 }
