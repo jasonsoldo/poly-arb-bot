@@ -3,6 +3,12 @@ set -euo pipefail
 
 mkdir -p build
 
+g++ -std=c++17 -O3 -Wall -Wextra -DBOOST_BIND_GLOBAL_PLACEHOLDERS \
+  cpp/reference_ipc/reference_snapshot_test.cpp \
+  -o build/reference_snapshot_test
+./build/reference_snapshot_test
+echo "built and tested build/reference_snapshot_test"
+
 g++ -std=c++17 -O3 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
   cpp/pnl_curve_engine/pnl_curve_engine.cpp \
   -o build/pnl_curve_engine
