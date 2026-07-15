@@ -108,7 +108,7 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
     assert all(row["event_id"].startswith("paired-1:") for row in rows)
     assert all(row["real_order_submissions"] == 0 for row in rows)
     assert all(row["target_size"] == 10 for row in rows)
-    assert all(row["config_version"] == "shadow-buy-rules-v4" for row in rows)
+    assert all(row["config_version"] == "shadow-buy-rules-v5" for row in rows)
     assert all(len(row["config_hash"]) == 64 for row in rows)
     assert all(row["volatility_per_sqrt_second"] == .001 for row in rows)
     assert all(row["expected_move_log_std"] > 0 for row in rows)
@@ -170,6 +170,29 @@ def test_probability_model_fails_closed_without_volatility_samples():
     rows = evaluate_market_event(event(), market(), venue(volatility=None), now=1000.0)
     assert all(row["decision"] == "REJECT" for row in rows)
     assert all(row["reason"] == "volatility_unavailable" for row in rows)
+
+
+def test_probability_model_uses_market_settlement_reference_not_spot_consensus():
+    state = venue(volatility=.001)
+    asset = state["assets"]["BTC"]
+    asset["consensus_price"] = 99.0
+    asset["settlement_reference"] = 101.0
+    asset["sources"]["coinbase"]["price"] = 99.0
+    asset["sources"]["kraken"]["price"] = 99.0
+    asset["sources"]["chainlink"]["price"] = 101.0
+    current = event()
+    current["up_book_imbalance"] = 0.0
+    current["down_book_imbalance"] = 0.0
+    asset["momentum_bps_30s"] = 0.0
+
+    rows = evaluate_market_event(current, market(), state, now=1000.0)
+    up = next(row for row in rows if row["strategy"] == "late_window_directional_ev" and row["outcome"] == "Up")
+
+    assert up["estimated_probability"] > .5
+    assert up["reference_price"] == 101.0
+    assert up["probability_reference_source"] == "settlement_reference"
+    assert up["probability_reference_price"] == 101.0
+    assert up["distance_to_price_to_beat"] == 1.0
 
 
 def test_probability_model_fails_closed_without_minimum_time_coverage(monkeypatch):

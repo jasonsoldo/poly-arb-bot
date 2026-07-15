@@ -156,6 +156,7 @@ std::string strategy_config_hash() {
         {"minimum_liquidity", environment_value("STRATEGY_MIN_LIQUIDITY", "20")},
         {"minimum_model_sample_span_seconds", environment_value("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60")},
         {"momentum_z_per_bps", environment_value("MODEL_MOMENTUM_Z_PER_BPS", "0.002")},
+        {"probability_reference", "settlement_reference"},
     };
     std::ostringstream encoded;
     encoded << '{';
@@ -557,7 +558,7 @@ private:
             const auto opening_price = price_to_beat(market, asset);
             const double paired_imbalance = (book_imbalance(up_book) - book_imbalance(down_book)) / 2;
             strategy::ProbabilityInput probability_input;
-            probability_input.consensus_price = reference.consensus_price;
+            probability_input.settlement_reference = reference.settlement_reference;
             probability_input.price_to_beat = opening_price;
             probability_input.seconds_to_close = seconds_to_close;
             if (asset) {
@@ -574,7 +575,7 @@ private:
                     ? "price_to_beat_start_time_unavailable"
                     : timestamp * 1000 > market.start_ts * 1000 + 10000
                         ? "price_to_beat_capture_missed" : "price_to_beat_pending";
-                else if (!reference.consensus_price) probability_block_reason = "consensus_price_unavailable";
+                else if (!reference.settlement_reference) probability_block_reason = "settlement_reference_unavailable";
                 else if (!asset || !asset->volatility_per_sqrt_second) probability_block_reason = "volatility_unavailable";
                 else if (asset->model_sample_count < 20) probability_block_reason = "insufficient_model_samples";
                 else if (asset->model_sample_span_seconds < strategy_config_.minimum_model_sample_span_seconds)
@@ -709,11 +710,14 @@ private:
             out << ",\"effective_age_ms\":"; optional(source.age_ms);
             out << ",\"status\":\"" << source.status << "\"}";
         }
-        out << "],\"reference_price\":"; optional(reference.consensus_price);
+        out << "],\"reference_price\":"; optional(reference.settlement_reference);
+        out << ",\"probability_reference_source\":\"settlement_reference\""
+            << ",\"probability_reference_price\":";
+        optional(reference.settlement_reference);
         out << ",\"price_to_beat\":"; optional(input.price_to_beat);
         out << ",\"distance_to_price_to_beat\":";
-        if (reference.consensus_price && input.price_to_beat)
-            out << *reference.consensus_price - *input.price_to_beat;
+        if (reference.settlement_reference && input.price_to_beat)
+            out << *reference.settlement_reference - *input.price_to_beat;
         else out << "null";
         out << ",\"seconds_to_close\":" << input.seconds_to_close
             << ",\"book_age_ms\":" << input.book_age_ms << ",\"reference_age_ms\":";
@@ -764,7 +768,7 @@ private:
             if (index) out << ',';
             out << '"' << reference_ipc::escaped(decision.blocking_reasons[index]) << '"';
         }
-        out << "],\"target_size\":" << size_ << ",\"config_version\":\"shadow-buy-rules-v4\""
+        out << "],\"target_size\":" << size_ << ",\"config_version\":\"shadow-buy-rules-v5\""
             << ",\"config_hash\":\"" << strategy_config_hash_ << "\""
             << ",\"reference_sequence\":" << reference_snapshot_.sequence
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""

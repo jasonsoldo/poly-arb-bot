@@ -32,7 +32,7 @@ int main() {
         boost::property_tree::read_json(input, row);
         if (row.get<std::string>("mode") == "probability") {
             strategy::ProbabilityInput value;
-            value.consensus_price = optional_number(row, "consensus_price");
+            value.settlement_reference = optional_number(row, "settlement_reference");
             value.price_to_beat = optional_number(row, "price_to_beat");
             value.seconds_to_close = row.get<double>("seconds_to_close");
             value.volatility_per_sqrt_second = optional_number(row, "volatility_per_sqrt_second");

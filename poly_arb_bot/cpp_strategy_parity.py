@@ -10,7 +10,7 @@ from .reference_layer import ReferenceState
 def python_result(case):
     if case["mode"] == "probability":
         asset = {
-            "consensus_price": case["consensus_price"],
+            "settlement_reference": case["settlement_reference"],
             "volatility_per_sqrt_second": case["volatility_per_sqrt_second"],
             "model_sample_count": case["model_sample_count"],
             "model_sample_span_seconds": case["model_sample_span_seconds"],

@@ -195,7 +195,7 @@ def _reference_source_statuses(row):
 
 
 def decision_audit(row, result, event_id, generation, session, evaluation_sequence, timestamp):
-    reference_price = row.reference.consensus_price
+    reference_price = row.reference.settlement_reference
     statuses, valid_sources, rejected_sources = _reference_source_statuses(row)
     return {
         "ts": timestamp, "event_id": event_id, "event_type": "shadow_eval", "strategy": result.strategy,
@@ -221,7 +221,10 @@ def decision_audit(row, result, event_id, generation, session, evaluation_sequen
         "reference_source_statuses": statuses,
         "valid_reference_sources": valid_sources,
         "rejected_reference_sources": rejected_sources,
-        "reference_price": reference_price, "price_to_beat": row.price_to_beat,
+        "reference_price": reference_price,
+        "probability_reference_source": "settlement_reference",
+        "probability_reference_price": reference_price,
+        "price_to_beat": row.price_to_beat,
         "distance_to_price_to_beat": reference_price - row.price_to_beat if reference_price is not None and row.price_to_beat is not None else None,
         "seconds_to_close": row.seconds_to_close, "book_age_ms": row.book_age_ms,
         "reference_age_ms": row.reference_age_ms, "clock_skew_ms": row.clock_skew_ms,

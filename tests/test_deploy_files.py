@@ -71,3 +71,5 @@ def test_strategy_parity_smoke_closes_stdin_in_build_scripts():
     assert "$strategySmoke | & .\\build\\ev_strategy_test.exe" in BUILD_PS1
     for script in (BUILD_SH, BUILD_PS1):
         assert '"estimated_probability"' in script
+        assert '"settlement_reference":101' in script
+        assert '"estimated_probability":[0-9]' in script

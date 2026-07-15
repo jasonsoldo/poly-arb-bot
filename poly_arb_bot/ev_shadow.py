@@ -25,7 +25,7 @@ BINANCE_SYMBOLS = {
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
-STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v4"
+STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v5"
 
 
 def strategy_config():
@@ -47,6 +47,7 @@ def strategy_config():
         "momentum_z_per_bps": os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"),
         "imbalance_z": os.getenv("MODEL_IMBALANCE_Z", "0.25"),
         "minimum_model_sample_span_seconds": os.getenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"),
+        "probability_reference": "settlement_reference",
     }
     encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
     return values, hashlib.sha256(encoded).hexdigest()
@@ -204,7 +205,7 @@ def _reference_state(asset, settlement_source, maximum_age_ms, file_age_ms=0):
 
 
 def _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance=None):
-    reference = asset.get("consensus_price")
+    reference = asset.get("settlement_reference")
     volatility = asset.get("volatility_per_sqrt_second")
     samples = int(asset.get("model_sample_count", 0))
     sample_span = float(asset.get("model_sample_span_seconds") or 0)
@@ -306,8 +307,8 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                     if now * 1000 > start_ts * 1000 + PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS
                     else "price_to_beat_pending"
                 )
-        elif reference.consensus_price is None:
-            probability_block_reason = "consensus_price_unavailable"
+        elif reference.settlement_reference is None:
+            probability_block_reason = "settlement_reference_unavailable"
         elif not model_asset.get("volatility_per_sqrt_second"):
             probability_block_reason = "volatility_unavailable"
         elif int(model_asset.get("model_sample_count", 0)) < 20:
@@ -568,7 +569,7 @@ def _verify_cpp_strategy_row(row):
             float(os.getenv("LOTTERY_MIN_NET_EV", "0.015")),
         )
     model_asset = {
-        "consensus_price": row.get("consensus_price"),
+        "settlement_reference": row.get("settlement_reference"),
         "volatility_per_sqrt_second": row.get("volatility_per_sqrt_second"),
         "model_sample_count": row.get("model_sample_count", 0),
         "model_sample_span_seconds": row.get("model_sample_span_seconds", 0),
@@ -588,7 +589,7 @@ def _verify_cpp_strategy_row(row):
         "config_hash": expected_hash,
     }
     if all(row.get(key) is not None for key in (
-        "consensus_price", "volatility_per_sqrt_second", "model_sample_count",
+        "settlement_reference", "volatility_per_sqrt_second", "model_sample_count",
         "model_sample_span_seconds", "momentum_bps_30s", "paired_book_imbalance",
     )):
         expected["estimated_probability"] = expected_probability

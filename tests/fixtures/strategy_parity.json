@@ -2,7 +2,7 @@
   {
     "name": "probability_up",
     "mode": "probability",
-    "consensus_price": 101.0,
+    "settlement_reference": 101.0,
     "price_to_beat": 100.0,
     "seconds_to_close": 45,
     "volatility_per_sqrt_second": 0.001,

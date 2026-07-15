@@ -131,7 +131,9 @@ def build_calibration(path, config_hash=None, resolved_outcomes=None):
     evidence_fields = (
         "event_id", "entry_event_id", "strategy", "strategy_config_hash", "market_id", "condition_id", "asset", "timeframe",
         "outcome", "close_ts", "estimated_probability", "expected_fill_price", "net_ev",
-        "price_to_beat", "consensus_price", "seconds_to_close", "settlement_price",
+        "price_to_beat", "consensus_price", "settlement_reference",
+        "probability_reference_source", "probability_reference_price",
+        "seconds_to_close", "settlement_price",
         "winning_outcome", "realized_simulated_pnl", "model_source", "model_sample_count",
         "model_sample_span_seconds", "minimum_model_sample_span_seconds",
         "volatility_per_sqrt_second", "expected_move_log_std", "reference_log_distance",

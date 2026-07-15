@@ -33,7 +33,7 @@ def test_cpp_strategy_audit_is_shadow_only_and_suppressed():
     assert '\\\"real_orders\\\":0' in ENGINE
     assert '\\\"real_fills\\\":0' in ENGINE
     assert "config_hash" in ENGINE
-    assert "shadow-buy-rules-v4" in ENGINE
+    assert "shadow-buy-rules-v5" in ENGINE
     assert "--strategy-config-hash" in ENGINE
 
 

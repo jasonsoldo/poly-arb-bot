@@ -29,7 +29,7 @@ struct Config {
 };
 
 struct ProbabilityInput {
-    std::optional<double> consensus_price;
+    std::optional<double> settlement_reference;
     std::optional<double> price_to_beat;
     double seconds_to_close = 0;
     std::optional<double> volatility_per_sqrt_second;
@@ -51,7 +51,7 @@ struct ProbabilityOutput {
 
 inline ProbabilityOutput probability_model(const ProbabilityInput& row, const Config& config = {}) {
     ProbabilityOutput output;
-    if (!row.consensus_price || *row.consensus_price == 0 ||
+    if (!row.settlement_reference || *row.settlement_reference == 0 ||
         !row.price_to_beat || *row.price_to_beat == 0 ||
         !row.volatility_per_sqrt_second || *row.volatility_per_sqrt_second == 0 ||
         row.model_sample_count < 20 ||
@@ -61,7 +61,7 @@ inline ProbabilityOutput probability_model(const ProbabilityInput& row, const Co
     }
     const double scale = *row.volatility_per_sqrt_second * std::sqrt(row.seconds_to_close);
     if (scale <= 0) return output;
-    const double log_distance = std::log(*row.consensus_price / *row.price_to_beat);
+    const double log_distance = std::log(*row.settlement_reference / *row.price_to_beat);
     const double standardized = log_distance / scale;
     const double momentum_z = *row.momentum_bps_30s * config.momentum_z_per_bps;
     const double imbalance_z = *row.paired_book_imbalance * config.imbalance_z;
