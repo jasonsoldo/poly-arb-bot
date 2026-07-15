@@ -128,6 +128,15 @@ strategy::Config strategy_config_from_environment() {
     return config;
 }
 
+std::string sha256_hex(const std::string& payload) {
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(payload.data()), payload.size(), digest);
+    std::ostringstream output;
+    output << std::hex << std::setfill('0');
+    for (unsigned char byte : digest) output << std::setw(2) << static_cast<int>(byte);
+    return output.str();
+}
+
 std::string strategy_config_hash() {
     const std::map<std::string, std::string> values = {
         {"coinbase_reference_max_age_ms", environment_value("COINBASE_REFERENCE_MAX_AGE_MS", "10000")},
@@ -157,13 +166,27 @@ std::string strategy_config_hash() {
         encoded << '"' << item.first << "\":\"" << reference_ipc::escaped(item.second) << '"';
     }
     encoded << '}';
-    const std::string payload = encoded.str();
-    unsigned char digest[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(payload.data()), payload.size(), digest);
-    std::ostringstream output;
-    output << std::hex << std::setfill('0');
-    for (unsigned char byte : digest) output << std::setw(2) << static_cast<int>(byte);
-    return output.str();
+    return sha256_hex(encoded.str());
+}
+
+std::string paired_config_hash(double size, double fallback_fee, double buffer_per_share,
+                               double min_profit, double leg_interval_us,
+                               double execution_half_life_us, double orphan_loss_per_share,
+                               double min_expected_value) {
+    std::ostringstream encoded;
+    encoded << std::setprecision(17)
+            << "{\"buffer_per_share\":" << buffer_per_share
+            << ",\"execution_half_life_us\":" << execution_half_life_us
+            << ",\"fallback_fee_rate\":" << fallback_fee
+            << ",\"leg_interval_us\":" << leg_interval_us
+            << ",\"maximum_book_age_ms\":750"
+            << ",\"maximum_seconds_to_close\":7200"
+            << ",\"minimum_expected_execution_value\":" << min_expected_value
+            << ",\"minimum_locked_profit\":" << min_profit
+            << ",\"minimum_seconds_to_close\":20"
+            << ",\"orphan_loss_per_share\":" << orphan_loss_per_share
+            << ",\"target_size\":" << size << '}';
+    return sha256_hex(encoded.str());
 }
 
 double median(std::vector<double> values) {
@@ -417,6 +440,9 @@ public:
           run_id_(std::to_string(static_cast<unsigned long long>(now_seconds() * 1000000))),
           document_version_(document_version), generation_(1), ws_session_id_(++next_session_id_) {
         audit_ << std::setprecision(15);
+        paired_config_hash_ = paired_config_hash(
+            size_, fallback_fee_, buffer_per_share_, min_profit_, leg_interval_us_,
+            execution_half_life_us_, orphan_loss_per_share_, min_expected_value_);
         strategy_accept_heartbeat_seconds_ = environment_double("STRATEGY_ACCEPT_AUDIT_HEARTBEAT_SECONDS", "5");
         strategy_reject_heartbeat_seconds_ = environment_double("STRATEGY_REJECT_AUDIT_HEARTBEAT_SECONDS", "60");
         for (auto& item : books_) item.second.generation = generation_;
@@ -938,12 +964,42 @@ private:
             if (good) std::cout << "SHADOW_OPPORTUNITY\tmarket=" << item.first << "\tup_vwap=" << std::setprecision(12) << up.second
                                 << "\tdown_vwap=" << down.second << "\tfees=" << up_fee + down_fee << "\tnet_cost=" << net_cost
                                 << "\tprofit=" << profit << "\tfok=1\tduration_ms=" << (timestamp - item.second.active_since) * 1000 << "\n" << std::flush;
-            if (good && audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':' << ws_session_id_ << ':' << item.first << ":opportunity:" << ++opportunity_sequence_ << "\",\"run_id\":\"" << run_id_ << "\",\"event_type\":\"shadow_opportunity\",\"market_id\":\"" << item.first
-                                       << "\",\"strategy\":\"paired_lock\",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
-                                       << ",\"target_size\":" << size_ << ",\"gross_cost\":" << gross_cost
-                                       << ",\"up_fee\":" << up_fee << ",\"down_fee\":" << down_fee
-                                       << ",\"fee_rate\":" << rate << ",\"fees\":" << up_fee + down_fee << ",\"net_cost\":" << net_cost << ",\"guaranteed_payout\":" << size_ << ",\"locked_profit\":" << profit
-                                       << ",\"fok\":true,\"duration_ms\":" << (timestamp - item.second.active_since) * 1000 << "}\n" << std::flush;
+            if (good && audit_) {
+                const unsigned long long opportunity_sequence = ++opportunity_sequence_;
+                audit_ << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
+                       << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':' << ws_session_id_ << ':' << item.first << ":opportunity:" << opportunity_sequence
+                       << "\",\"run_id\":\"" << run_id_ << "\",\"evaluation_sequence\":" << opportunity_sequence
+                       << ",\"event_type\":\"shadow_opportunity\",\"strategy\":\"paired_lock\",\"market_id\":\"" << item.first
+                       << "\",\"condition_id\":\"" << reference_ipc::escaped(item.second.condition_id)
+                       << "\",\"asset\":\"" << reference_ipc::escaped(item.second.asset)
+                       << "\",\"timeframe\":\"" << reference_ipc::escaped(item.second.interval)
+                       << "\",\"window\":\"" << reference_ipc::escaped(item.second.window)
+                       << "\",\"generation\":" << generation_ << ",\"session\":" << ws_session_id_
+                       << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
+                       << ",\"decision\":\"ACCEPT\",\"reason\":\"opportunity\",\"target_size\":" << size_
+                       << ",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
+                       << ",\"up_cost\":" << size_ * up.second << ",\"down_cost\":" << size_ * down.second
+                       << ",\"gross_cost\":" << gross_cost << ",\"up_fee\":" << up_fee << ",\"down_fee\":" << down_fee
+                       << ",\"total_fees\":" << up_fee + down_fee << ",\"fee_rate\":" << rate
+                       << ",\"execution_buffer\":" << buffer << ",\"buffer\":" << buffer
+                       << ",\"net_cost\":" << net_cost << ",\"guaranteed_payout\":" << size_
+                       << ",\"locked_profit\":" << profit << ",\"locked_roi\":" << (net_cost > 0 ? profit / net_cost : 0)
+                       << ",\"up_depth_ok\":" << (up.first >= size_ ? "true" : "false")
+                       << ",\"down_depth_ok\":" << (down.first >= size_ ? "true" : "false")
+                       << ",\"fok\":true,\"books_ready\":true,\"books_fresh\":true,\"books_synced\":true"
+                       << ",\"up_age_ms\":" << up_age_ms << ",\"down_age_ms\":" << down_age_ms
+                       << ",\"book_skew_ms\":" << std::abs(up_book.source_timestamp_ms - down_book.source_timestamp_ms)
+                       << ",\"leg_1_fill_probability\":" << leg_1_fill_probability
+                       << ",\"leg_2_fill_probability\":" << leg_2_fill_probability
+                       << ",\"time_between_legs_us\":" << leg_interval_us_
+                       << ",\"orphan_leg_loss\":" << orphan_leg_loss
+                       << ",\"expected_execution_value\":" << expected_execution_value
+                       << ",\"execution_model\":\"configured_latency_stress\""
+                       << ",\"seconds_to_close\":" << seconds_to_close
+                       << ",\"duration_ms\":" << (timestamp - item.second.active_since) * 1000
+                       << ",\"config_version\":\"paired-lock-shadow-v2\",\"config_hash\":\"" << paired_config_hash_
+                       << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n" << std::flush;
+            }
         }
         evaluate_reference_strategies();
         if (now_seconds() - last_health_write_ >= 1) write_health(true);
@@ -1141,7 +1197,7 @@ private:
     BoundedAuditWriter strategy_audit_;
     std::string markets_path_, health_path_, run_id_;
     strategy::Config strategy_config_ = strategy_config_from_environment();
-    std::string strategy_config_hash_ = strategy_config_hash();
+    std::string strategy_config_hash_ = strategy_config_hash(), paired_config_hash_;
     std::map<std::string, std::pair<std::string, double>> strategy_emission_state_;
     double strategy_accept_heartbeat_seconds_ = 5, strategy_reject_heartbeat_seconds_ = 60;
     double last_health_write_ = 0;

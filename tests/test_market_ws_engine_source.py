@@ -46,6 +46,18 @@ def test_ws_engine_writes_structured_shadow_audit():
     assert 'logs/shadow-audit.jsonl' in SOURCE
 
 
+def test_paired_opportunity_carries_canonical_identity_cost_and_risk_fields():
+    for field in (
+        "condition_id", "asset", "timeframe", "window", "generation", "session",
+        "evaluation_sequence", "up_cost", "down_cost", "total_fees",
+        "execution_buffer", "up_depth_ok", "down_depth_ok", "book_skew_ms",
+        "config_version", "config_hash", "real_order_submissions", "real_fills",
+    ):
+        assert f'\\"{field}\\":' in SOURCE
+    assert "paired-lock-shadow-v2" in SOURCE
+    assert "paired_config_hash" in SOURCE
+
+
 def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
     assert "ws_snapshot" in SOURCE
     assert "clob_book_stale" in SOURCE

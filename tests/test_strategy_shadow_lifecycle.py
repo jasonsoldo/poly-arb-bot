@@ -27,7 +27,10 @@ def paired(event_id="pair1"):
     return {
         "event_id": event_id, "event_type": "shadow_opportunity", "strategy": "paired_lock",
         "market_id": "m1", "decision": "ACCEPT", "target_size": 10,
+        "condition_id": "c1", "asset": "BTC", "timeframe": "5m", "window": "current",
+        "generation": 3, "session": 7, "evaluation_sequence": 11,
         "net_cost": 9.7, "locked_profit": 0.3, "ts": 1000,
+        "config_version": "paired-lock-shadow-v2", "config_hash": "paired-hash",
     }
 
 
@@ -93,6 +96,14 @@ def test_paired_lock_completes_only_after_official_close_sample(tmp_path):
     assert row["strategy"] == "paired_lock"
     assert row["payout"] == 10
     assert row["realized_simulated_pnl"] == 0.3
+    assert row["condition_id"] == "c1"
+    assert row["generation"] == 3
+    assert row["session"] == 7
+    assert row["evaluation_sequence"] == 11
+    assert row["strategy_config_version"] == "paired-lock-shadow-v2"
+    assert row["strategy_config_hash"] == "paired-hash"
+    assert row["timestamp"] == 1200
+    assert row["real_fills"] == 0
 
 
 def test_paired_lock_does_not_require_directional_opening_anchor(tmp_path):
@@ -355,6 +366,8 @@ def test_unsettled_position_is_orphaned_and_releases_portfolio_capacity(tmp_path
     assert orphan["orphan_reason"] == "settlement_sample_unavailable"
     assert orphan["real_orders"] == 0
     assert orphan["real_order_submissions"] == 0
+    assert orphan["real_fills"] == 0
+    assert orphan["timestamp"] == 2001
 
     log_row = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
     assert log_row["event_type"] == "shadow_orphaned"

@@ -311,7 +311,7 @@ class StrategyShadowLifecycle:
             "strategy_config_version": row.get("config_version"),
             "strategy_config_hash": row.get("config_hash"),
             "config_version": self.config_version, "config_hash": self.config_hash,
-            "real_order_submissions": 0, "real_orders": 0,
+            "real_order_submissions": 0, "real_orders": 0, "real_fills": 0,
         }
         self._mark_dirty()
         self._save()
@@ -369,6 +369,7 @@ class StrategyShadowLifecycle:
                     "event_id": orphan_id,
                     "entry_event_id": position["event_id"],
                     "event_type": "shadow_orphaned",
+                    "timestamp": now,
                     "lifecycle_state": "ORPHANED",
                     "orphaned_at": now,
                     "orphan_reason": (
@@ -378,6 +379,7 @@ class StrategyShadowLifecycle:
                     ),
                     "real_order_submissions": 0,
                     "real_orders": 0,
+                    "real_fills": 0,
                 }
                 self.logger.write("shadow_orphaned", orphan)
                 self.data["orphaned_positions"] = (
@@ -407,6 +409,7 @@ class StrategyShadowLifecycle:
                 **position,
                 "event_id": complete_id,
                 "entry_event_id": position["event_id"],
+                "timestamp": now,
                 "lifecycle_state": "COMPLETE",
                 "settlement_price": float(sample["price"]),
                 "settlement_timestamp_ms": float(sample["source_timestamp_ms"]),
@@ -415,6 +418,7 @@ class StrategyShadowLifecycle:
                 "realized_simulated_pnl": pnl,
                 "real_order_submissions": 0,
                 "real_orders": 0,
+                "real_fills": 0,
             })
 
             self.data["completed"] = (
