@@ -186,7 +186,7 @@ def test_web_status_reports_reference_readiness_per_market(tmp_path):
             },
             "coinbase": {
                 "symbol": "BNB-USD", "market_type": "spot", "quote_currency": "USD",
-                "price": 581.9, "message_age_ms": 100, "status": "FRESH",
+                "price": 581.9, "message_age_ms": 8_000, "status": "FRESH",
             },
             "chainlink": {
                 "symbol": "bnb/usd", "market_type": "oracle", "quote_currency": "USD",

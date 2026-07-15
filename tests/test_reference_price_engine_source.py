@@ -139,4 +139,16 @@ def test_reference_engine_uses_source_specific_freshness_limits():
     assert "source_status(item.first, source, timestamp)" in SOURCE
     assert 'source_status("binance", binance, timestamp)' in SOURCE
     assert 'source_status("chainlink", chainlink, timestamp)' in SOURCE
+    assert 'std::getenv(name)' in SOURCE
+    assert '"REFERENCE_MAX_AGE_MS"' in SOURCE
+    assert '"COINBASE_REFERENCE_MAX_AGE_MS"' in SOURCE
+
+
+def test_coinbase_uses_official_level2_batch_for_fresh_bid_ask():
+    assert '"channels":["ticker","level2_batch"]' in SOURCE
+    assert 'apply_coinbase_book_message' in SOURCE
+    assert 'type != "snapshot" && type != "l2update"' in SOURCE
+    assert 'row.get_child_optional("changes")' in SOURCE
+    assert 'book.bids.rbegin()->first' in SOURCE
+    assert 'book.asks.begin()->first' in SOURCE
 

@@ -15,7 +15,7 @@ from .ev_strategies import (
     evaluate_directional,
     evaluate_lottery,
 )
-from .reference_layer import reference_state_for_asset
+from .reference_layer import reference_source_maximum_age_ms, reference_state_for_asset
 
 
 BINANCE_SYMBOLS = {
@@ -24,7 +24,7 @@ BINANCE_SYMBOLS = {
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
-STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v3"
+STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v4"
 
 
 def strategy_config():
@@ -40,6 +40,7 @@ def strategy_config():
         "minimum_liquidity": os.getenv("STRATEGY_MIN_LIQUIDITY", "20"),
         "maximum_slippage": os.getenv("STRATEGY_MAX_SLIPPAGE", "0.01"),
         "maximum_reference_age_ms": os.getenv("REFERENCE_MAX_AGE_MS", "3000"),
+        "coinbase_reference_max_age_ms": os.getenv("COINBASE_REFERENCE_MAX_AGE_MS", "10000"),
         "maximum_book_age_ms": os.getenv("CLOB_MAX_BOOK_AGE_MS", "750"),
         "maximum_clock_skew_ms": os.getenv("MAX_CLOCK_SKEW_MS", "250"),
         "momentum_z_per_bps": os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"),
@@ -328,10 +329,18 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         fill = float(event.get(fill_key, 1))
         best_ask = event.get(ask_key)
         slippage = max(0.0, fill - float(best_ask)) if best_ask is not None else float("inf")
-        source_ages = [row.message_age_ms for row in reference.sources
-                       if row.status == "FRESH" and row.message_age_ms is not None and
-                       (row.market_type == "spot" or row.source == settlement_source)]
+        fresh_reference_sources = [
+            row for row in reference.sources
+            if row.status == "FRESH" and row.message_age_ms is not None and
+            (row.market_type == "spot" or row.source == settlement_source)
+        ]
+        source_ages = [row.message_age_ms for row in fresh_reference_sources]
         reference_age_ms = max(source_ages) if source_ages else None
+        reference_age_limit_ms = max(
+            (reference_source_maximum_age_ms(row.source, maximum_reference_age_ms)
+             for row in fresh_reference_sources),
+            default=maximum_reference_age_ms,
+        )
         samples = int(model_asset.get("model_sample_count", 0))
         divergence = reference.cross_source_divergence_bps
         confidence = None if up_probability is None else max(0.0, min(1.0,
@@ -354,7 +363,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             clock_skew_ms=asset.get("clock_skew_ms"),
             minimum_liquidity=float(os.getenv("STRATEGY_MIN_LIQUIDITY", "20")),
             maximum_slippage=float(os.getenv("STRATEGY_MAX_SLIPPAGE", "0.01")),
-            maximum_reference_age_ms=maximum_reference_age_ms,
+            maximum_reference_age_ms=reference_age_limit_ms,
             maximum_book_age_ms=float(os.getenv("CLOB_MAX_BOOK_AGE_MS", "750")),
             maximum_clock_skew_ms=float(os.getenv("MAX_CLOCK_SKEW_MS", "250")),
             market_active=bool(market.get("active", True)) and float(market.get("close_ts", 0)) > now,

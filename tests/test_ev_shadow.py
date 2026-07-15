@@ -66,6 +66,40 @@ def test_reference_age_includes_venue_file_age(monkeypatch):
     assert all(row["reason"] == "insufficient_reference_sources" for row in rows)
 
 
+def test_directional_reference_uses_coinbase_source_specific_age(monkeypatch):
+    monkeypatch.setenv("REFERENCE_MAX_AGE_MS", "3000")
+    monkeypatch.setenv("COINBASE_REFERENCE_MAX_AGE_MS", "10000")
+    state = venue()
+    state["assets"]["BTC"]["sources"] = {
+        "binance": {
+            "symbol": "BTCUSDT", "market_type": "spot", "quote_currency": "USDT",
+            "price": 101.0, "message_age_ms": 100, "status": "FRESH",
+        },
+        "coinbase": {
+            "symbol": "BTC-USD", "market_type": "spot", "quote_currency": "USD",
+            "price": 101.0, "message_age_ms": 8_000, "status": "FRESH",
+        },
+        "chainlink": {
+            "symbol": "btc/usd", "market_type": "settlement", "quote_currency": "USD",
+            "price": 100.8, "message_age_ms": 100, "status": "FRESH",
+        },
+    }
+
+    rows = evaluate_market_event(event(), market(), state, now=1000.0)
+
+    assert all(row["reference_quorum_met"] is True for row in rows)
+    assert all(row["reason"] != "reference_data_stale" for row in rows)
+
+
+def test_coinbase_reference_age_limit_is_part_of_strategy_config_hash(monkeypatch):
+    monkeypatch.setenv("COINBASE_REFERENCE_MAX_AGE_MS", "10000")
+    _, first_hash = ev_shadow.strategy_config()
+    monkeypatch.setenv("COINBASE_REFERENCE_MAX_AGE_MS", "9000")
+    _, second_hash = ev_shadow.strategy_config()
+
+    assert first_hash != second_hash
+
+
 def test_paired_event_produces_independent_directional_and_lottery_audits():
     rows = evaluate_market_event(event(), market(), venue(), now=1000.0)
     assert len(rows) == 4
@@ -74,7 +108,7 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
     assert all(row["event_id"].startswith("paired-1:") for row in rows)
     assert all(row["real_order_submissions"] == 0 for row in rows)
     assert all(row["target_size"] == 10 for row in rows)
-    assert all(row["config_version"] == "shadow-buy-rules-v3" for row in rows)
+    assert all(row["config_version"] == "shadow-buy-rules-v4" for row in rows)
     assert all(len(row["config_hash"]) == 64 for row in rows)
     assert all(row["volatility_per_sqrt_second"] == .001 for row in rows)
     assert all(row["expected_move_log_std"] > 0 for row in rows)

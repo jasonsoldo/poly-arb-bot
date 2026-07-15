@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -52,6 +53,63 @@ struct SourceState {
 
 struct AssetState { std::map<std::string, SourceState> sources; };
 
+struct CoinbaseBook {
+    std::map<double, double> bids;
+    std::map<double, double> asks;
+};
+
+void set_coinbase_level(std::map<double, double>& levels, double price, double size) {
+    if (price <= 0 || size < 0) return;
+    if (size == 0) levels.erase(price); else levels[price] = size;
+}
+
+bool apply_coinbase_book_message(
+    const ptree& row,
+    std::map<std::string, CoinbaseBook>& books,
+    std::string& symbol,
+    double& bid,
+    double& ask
+) {
+    const std::string type = row.get<std::string>("type", "");
+    if (type != "snapshot" && type != "l2update") return false;
+    symbol = row.get<std::string>("product_id", "");
+    if (symbol.empty()) return false;
+    CoinbaseBook& book = books[symbol];
+    if (type == "snapshot") {
+        book.bids.clear();
+        book.asks.clear();
+        for (const auto* side : {"bids", "asks"}) {
+            const auto rows = row.get_child_optional(side);
+            if (!rows) continue;
+            auto& levels = std::string(side) == "bids" ? book.bids : book.asks;
+            for (const auto& level : *rows) {
+                auto value = level.second.begin();
+                if (value == level.second.end()) continue;
+                const double price = value->second.get_value<double>();
+                if (++value == level.second.end()) continue;
+                set_coinbase_level(levels, price, value->second.get_value<double>());
+            }
+        }
+    } else {
+        const auto changes = row.get_child_optional("changes");
+        if (!changes) return false;
+        for (const auto& change : *changes) {
+            auto value = change.second.begin();
+            if (value == change.second.end()) continue;
+            const std::string side = value->second.get_value<std::string>();
+            if (++value == change.second.end()) continue;
+            const double price = value->second.get_value<double>();
+            if (++value == change.second.end()) continue;
+            auto& levels = side == "buy" ? book.bids : book.asks;
+            set_coinbase_level(levels, price, value->second.get_value<double>());
+        }
+    }
+    if (book.bids.empty() || book.asks.empty()) return false;
+    bid = book.bids.rbegin()->first;
+    ask = book.asks.begin()->first;
+    return bid > 0 && ask > bid;
+}
+
 struct AssetConfig {
     const char* asset;
     const char* binance;
@@ -88,10 +146,27 @@ constexpr double DEFAULT_REFERENCE_FRESHNESS_MS = 3000;
 constexpr double COINBASE_REFERENCE_FRESHNESS_MS = 10000;
 constexpr double MODEL_SAMPLE_BUCKET_MS = 1000;
 
+double freshness_from_env(const char* name, double fallback) {
+    const char* raw = std::getenv(name);
+    if (!raw) return fallback;
+    try {
+        const double value = std::stod(raw);
+        return value > 0 && std::isfinite(value) ? value : fallback;
+    } catch (...) {
+        return fallback;
+    }
+}
+
 double source_freshness_limit_ms(const std::string& source_name) {
+    static const double default_limit = freshness_from_env(
+        "REFERENCE_MAX_AGE_MS", DEFAULT_REFERENCE_FRESHNESS_MS
+    );
+    static const double coinbase_limit = freshness_from_env(
+        "COINBASE_REFERENCE_MAX_AGE_MS", COINBASE_REFERENCE_FRESHNESS_MS
+    );
     return source_name == "coinbase"
-        ? COINBASE_REFERENCE_FRESHNESS_MS
-        : DEFAULT_REFERENCE_FRESHNESS_MS;
+        ? coinbase_limit
+        : default_limit;
 }
 
 std::string source_status(
@@ -429,7 +504,7 @@ int main(int argc, char** argv) {
 
     const std::string rtds_sub = R"({"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type":"*","filters":""}]})";
     const std::string binance_path = "/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker/bnbusdt@bookTicker/dogeusdt@bookTicker/btcusdt@kline_1h/ethusdt@kline_1h/solusdt@kline_1h/xrpusdt@kline_1h/bnbusdt@kline_1h/dogeusdt@kline_1h/btcusdt@kline_4h/ethusdt@kline_4h/solusdt@kline_4h/xrpusdt@kline_4h/bnbusdt@kline_4h/dogeusdt@kline_4h";
-    const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","BNB-USD","DOGE-USD","HYPE-USD"],"channels":["ticker"]})";
+    const std::string coinbase_sub = R"({"type":"subscribe","product_ids":["BTC-USD","ETH-USD","SOL-USD","XRP-USD","BNB-USD","DOGE-USD","HYPE-USD"],"channels":["ticker","level2_batch"]})";
     const std::string kraken_sub = R"({"method":"subscribe","params":{"channel":"ticker","symbol":["BTC/USD","ETH/USD","SOL/USD","XRP/USD","BNB/USD","DOGE/USD","HYPE/USD"]}})";
     const std::string bybit_sub = R"({"op":"subscribe","args":["tickers.BTCUSDT","tickers.ETHUSDT","tickers.SOLUSDT","tickers.XRPUSDT","tickers.BNBUSDT","tickers.DOGEUSDT"]})";
     const std::string okx_sub = R"({"op":"subscribe","args":[{"channel":"tickers","instId":"BTC-USDT"},{"channel":"tickers","instId":"ETH-USDT"},{"channel":"tickers","instId":"SOL-USDT"},{"channel":"tickers","instId":"XRP-USDT"},{"channel":"tickers","instId":"BNB-USDT"},{"channel":"tickers","instId":"DOGE-USDT"},{"channel":"tickers","instId":"HYPE-USDT"}]})";
@@ -485,12 +560,22 @@ int main(int argc, char** argv) {
         });
     });
     std::thread coinbase([&] {
+        std::map<std::string, CoinbaseBook> books;
         websocket_loop(shared, "coinbase", "ws-feed.exchange.coinbase.com", "443", "/", coinbase_sub, false, [&](const std::string& raw) {
             const auto row = parse_json(raw);
-            if (row.get<std::string>("type", "") != "ticker") return;
-            const std::string symbol = row.get<std::string>("product_id", "");
+            const std::string type = row.get<std::string>("type", "");
+            std::string symbol = row.get<std::string>("product_id", "");
+            double bid = 0, ask = 0, price = 0;
+            if (type == "ticker") {
+                price = row.get<double>("price", 0);
+                bid = row.get<double>("best_bid", 0);
+                ask = row.get<double>("best_ask", 0);
+            } else if (apply_coinbase_book_message(row, books, symbol, bid, ask)) {
+                price = (bid + ask) / 2;
+            }
+            if (!price) return;
             for (const auto& config : ASSETS) if (symbol == config.coinbase)
-                return publish(shared, config.asset, "coinbase", row.get<double>("price"), row.get<double>("best_bid", 0), row.get<double>("best_ask", 0), row.get<std::string>("time", ""));
+                return publish(shared, config.asset, "coinbase", price, bid, ask, row.get<std::string>("time", ""));
         });
     });
     std::thread kraken([&] {

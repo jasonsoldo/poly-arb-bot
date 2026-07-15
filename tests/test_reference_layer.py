@@ -67,3 +67,26 @@ def test_market_settlement_source_changes_reference_readiness():
     assert hourly.settlement_reference == 582.0
     assert short_window.reference_state == "REFERENCE_BLOCKED"
     assert short_window.reference_block_reason == "settlement_reference_unavailable"
+
+
+def test_coinbase_uses_its_source_specific_freshness_limit(monkeypatch):
+    monkeypatch.setenv("COINBASE_REFERENCE_MAX_AGE_MS", "10000")
+    asset = {"sources": {
+        "binance": {
+            "market_type": "spot", "quote_currency": "USDT", "price": 582.0,
+            "message_age_ms": 100, "status": "FRESH",
+        },
+        "coinbase": {
+            "market_type": "spot", "quote_currency": "USD", "price": 581.9,
+            "message_age_ms": 8_000, "status": "FRESH",
+        },
+        "chainlink": {
+            "market_type": "oracle", "quote_currency": "USD", "price": 581.8,
+            "message_age_ms": 100, "status": "FRESH",
+        },
+    }}
+
+    state = reference_layer.reference_state_for_asset(asset, "chainlink", 3_000)
+
+    assert state.reference_state == "REFERENCE_READY"
+    assert state.fresh_usd_spot_source_count == 1

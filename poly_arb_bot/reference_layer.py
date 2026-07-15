@@ -1,9 +1,11 @@
+import os
 from dataclasses import dataclass, replace
 from statistics import median
 from typing import List, Optional
 
 
 VALID_STATUSES = {"FRESH", "STALE", "DISCONNECTED", "NOT_RECEIVED", "UNSUPPORTED", "OUTLIER"}
+COINBASE_REFERENCE_MAX_AGE_MS = 10_000
 
 
 @dataclass(frozen=True)
@@ -77,13 +79,20 @@ def aggregate_reference(quotes, settlement_reference, settlement_verified,
                           divergence, ready, "REFERENCE_READY" if ready else "REFERENCE_BLOCKED", reason)
 
 
+def reference_source_maximum_age_ms(source, default_maximum_age_ms):
+    if source == "coinbase":
+        return float(os.getenv("COINBASE_REFERENCE_MAX_AGE_MS", str(COINBASE_REFERENCE_MAX_AGE_MS)))
+    return float(default_maximum_age_ms)
+
+
 def reference_state_for_asset(asset, settlement_source, maximum_age_ms, file_age_ms=0):
     sources = []
     for name, row in asset.get("sources", {}).items():
         age = row.get("message_age_ms")
         effective_age = None if age is None else max(0.0, float(age) + file_age_ms)
         status = row.get("status", "NOT_RECEIVED")
-        if status == "FRESH" and (effective_age is None or effective_age > maximum_age_ms):
+        source_maximum_age_ms = reference_source_maximum_age_ms(name, maximum_age_ms)
+        if status == "FRESH" and (effective_age is None or effective_age > source_maximum_age_ms):
             status = "STALE"
         sources.append(ReferenceQuote(
             name, "", row.get("symbol", ""), row.get("market_type", ""),
