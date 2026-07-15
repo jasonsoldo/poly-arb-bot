@@ -2,7 +2,7 @@ import json
 import time
 
 from poly_arb_bot.ev_shadow import strategy_config
-from poly_arb_bot.shadow_report import build_report
+from poly_arb_bot.shadow_report import IncrementalReport, build_report
 
 
 def test_shadow_report_aggregates_reasons_and_percentiles(tmp_path):
@@ -118,3 +118,110 @@ def test_shadow_report_deduplicates_stable_evaluation_ids(tmp_path):
     assert report["duplicate_events"] == 1
     assert report["rejected_evaluations"] == 1
     assert report["accepted_evaluations"] == 0
+
+
+def test_incremental_report_reads_only_appended_complete_lines(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    state = tmp_path / "summary.json"
+    first = {
+        "ts": time.time(), "event_id": "e1", "event_type": "shadow_eval",
+        "market_id": "m1", "decision": "REJECT", "reason": "no_edge",
+    }
+    audit.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    analytics = IncrementalReport(audit, execution, state)
+
+    assert analytics.refresh()["evaluations"] == 1
+    initial_bytes = analytics.last_bytes_read
+    initial_size = audit.stat().st_size
+    second = dict(first, event_id="e2", market_id="m2")
+    encoded = json.dumps(second) + "\n"
+    with audit.open("a", encoding="utf-8") as handle:
+        handle.write(encoded)
+    appended_bytes = audit.stat().st_size - initial_size
+
+    assert analytics.refresh()["evaluations"] == 2
+    assert analytics.last_bytes_read == appended_bytes
+    assert analytics.last_bytes_read < initial_bytes + appended_bytes
+
+
+def test_incremental_report_resumes_from_persisted_summary(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    state = tmp_path / "summary.json"
+    audit.write_text(json.dumps({
+        "ts": time.time(), "event_id": "e1", "event_type": "shadow_eval",
+        "market_id": "m1", "decision": "REJECT", "reason": "no_edge",
+    }) + "\n", encoding="utf-8")
+    assert IncrementalReport(audit, execution, state).refresh()["evaluations"] == 1
+
+    restarted = IncrementalReport(audit, execution, state)
+    assert restarted.refresh()["evaluations"] == 1
+    assert restarted.last_bytes_read == 0
+
+
+def test_incremental_report_handles_rotation_and_partial_final_line(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    state = tmp_path / "summary.json"
+    row = {
+        "ts": time.time(), "event_id": "e1", "event_type": "shadow_eval",
+        "market_id": "m1", "decision": "REJECT", "reason": "no_edge",
+    }
+    audit.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    analytics = IncrementalReport(audit, execution, state)
+    assert analytics.refresh()["evaluations"] == 1
+
+    audit.replace(tmp_path / "audit.jsonl.1")
+    complete = json.dumps(dict(row, event_id="e2"))
+    partial = complete[:-2]
+    audit.write_text(partial, encoding="utf-8")
+    assert analytics.refresh()["evaluations"] == 1
+    with audit.open("a", encoding="utf-8") as handle:
+        handle.write(complete[-2:] + "\n")
+    assert analytics.refresh()["evaluations"] == 2
+
+
+def test_incremental_report_deduplicates_replayed_event_after_rotation(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    state = tmp_path / "summary.json"
+    row = {
+        "ts": time.time(), "event_id": "stable", "event_type": "shadow_eval",
+        "market_id": "m1", "decision": "REJECT", "reason": "no_edge",
+    }
+    audit.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    analytics = IncrementalReport(audit, execution, state)
+    assert analytics.refresh()["evaluations"] == 1
+    audit.replace(tmp_path / "audit.jsonl.1")
+    audit.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    report = analytics.refresh()
+    assert report["evaluations"] == 1
+    assert report["duplicate_events"] == 1
+
+
+def test_incremental_report_matches_clean_full_build(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    state = tmp_path / "summary.json"
+    current_hash = strategy_config()[1]
+    audit_rows = [
+        {"ts": time.time(), "event_id": "e1", "event_type": "shadow_eval",
+         "market_id": "m1", "decision": "REJECT", "reason": "no_edge",
+         "fok": True, "source_age_ms": 12},
+        {"ts": time.time(), "event_id": "e2", "event_type": "shadow_opportunity",
+         "market_id": "m1", "duration_ms": 50},
+    ]
+    execution_rows = [
+        {"ts": time.time(), "event_id": "c1", "event_type": "shadow_complete",
+         "strategy": "late_window_directional_ev", "strategy_config_hash": current_hash,
+         "market_id": "m1", "asset": "BTC", "timeframe": "5m",
+         "realized_simulated_pnl": 0.25},
+    ]
+    audit.write_text("\n".join(map(json.dumps, audit_rows)) + "\n", encoding="utf-8")
+    execution.write_text("\n".join(map(json.dumps, execution_rows)) + "\n", encoding="utf-8")
+
+    incremental = IncrementalReport(audit, execution, state).refresh()
+    full = build_report(audit, execution)
+
+    assert incremental == full

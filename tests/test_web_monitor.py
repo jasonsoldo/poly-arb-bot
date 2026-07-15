@@ -345,7 +345,8 @@ def test_web_status_does_not_block_on_initial_large_strategy_audit(tmp_path, mon
 
     assert elapsed < 0.15
     assert status["analytics_refreshing"] is True
-    assert status["system_status"] == "DEGRADED"
+    assert status["analytics_status"] == "REBUILDING"
+    assert status["system_status"] == "ONLINE"
     release.wait(1)
 
 
@@ -362,12 +363,16 @@ def test_web_status_does_not_block_on_initial_large_shadow_report(tmp_path, monk
     (logs / "shadow-audit.jsonl").write_text("{}\n", encoding="utf-8")
     release = threading.Event()
 
-    def slow_report(path, execution_path=None):
-        release.wait(1)
-        return web_monitor.build_report_empty()
+    class SlowReport:
+        def __init__(self, *args):
+            pass
+
+        def refresh(self):
+            release.wait(1)
+            return web_monitor.build_report_empty()
 
     monkeypatch.setattr(web_monitor, "REPORT_ASYNC_THRESHOLD_BYTES", 1)
-    monkeypatch.setattr(web_monitor, "build_report", slow_report)
+    monkeypatch.setattr(web_monitor, "IncrementalReport", SlowReport)
     threading.Timer(0.2, release.set).start()
 
     started = time.perf_counter()
@@ -376,7 +381,8 @@ def test_web_status_does_not_block_on_initial_large_shadow_report(tmp_path, monk
 
     assert elapsed < 0.15
     assert status["analytics_refreshing"] is True
-    assert status["system_status"] == "DEGRADED"
+    assert status["analytics_status"] == "REBUILDING"
+    assert status["system_status"] == "ONLINE"
     release.wait(1)
 
 
@@ -509,6 +515,24 @@ def test_strategy_count_cache_consumes_only_appended_events(tmp_path):
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"event_id": "2", "event_type": "shadow_eval", "strategy": "paired_lock", "decision": "ACCEPT"}) + "\n")
     assert _strategy_counts((path,))["paired_lock"] == {"evaluations": 2, "accepts": 1, "rejections": 1, "model_evaluations": 0, "latest_model_evaluated": False, "unique_opportunities": 1, "active_opportunities": 1}
+
+
+def test_strategy_count_cache_resumes_from_disk_summary(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    path.write_text(json.dumps({
+        "event_id": "1", "event_type": "shadow_eval", "strategy": "paired_lock",
+        "market_id": "m1", "decision": "REJECT",
+    }) + "\n", encoding="utf-8")
+    assert _strategy_counts((path,))["paired_lock"]["evaluations"] == 1
+
+    web_monitor._STRATEGY_COUNT_CACHE.pop(str(path.resolve()))
+    assert _strategy_counts((path,))["paired_lock"]["evaluations"] == 1
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "event_id": "2", "event_type": "shadow_eval", "strategy": "paired_lock",
+            "market_id": "m1", "decision": "ACCEPT",
+        }) + "\n")
+    assert _strategy_counts((path,))["paired_lock"]["evaluations"] == 2
 
 
 def test_continuous_accepts_count_as_one_unique_opportunity(tmp_path):

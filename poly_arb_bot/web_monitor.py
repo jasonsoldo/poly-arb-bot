@@ -7,12 +7,13 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .shadow_report import build_report
+from .shadow_report import IncrementalReport
 from .reference_layer import reference_state_for_asset
 from .strategy_config import StrategyConfig
 
 
 _REPORT_CACHE = {}
+_REPORT_ANALYTICS = {}
 _REPORT_LOCK = threading.Lock()
 _REPORT_JOBS = {}
 _REPORT_JOB_LOCK = threading.Lock()
@@ -35,18 +36,23 @@ def _report_cache_key(path, execution_path=None):
             execution_stat.st_mtime_ns if execution_stat else 0)
 
 
+def _analytics_state_path(path, prefix):
+    root = path.parent.parent if path.parent.name == "logs" else path.parent
+    return root / "state" / f"{prefix}-{path.name}.json"
+
+
 def _cached_report(path, execution_path=None):
     if not path.exists():
         return build_report_empty()
-    key = _report_cache_key(path, execution_path)
-    cached = _REPORT_CACHE.get(str(path))
-    if cached and (cached[0] == key or time.monotonic() - cached[2] < 5):
-        return cached[1]
     with _REPORT_LOCK:
-        cached = _REPORT_CACHE.get(str(path))
-        if cached and (cached[0] == key or time.monotonic() - cached[2] < 5):
-            return cached[1]
-        report = build_report(path, execution_path)
+        analytics = _REPORT_ANALYTICS.get(str(path))
+        if analytics is None:
+            analytics = IncrementalReport(
+                path, execution_path, _analytics_state_path(path, "web-shadow-report"),
+            )
+            _REPORT_ANALYTICS[str(path)] = analytics
+        report = analytics.refresh()
+        key = _report_cache_key(path, execution_path)
         _REPORT_CACHE[str(path)] = (key, report, time.monotonic())
         return report
 
@@ -65,9 +71,7 @@ def _report_for_status(path, execution_path=None):
     job_key = (str(path.resolve()), str(execution_path.resolve()) if execution_path else "")
     current_key = _report_cache_key(path, execution_path)
     cached = _REPORT_CACHE.get(str(path))
-    cache_fresh = bool(cached and (
-        cached[0] == current_key or time.monotonic() - cached[2] < 5
-    ))
+    cache_fresh = bool(cached and cached[0] == current_key)
     total_size = path.stat().st_size
     if execution_path and execution_path.exists():
         total_size += execution_path.stat().st_size
@@ -75,7 +79,8 @@ def _report_for_status(path, execution_path=None):
         job = _REPORT_JOBS.get(job_key)
         if job and job.is_alive():
             return cached[1] if cached else build_report_empty(), True
-        if not cache_fresh and total_size >= REPORT_ASYNC_THRESHOLD_BYTES:
+        persisted = _analytics_state_path(path, "web-shadow-report").exists()
+        if not cache_fresh and not persisted and total_size >= REPORT_ASYNC_THRESHOLD_BYTES:
             job = threading.Thread(
                 target=_report_worker, args=(job_key, path, execution_path), daemon=True
             )
@@ -90,7 +95,9 @@ def build_report_empty():
                          "win_rate": None, "sharpe": None, "sharpe_samples": 0}
     return {
         "markets_seen": 0, "evaluations": 0, "fok_passed": 0, "accepts": 0,
-        "invalid_json": 0, "rejection_reasons": {},
+        "invalid_json": 0, "future_events": 0, "duplicate_events": 0,
+        "accepted_evaluations": 0, "rejected_evaluations": 0,
+        "rejection_reasons": {},
         "opportunity_duration_ms": {"p50": None, "p95": None, "max": None},
         "source_age_ms": {"latest": None, "p50": None, "p95": None, "p99": None,
                           "max": None, "samples": 0},
@@ -147,38 +154,91 @@ def _empty_strategy_counts():
     }
 
 
+def _new_strategy_state():
+    return {
+        "identity": None, "offset": 0, "size": 0, "seen": set(),
+        "last_saved": 0.0,
+        "counts": _empty_strategy_counts(),
+        "active": {name: set() for name in _empty_strategy_counts()},
+    }
+
+
+def _load_strategy_state(path):
+    summary_path = _analytics_state_path(path, "web-strategy-counts")
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _new_strategy_state()
+    state = _new_strategy_state()
+    state.update({key: payload.get(key, state[key]) for key in ("identity", "offset", "size")})
+    state["seen"] = set(payload.get("seen", []))
+    for name in state["counts"]:
+        state["counts"][name].update(payload.get("counts", {}).get(name, {}))
+        state["active"][name] = {
+            tuple(item) for item in payload.get("active", {}).get(name, [])
+        }
+    return state
+
+
+def _save_strategy_state(path, state):
+    now = time.monotonic()
+    if state["last_saved"] and now - state["last_saved"] < 30:
+        return
+    summary_path = _analytics_state_path(path, "web-strategy-counts")
+    temporary = summary_path.with_suffix(summary_path.suffix + ".tmp")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "identity": state["identity"], "offset": state["offset"], "size": state["size"],
+        "seen": list(state["seen"])[-50_000:], "counts": state["counts"],
+        "active": {name: [list(item) for item in rows]
+                   for name, rows in state["active"].items()},
+    }
+    temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    os.replace(temporary, summary_path)
+    state["last_saved"] = now
+
+
 def _strategy_counts(paths):
     names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
     total = _empty_strategy_counts()
     with _STRATEGY_COUNT_LOCK:
         for path in paths:
             key = str(path.resolve())
-            state = _STRATEGY_COUNT_CACHE.setdefault(key, {
-                "offset": 0, "size": 0, "seen": set(),
-                "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
-                                  "model_evaluations": 0, "latest_model_evaluated": False} for name in names},
-                "active": {name: set() for name in names},
-            })
+            state = _STRATEGY_COUNT_CACHE.setdefault(key, _load_strategy_state(path))
             try:
-                size = path.stat().st_size
+                stat = path.stat()
+                size = stat.st_size
+                identity = f"{stat.st_dev}:{stat.st_ino}"
             except OSError:
                 size = 0
-            if size < state["offset"]:
-                state.update({
-                    "offset": 0, "size": 0, "seen": set(),
-                    "counts": {name: {"evaluations": 0, "accepts": 0, "rejections": 0,
-                                      "model_evaluations": 0, "latest_model_evaluated": False} for name in names},
-                    "active": {name: set() for name in names},
-                })
+                identity = None
+            changed = False
+            if identity != state.get("identity") or size < state["offset"]:
+                state["identity"] = identity
+                state["offset"] = 0
+                changed = True
             if size > state["offset"]:
                 try:
-                    with path.open(encoding="utf-8") as handle:
+                    with path.open("rb") as handle:
                         handle.seek(state["offset"])
-                        while line := handle.readline():
-                            try:
-                                row = json.loads(line)
-                            except ValueError:
+                        while True:
+                            line_start = handle.tell()
+                            line = handle.readline()
+                            if not line:
+                                break
+                            if not line.endswith(b"\n"):
+                                try:
+                                    row = json.loads(line)
+                                except ValueError:
+                                    handle.seek(line_start)
+                                    break
+                            elif not line.strip():
                                 continue
+                            else:
+                                try:
+                                    row = json.loads(line)
+                                except ValueError:
+                                    continue
                             strategy = row.get("strategy", "paired_lock")
                             if row.get("event_type") != "shadow_eval" or strategy not in state["counts"]:
                                 continue
@@ -204,10 +264,17 @@ def _strategy_counts(paths):
                             )
                             if strategy != "paired_lock":
                                 bucket["latest_model_evaluated"] = row.get("estimated_probability") is not None
-                        state["offset"] = handle.tell()
+                        offset = handle.tell()
+                        if offset != state["offset"]:
+                            state["offset"] = offset
+                            changed = True
                 except OSError:
                     pass
             state["size"] = size
+            if len(state["seen"]) > 50_000:
+                state["seen"] = set(list(state["seen"])[-50_000:])
+            if changed:
+                _save_strategy_state(path, state)
             for name in names:
                 for field in ("evaluations", "accepts", "rejections", "model_evaluations"):
                     total[name][field] += state["counts"][name][field]
@@ -231,7 +298,11 @@ def _strategy_counts_for_status(paths):
     paths = tuple(paths)
     key = tuple(str(path.resolve()) for path in paths)
     size = sum(path.stat().st_size for path in paths if path.exists())
-    initialized = all(not path.exists() or str(path.resolve()) in _STRATEGY_COUNT_CACHE for path in paths)
+    initialized = all(
+        not path.exists() or str(path.resolve()) in _STRATEGY_COUNT_CACHE or
+        _analytics_state_path(path, "web-strategy-counts").exists()
+        for path in paths
+    )
     with _STRATEGY_JOB_LOCK:
         job = _STRATEGY_COUNT_JOBS.get(key)
         if job and job.is_alive():
@@ -432,8 +503,6 @@ def build_status(data_dir, log_file, state_file):
     strategy_score = _strategy_score(latest_event)
     strategy_counts, strategy_refreshing = _strategy_counts_for_status((selected_log, strategy_log))
     analytics_refreshing = report_refreshing or strategy_refreshing
-    if analytics_refreshing and system_status == "ONLINE":
-        system_status = "DEGRADED"
     strategy_evaluations = sum(row["evaluations"] for row in strategy_counts.values())
     strategy_accepts = sum(row["accepts"] for row in strategy_counts.values())
     unique_opportunities = sum(row["unique_opportunities"] for row in strategy_counts.values())
@@ -544,6 +613,7 @@ def build_status(data_dir, log_file, state_file):
         "market_reference_states": market_reference_states,
         "asset_latest_pnl": asset_latest_pnl,
         "analytics_refreshing": analytics_refreshing,
+        "analytics_status": "REBUILDING" if analytics_refreshing else "READY",
         "system_status": system_status,
         "rejection_reasons": report["rejection_reasons"] or dict(rejection_reasons),
         "shadow_report": report,
