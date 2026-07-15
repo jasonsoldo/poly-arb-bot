@@ -53,6 +53,12 @@ def test_shadow_loop_enforces_scan_deadline_without_replacing_old_markets():
     assert "use_retained_markets" in SCRIPT
 
 
+def test_shadow_loop_schedules_scan_at_next_market_boundary():
+    assert "market_refresh_delay" in SCRIPT
+    assert 'scan_delay="$(next_scan_delay 2>/dev/null || printf' in SCRIPT
+    assert 'sleep "$scan_delay"' in SCRIPT
+
+
 def test_systemd_requires_ntp_and_logrotate_retains_thirty_days():
     service = Path("deploy/poly-arb-bot.service").read_text(encoding="utf-8")
     ntp = Path("scripts/check_ntp.sh").read_text(encoding="utf-8")

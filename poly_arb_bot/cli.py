@@ -378,6 +378,32 @@ def write_market_payload_atomic(output_path: Path, payload, generated_at: int) -
     os.replace(temporary, output_path)
 
 
+def market_refresh_delay(markets_path: Path, refresh_seconds: float, now=None,
+                         boundary_grace_seconds: float = 1.0,
+                         missing_retry_seconds: float = 5.0) -> float:
+    maximum_delay = max(0.25, float(refresh_seconds))
+    now = time.time() if now is None else float(now)
+    try:
+        markets = json.loads(markets_path.read_text(encoding="utf-8")).get("markets", [])
+    except (OSError, ValueError, AttributeError):
+        return maximum_delay
+
+    for market in markets:
+        start_ts = float(market.get("start_ts") or 0)
+        close_ts = float(market.get("close_ts") or 0)
+        if start_ts <= now < close_ts and market.get("open_price") is None:
+            return min(maximum_delay, max(0.25, float(missing_retry_seconds)))
+
+    future_starts = [
+        float(market.get("start_ts")) for market in markets
+        if market.get("start_ts") is not None and float(market["start_ts"]) > now
+    ]
+    if not future_starts:
+        return maximum_delay
+    boundary_delay = min(future_starts) - now + float(boundary_grace_seconds)
+    return min(maximum_delay, max(0.25, boundary_delay))
+
+
 def current_series_events(events, now_ts, limit=None, horizon_seconds=3600):
     current = [
         event for event in events

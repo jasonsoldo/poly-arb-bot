@@ -3,6 +3,7 @@ from dataclasses import replace
 
 from poly_arb_bot.cli import (
     enrich_open_prices,
+    market_refresh_delay,
     restore_cached_open_prices,
     scan_updown_markets,
     write_market_payload_atomic,
@@ -128,3 +129,34 @@ def test_cached_official_open_price_survives_transient_endpoint_failure(tmp_path
 
     assert restored[0].open_price == 64765.026
     assert restored[0].open_price_source == "polymarket_crypto_price_api"
+
+
+def test_market_refresh_delay_scans_immediately_after_next_market_starts(tmp_path):
+    path = tmp_path / "live_markets.json"
+    path.write_text(json.dumps({"markets": [{
+        "market_id": "current",
+        "start_ts": 1784101200,
+        "close_ts": 1784101500,
+        "open_price": 64500,
+    }, {
+        "market_id": "next",
+        "start_ts": 1784101500,
+        "close_ts": 1784101800,
+        "open_price": None,
+    }]}), encoding="utf-8")
+
+    delay = market_refresh_delay(path, 60, now=1784101470, boundary_grace_seconds=1)
+
+    assert delay == 31
+
+
+def test_market_refresh_delay_retries_missing_current_open_price(tmp_path):
+    path = tmp_path / "live_markets.json"
+    path.write_text(json.dumps({"markets": [{
+        "market_id": "current",
+        "start_ts": 1784101500,
+        "close_ts": 1784101800,
+        "open_price": None,
+    }]}), encoding="utf-8")
+
+    assert market_refresh_delay(path, 60, now=1784101512) == 5

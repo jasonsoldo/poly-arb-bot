@@ -35,6 +35,10 @@ use_retained_markets() {
   "$python_bin" -c 'import json,time; rows=json.load(open("data/live_markets.json")).get("markets", []); raise SystemExit(0 if rows and any(float(x.get("close_ts", 0)) > time.time() for x in rows) else 1)' 2>/dev/null
 }
 
+next_scan_delay() {
+  "$python_bin" -c 'from pathlib import Path; import sys; from poly_arb_bot.cli import market_refresh_delay; print(f"{market_refresh_delay(Path(sys.argv[2]), float(sys.argv[1])):.3f}")' "$refresh_seconds" data/live_markets.json
+}
+
 until (scan_once || use_retained_markets) && use_retained_markets; do
   echo "SHADOW_LOOP no_markets retry_s=$refresh_seconds"
   sleep "$refresh_seconds"
@@ -42,7 +46,8 @@ done
 
 (
   while true; do
-    sleep "$refresh_seconds"
+    scan_delay="$(next_scan_delay 2>/dev/null || printf '%s' "$refresh_seconds")"
+    sleep "$scan_delay"
     scan_once || echo "SHADOW_LOOP scan_deadline_or_error deadline_s=$scan_deadline_seconds retained=data/live_markets.json retry_s=$refresh_seconds"
   done
 ) &
