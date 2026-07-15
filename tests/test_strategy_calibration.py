@@ -1,7 +1,11 @@
 import json
 import gzip
 
-from poly_arb_bot.strategy_calibration import build_calibration, official_winners
+from poly_arb_bot.strategy_calibration import (
+    build_calibration,
+    build_probability_calibration,
+    official_winners,
+)
 
 
 def test_calibration_filters_hash_and_detects_correlated_risk(tmp_path):
@@ -117,3 +121,40 @@ def test_calibration_reads_rotated_and_compressed_history_without_duplicates(tmp
     report = build_calibration(path, "new")
     assert report["sample_count"] == 2
     assert report["duplicate_completed_events"] == 1
+
+
+def test_probability_calibration_includes_rejected_fixed_horizon_predictions(tmp_path):
+    path = tmp_path / "execution.jsonl"
+    rows = [
+        {"event_type": "shadow_prediction_complete", "event_id": "p1:complete",
+         "prediction_event_id": "p1", "ts": 100, "strategy": "late_window_directional_ev",
+         "strategy_config_hash": "directional-hash", "probability_model_id": "directional-v1",
+         "market_id": "m1", "close_ts": 120, "estimated_up_probability": .8,
+         "actual_up": 1, "origin_decision": "REJECT", "brier_score": .04,
+         "log_loss": .223143551314},
+        {"event_type": "shadow_prediction_complete", "event_id": "p2:complete",
+         "prediction_event_id": "p2", "ts": 200, "strategy": "late_window_directional_ev",
+         "strategy_config_hash": "directional-hash", "probability_model_id": "directional-v1",
+         "market_id": "m2", "close_ts": 220, "estimated_up_probability": .2,
+         "actual_up": 1, "origin_decision": "ACCEPT", "brier_score": .64,
+         "log_loss": 1.609437912434},
+        {"event_type": "shadow_prediction_complete", "event_id": "p1:complete",
+         "prediction_event_id": "p1", "ts": 100, "strategy": "late_window_directional_ev",
+         "strategy_config_hash": "directional-hash", "probability_model_id": "directional-v1",
+         "market_id": "m1", "close_ts": 120, "estimated_up_probability": .8,
+         "actual_up": 1, "origin_decision": "REJECT"},
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    report = build_probability_calibration(path, "latest")
+
+    metrics = report["by_strategy"]["late_window_directional_ev"]
+    assert report["sample_count"] == 2
+    assert report["duplicate_events"] == 1
+    assert metrics["samples"] == 2
+    assert metrics["origin_rejected"] == 1
+    assert metrics["origin_accepted"] == 1
+    assert metrics["expected_up_rate"] == .5
+    assert metrics["realized_up_rate"] == 1.0
+    assert metrics["brier_score"] == .34
+    assert metrics["calibration_buckets"]["0.2-0.3"]["samples"] == 1

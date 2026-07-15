@@ -218,6 +218,8 @@ def decision_audit(row, result, event_id, generation, session, evaluation_sequen
         "cross_source_divergence_bps": row.reference.cross_source_divergence_bps,
         "reference_quorum_met": row.reference.reference_quorum_met,
         "reference_state": row.reference.reference_state,
+        "settlement_source": row.settlement_source,
+        "settlement_source_verified": row.settlement_source_verified,
         "reference_source_statuses": statuses,
         "valid_reference_sources": valid_sources,
         "rejected_reference_sources": rejected_sources,

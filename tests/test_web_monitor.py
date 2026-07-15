@@ -617,6 +617,19 @@ def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
         "calibration_mode": True,
         "portfolio_limits_enforced": False,
         "risk_mode": "CALIBRATION_UNTHROTTLED",
+        "probability_predictions": {"pending": {"market_id": "m1"}},
+        "completed_predictions": ["p1:complete", "p2:complete"],
+        "probability_calibration": {
+            "late_window_directional_ev": {
+                "samples": 2, "sum_expected_up_probability": 1.0,
+                "sum_actual_up": 1, "sum_brier_score": .68,
+                "sum_log_loss": 1.832581463748,
+                "origin_accepted": 1, "origin_rejected": 1,
+                "calibration_buckets": {
+                    "0.2-0.3": {"samples": 1, "sum_probability": .2, "actual_up": 1},
+                },
+            },
+        },
     }), encoding="utf-8")
 
     status = build_status(data, tmp_path / "missing.jsonl", state / "orders.json")
@@ -633,4 +646,11 @@ def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
         "low_price_lottery_ev": "lottery_consecutive_loss_limit"
     }
     assert lifecycle["calibration_bypasses"] == {"lottery_consecutive_loss_limit": 7}
+    assert lifecycle["pending_predictions"] == 1
+    assert lifecycle["completed_predictions"] == 2
+    calibration = status["probability_calibration"]["late_window_directional_ev"]
+    assert calibration["samples"] == 2
+    assert calibration["brier_score"] == .34
+    assert calibration["origin_rejected"] == 1
+    assert calibration["calibration_buckets"]["0.2-0.3"]["realized_up_rate"] == 1
 

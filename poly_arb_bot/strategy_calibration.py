@@ -24,6 +24,21 @@ def _rows(path):
                     yield row
 
 
+def _prediction_rows(path):
+    for history_path in history_paths(path):
+        if not history_path.exists():
+            continue
+        with open_history(history_path) as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (row.get("event_type") == "shadow_prediction_complete" and
+                        row.get("strategy") in STRATEGIES):
+                    yield row
+
+
 def _strategy_metrics(rows):
     complete = [row for row in rows if all(row.get(field) is not None for field in (
         "estimated_probability", "expected_fill_price", "net_ev", "winning_outcome",
@@ -176,6 +191,94 @@ def build_calibration(path, config_hash=None, resolved_outcomes=None):
     }
 
 
+def _probability_metrics(rows):
+    if not rows:
+        return {
+            "samples": 0, "expected_up_rate": None, "realized_up_rate": None,
+            "brier_score": None, "log_loss": None, "origin_accepted": 0,
+            "origin_rejected": 0, "calibration_buckets": {},
+        }
+    buckets = defaultdict(list)
+    probabilities = []
+    outcomes = []
+    for row in rows:
+        probability = float(row["estimated_up_probability"])
+        actual = int(row["actual_up"])
+        probabilities.append(probability)
+        outcomes.append(actual)
+        buckets[min(9, int(probability * 10))].append((probability, actual))
+    calibration = {
+        f"{bucket / 10:.1f}-{(bucket + 1) / 10:.1f}": {
+            "samples": len(values),
+            "expected_up_rate": sum(value[0] for value in values) / len(values),
+            "realized_up_rate": sum(value[1] for value in values) / len(values),
+        }
+        for bucket, values in sorted(buckets.items())
+    }
+    return {
+        "samples": len(rows),
+        "expected_up_rate": sum(probabilities) / len(rows),
+        "realized_up_rate": sum(outcomes) / len(rows),
+        "brier_score": round(sum(
+            (probability - actual) ** 2
+            for probability, actual in zip(probabilities, outcomes)
+        ) / len(rows), 12),
+        "log_loss": round(sum(float(row["log_loss"]) for row in rows) / len(rows), 12),
+        "origin_accepted": sum(row.get("origin_decision") == "ACCEPT" for row in rows),
+        "origin_rejected": sum(row.get("origin_decision") != "ACCEPT" for row in rows),
+        "calibration_buckets": calibration,
+    }
+
+
+def build_probability_calibration(path, config_hash=None):
+    by_id = {}
+    duplicates = 0
+    for row in _prediction_rows(path):
+        event_id = row.get("event_id")
+        if event_id and event_id in by_id:
+            duplicates += 1
+            continue
+        by_id[event_id or f"legacy:{len(by_id)}"] = row
+    all_rows = [row for row in by_id.values() if all(
+        row.get(field) is not None
+        for field in ("estimated_up_probability", "actual_up", "log_loss")
+    )]
+    if config_hash in {None, "latest"}:
+        config_hashes = {
+            strategy: max(
+                (row for row in all_rows if row.get("strategy") == strategy),
+                key=lambda row: float(row.get("ts", 0)), default={},
+            ).get("strategy_config_hash")
+            for strategy in STRATEGIES
+        }
+        rows = [row for row in all_rows if
+                row.get("strategy_config_hash") == config_hashes.get(row.get("strategy"))]
+        selected = {value for value in config_hashes.values() if value is not None}
+        selected_hash = next(iter(selected)) if len(selected) == 1 else "latest_by_strategy"
+    else:
+        config_hashes = {strategy: config_hash for strategy in STRATEGIES}
+        rows = [row for row in all_rows if row.get("strategy_config_hash") == config_hash]
+        selected_hash = config_hash
+    return {
+        "config_hash": selected_hash,
+        "config_hashes": config_hashes,
+        "sample_count": len(rows),
+        "excluded_other_config": len(all_rows) - len(rows),
+        "duplicate_events": duplicates,
+        "independent_markets": len({row.get("market_id") for row in rows}),
+        "independent_close_windows": len({row.get("close_ts") for row in rows}),
+        "probability_model_ids": dict(Counter(
+            row.get("probability_model_id") or "<missing>" for row in rows
+        )),
+        "by_strategy": {
+            strategy: _probability_metrics([
+                row for row in rows if row.get("strategy") == strategy
+            ])
+            for strategy in sorted(STRATEGIES)
+        },
+    }
+
+
 def main(path="logs/shadow-execution.jsonl", config_hash="latest", verify_official=False,
          gamma_base_url="https://gamma-api.polymarket.com"):
     resolved = None
@@ -185,5 +288,11 @@ def main(path="logs/shadow-execution.jsonl", config_hash="latest", verify_offici
             [row.get("condition_id") for row in rows], gamma_base_url,
         )
     report = build_calibration(Path(path), config_hash, resolved)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["sample_count"] else 2
+
+
+def probability_main(path="logs/shadow-execution.jsonl", config_hash="latest"):
+    report = build_probability_calibration(Path(path), config_hash)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["sample_count"] else 2

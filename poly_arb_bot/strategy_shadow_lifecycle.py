@@ -2,6 +2,7 @@ import json
 import os
 import time
 import hashlib
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from .logger import JsonlLogger
 
 SETTLEMENT_MAX_DELAY_MS = 10_000
 DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS = 900
+DEFAULT_CALIBRATION_HORIZONS = {"5m": 90, "15m": 180, "1h": 300, "4h": 600}
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,13 @@ class StrategyShadowLifecycle:
                 str(DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS),
             )
         )
-        self.config_version = "shadow-portfolio-v4"
+        self.probability_calibration_horizons = {
+            timeframe: float(os.getenv(
+                f"MODEL_CALIBRATION_HORIZON_{timeframe.upper()}", str(default),
+            ))
+            for timeframe, default in DEFAULT_CALIBRATION_HORIZONS.items()
+        }
+        self.config_version = "shadow-portfolio-v5"
         self.strategy_config_hash = strategy_config()[1]
         self.strategy_config_hashes = {
             strategy: strategy_config(strategy)[1]
@@ -81,6 +89,7 @@ class StrategyShadowLifecycle:
         config_payload = {
             "calibration_mode": self.calibration_mode,
             "limits": asdict(self.limits),
+            "probability_calibration_horizons": self.probability_calibration_horizons,
         }
         self.config_hash = hashlib.sha256(
             json.dumps(config_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -92,6 +101,10 @@ class StrategyShadowLifecycle:
         self.data.setdefault("portfolio_rejections", {})
         self.data.setdefault("calibration_bypasses", {})
         self.data.setdefault("orphaned_positions", [])
+        self.data.setdefault("probability_predictions", {})
+        self.data.setdefault("completed_predictions", [])
+        self.data.setdefault("orphaned_predictions", [])
+        self.data.setdefault("probability_calibration", {})
         self.data["portfolio_limits"] = asdict(self.limits)
         self.data["calibration_mode"] = self.calibration_mode
         self.data["portfolio_limits_enforced"] = not self.calibration_mode
@@ -100,6 +113,7 @@ class StrategyShadowLifecycle:
         )
         self.data["config_version"] = self.config_version
         self.data["config_hash"] = self.config_hash
+        self.data["probability_calibration_horizons"] = self.probability_calibration_horizons
         self._mark_dirty()
         self._backfill_completed_trades()
         self.refresh_risk_status()
@@ -290,6 +304,164 @@ class StrategyShadowLifecycle:
     @staticmethod
     def _key(row):
         return ":".join((row["strategy"], row["market_id"], row.get("outcome", "Both")))
+
+    @staticmethod
+    def _prediction_id(row, horizon):
+        identity = "|".join((
+            str(row.get("strategy", "")), str(row.get("market_id", "")),
+            str(row.get("config_hash", "")), str(row.get("probability_model_id", "")),
+            str(horizon),
+        ))
+        return f"probability:{hashlib.sha256(identity.encode()).hexdigest()}"
+
+    def capture_prediction(self, row, markets):
+        strategy = row.get("strategy")
+        market_id = row.get("market_id")
+        if (
+            row.get("event_type") != "shadow_eval"
+            or strategy not in {"late_window_directional_ev", "low_price_lottery_ev"}
+            or row.get("outcome") != "Up"
+            or market_id not in markets
+        ):
+            return False
+        timeframe = row.get("timeframe") or markets[market_id].get("interval")
+        horizon = self.probability_calibration_horizons.get(timeframe)
+        seconds_to_close = row.get("seconds_to_close")
+        required = (
+            row.get("estimated_probability"), row.get("probability_model_id"),
+            row.get("config_hash"), row.get("price_to_beat"),
+            row.get("settlement_reference"),
+        )
+        if (
+            horizon is None or seconds_to_close is None
+            or not 0 < float(seconds_to_close) <= horizon
+            or any(value is None for value in required)
+            or row.get("reference_quorum_met") is not True
+            or row.get("settlement_source_verified") is not True
+        ):
+            return False
+        probability = float(row["estimated_probability"])
+        if not 0 <= probability <= 1:
+            return False
+        prediction_id = self._prediction_id(row, horizon)
+        complete_id = f"{prediction_id}:complete"
+        if (
+            prediction_id in self.data["probability_predictions"]
+            or complete_id in self.data["completed_predictions"]
+        ):
+            return False
+        market = markets[market_id]
+        self.data["probability_predictions"][prediction_id] = {
+            "event_id": prediction_id,
+            "source_event_id": row.get("event_id"),
+            "strategy": strategy,
+            "strategy_config_version": row.get("config_version"),
+            "strategy_config_hash": row.get("config_hash"),
+            "probability_model_id": row.get("probability_model_id"),
+            "market_id": market_id,
+            "condition_id": row.get("condition_id"),
+            "asset": row.get("asset", market.get("asset")),
+            "timeframe": timeframe,
+            "window": row.get("window"),
+            "generation": row.get("generation"),
+            "session": row.get("session"),
+            "evaluation_sequence": row.get("evaluation_sequence"),
+            "captured_at": row.get("ts", row.get("timestamp")),
+            "close_ts": market.get("close_ts"),
+            "settlement_source": market.get("settlement_source"),
+            "price_to_beat": row.get("price_to_beat"),
+            "estimated_up_probability": probability,
+            "raw_estimated_up_probability": row.get("raw_estimated_probability"),
+            "market_implied_up_probability": row.get("market_implied_probability"),
+            "calibration_horizon_seconds": horizon,
+            "seconds_to_close": float(seconds_to_close),
+            "origin_decision": row.get("decision"),
+            "origin_reason": row.get("reason"),
+            "reference_state": row.get("reference_state"),
+            "reference_quorum_met": row.get("reference_quorum_met"),
+            "settlement_source_verified": row.get("settlement_source_verified"),
+            "settlement_reference": row.get("settlement_reference"),
+            "real_order_submissions": 0,
+            "real_orders": 0,
+            "real_fills": 0,
+        }
+        self._mark_dirty()
+        return True
+
+    def _record_probability_result(self, row):
+        strategy = row["strategy"]
+        aggregate = self.data["probability_calibration"].setdefault(strategy, {
+            "samples": 0, "sum_expected_up_probability": 0.0,
+            "sum_actual_up": 0, "sum_brier_score": 0.0, "sum_log_loss": 0.0,
+            "origin_accepted": 0, "origin_rejected": 0, "calibration_buckets": {},
+        })
+        probability = float(row["estimated_up_probability"])
+        actual = int(row["actual_up"])
+        aggregate["samples"] += 1
+        aggregate["sum_expected_up_probability"] += probability
+        aggregate["sum_actual_up"] += actual
+        aggregate["sum_brier_score"] += float(row["brier_score"])
+        aggregate["sum_log_loss"] += float(row["log_loss"])
+        origin = "origin_accepted" if row.get("origin_decision") == "ACCEPT" else "origin_rejected"
+        aggregate[origin] += 1
+        bucket_index = min(9, int(probability * 10))
+        bucket_name = f"{bucket_index / 10:.1f}-{(bucket_index + 1) / 10:.1f}"
+        bucket = aggregate["calibration_buckets"].setdefault(
+            bucket_name, {"samples": 0, "sum_probability": 0.0, "actual_up": 0},
+        )
+        bucket["samples"] += 1
+        bucket["sum_probability"] += probability
+        bucket["actual_up"] += actual
+
+    def _settle_predictions(self, venue, now):
+        changed = False
+        durable_transition = False
+        for key, prediction in list(self.data["probability_predictions"].items()):
+            close_ts = float(prediction.get("close_ts") or 0)
+            if now < close_ts:
+                continue
+            sample = self._settlement_sample(prediction, venue)
+            if sample is None:
+                if now - close_ts < self.orphan_after_seconds:
+                    continue
+                orphan_id = f'{prediction["event_id"]}:orphaned'
+                orphan = {
+                    **prediction, "event_id": orphan_id,
+                    "prediction_event_id": prediction["event_id"],
+                    "timestamp": now, "orphan_reason": "settlement_sample_unavailable",
+                }
+                self.logger.write("shadow_prediction_orphaned", orphan)
+                self.data["orphaned_predictions"] = (
+                    self.data["orphaned_predictions"] + [orphan_id]
+                )[-20000:]
+                del self.data["probability_predictions"][key]
+                changed = durable_transition = True
+                continue
+            probability = float(prediction["estimated_up_probability"])
+            actual_up = int(float(sample["price"]) >= float(prediction["price_to_beat"]))
+            bounded = min(1 - 1e-12, max(1e-12, probability))
+            brier = round((probability - actual_up) ** 2, 12)
+            log_loss = round(-(
+                actual_up * math.log(bounded) + (1 - actual_up) * math.log(1 - bounded)
+            ), 12)
+            complete_id = f'{prediction["event_id"]}:complete'
+            complete = {
+                **prediction, "event_id": complete_id,
+                "prediction_event_id": prediction["event_id"],
+                "timestamp": now, "settlement_price": float(sample["price"]),
+                "settlement_timestamp_ms": float(sample["source_timestamp_ms"]),
+                "winning_outcome": "Up" if actual_up else "Down",
+                "actual_up": actual_up, "brier_score": brier, "log_loss": log_loss,
+                "trade_accepted": prediction.get("origin_decision") == "ACCEPT",
+            }
+            self.logger.write("shadow_prediction_complete", complete)
+            self._record_probability_result(complete)
+            self.data["completed_predictions"] = (
+                self.data["completed_predictions"] + [complete_id]
+            )[-20000:]
+            del self.data["probability_predictions"][key]
+            changed = durable_transition = True
+        return changed, durable_transition
 
     def consume(self, row, markets):
         strategy = row.get("strategy")
@@ -495,6 +667,9 @@ class StrategyShadowLifecycle:
             changed = True
             durable_transition = True
 
+        prediction_changed, prediction_durable = self._settle_predictions(venue, now)
+        changed = changed or prediction_changed
+        durable_transition = durable_transition or prediction_durable
         if changed:
             self.refresh_risk_status()
             self._mark_dirty()
@@ -518,6 +693,7 @@ def process_audit_once(audit_path, lifecycle, markets, offset_key="audit_offset"
         lifecycle.data[identity_key] = identity
         lifecycle._mark_dirty()
     opened = 0
+    captured = 0
     with audit_path.open(encoding="utf-8") as handle:
         handle.seek(lifecycle.data.get(offset_key, 0))
         while line := handle.readline():
@@ -525,10 +701,11 @@ def process_audit_once(audit_path, lifecycle, markets, offset_key="audit_offset"
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            captured += lifecycle.capture_prediction(row, markets)
             opened += lifecycle.consume(row, markets)
         offset = handle.tell()
         if offset != lifecycle.data.get(offset_key):
             lifecycle.data[offset_key] = offset
             lifecycle._mark_dirty()
-    lifecycle._save(force=bool(opened))
+    lifecycle._save(force=bool(opened or captured))
     return opened

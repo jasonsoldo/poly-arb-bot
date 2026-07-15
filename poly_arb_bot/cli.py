@@ -753,6 +753,7 @@ def main() -> int:
             "chainlink-price",
             "shadow-acceptance",
             "strategy-calibration",
+            "probability-calibration",
         ],
     )
     parser.add_argument("--snapshot", default="data/sample_live_snapshot.json")
@@ -798,6 +799,9 @@ def main() -> int:
             args.execution_log, args.config_hash, args.verify_official,
             args.gamma_base_url,
         )
+    if args.command == "probability-calibration":
+        from .strategy_calibration import probability_main
+        return probability_main(args.execution_log, args.config_hash)
 
     if args.command == "simulate":
         return run_simulation(

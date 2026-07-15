@@ -39,6 +39,22 @@ def market(source="chainlink", timeframe="5m"):
             "settlement_source": source, "close_ts": 1100, "open_price": 100}
 
 
+def prediction(event_id="prediction-1", strategy="late_window_directional_ev",
+               decision="REJECT", seconds_to_close=90):
+    return {
+        "event_id": event_id, "event_type": "shadow_eval", "strategy": strategy,
+        "market_id": "m1", "condition_id": "c1", "asset": "BTC",
+        "timeframe": "5m", "window": "current", "outcome": "Up",
+        "decision": decision, "reason": "net_ev_below_threshold",
+        "estimated_probability": 0.7, "raw_estimated_probability": 0.75,
+        "probability_model_id": "directional_normal_cdf_v1",
+        "reference_quorum_met": True, "reference_state": "REFERENCE_READY",
+        "settlement_source_verified": True, "settlement_reference": 100.5,
+        "price_to_beat": 100, "seconds_to_close": seconds_to_close,
+        "ts": 1010, "config_version": "strategy-v1", "config_hash": "model-hash",
+    }
+
+
 def test_repeated_accepts_open_one_position(tmp_path):
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "complete.jsonl")
     assert lifecycle.consume(accepted(), {"m1": market()}) is True
@@ -47,7 +63,7 @@ def test_repeated_accepts_open_one_position(tmp_path):
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["entry_cost"] == 4.1
     assert position["real_order_submissions"] == 0
-    assert position["config_version"] == "shadow-portfolio-v4"
+    assert position["config_version"] == "shadow-portfolio-v5"
     assert len(position["config_hash"]) == 64
 
 
@@ -128,6 +144,74 @@ def test_strategy_audit_offset_is_persisted_and_accept_is_not_replayed(tmp_path)
     assert process_audit_once(audit, lifecycle, markets) == 1
     assert process_audit_once(audit, lifecycle, markets) == 0
     assert lifecycle.data["audit_offset"] == audit.stat().st_size
+
+
+def test_rejected_fixed_horizon_prediction_is_captured_without_opening_trade(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+
+    assert lifecycle.capture_prediction(prediction(), {"m1": market()}) is True
+
+    assert lifecycle.data["positions"] == {}
+    assert len(lifecycle.data["probability_predictions"]) == 1
+    stored = next(iter(lifecycle.data["probability_predictions"].values()))
+    assert stored["origin_decision"] == "REJECT"
+    assert stored["estimated_up_probability"] == 0.7
+    assert stored["calibration_horizon_seconds"] == 90
+
+
+def test_prediction_capture_is_one_up_sample_per_market_model_and_horizon(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    markets = {"m1": market()}
+
+    assert lifecycle.capture_prediction(prediction(), markets) is True
+    assert lifecycle.capture_prediction(prediction("prediction-2"), markets) is False
+    down = prediction("prediction-down")
+    down["outcome"] = "Down"
+    assert lifecycle.capture_prediction(down, markets) is False
+    too_early = prediction("prediction-early", seconds_to_close=91)
+    too_early["market_id"] = "m2"
+    assert lifecycle.capture_prediction(
+        too_early, {"m2": dict(market(), market_id="m2")}
+    ) is False
+
+
+def test_prediction_capture_requires_valid_probability_inputs(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    markets = {"m1": market()}
+    for field in (
+        "estimated_probability", "probability_model_id", "config_hash",
+        "price_to_beat", "settlement_reference",
+    ):
+        row = prediction(f"missing-{field}")
+        row[field] = None
+        assert lifecycle.capture_prediction(row, markets) is False
+    row = prediction("blocked-reference")
+    row["reference_quorum_met"] = False
+    assert lifecycle.capture_prediction(row, markets) is False
+    row = prediction("unverified-settlement")
+    row["settlement_source_verified"] = False
+    assert lifecycle.capture_prediction(row, markets) is False
+
+
+def test_prediction_settlement_writes_independent_calibration_event(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    lifecycle.capture_prediction(prediction(), {"m1": market()})
+    venue = {"assets": {"BTC": {"chainlink_settlement_samples": [
+        {"source_timestamp_ms": 1_100_000, "price": 101},
+    ]}}}
+
+    assert lifecycle.settle({"m1": market()}, venue, now=1101) == 0
+
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["event_type"] == "shadow_prediction_complete"
+    assert complete["actual_up"] == 1
+    assert complete["winning_outcome"] == "Up"
+    assert complete["brier_score"] == 0.09
+    assert complete["origin_decision"] == "REJECT"
+    assert complete["trade_accepted"] is False
+    assert lifecycle.data["probability_predictions"] == {}
+    assert lifecycle.data["probability_calibration"]["late_window_directional_ev"]["samples"] == 1
 
 
 def test_cross_strategy_same_market_outcome_is_not_double_opened(tmp_path):

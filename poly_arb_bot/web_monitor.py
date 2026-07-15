@@ -180,6 +180,45 @@ def _load_strategy_state(path):
     return state
 
 
+def _probability_calibration_view(raw):
+    result = {}
+    for strategy in ("late_window_directional_ev", "low_price_lottery_ev"):
+        source = raw.get(strategy, {})
+        samples = int(source.get("samples", 0))
+        buckets = {}
+        for name, values in source.get("calibration_buckets", {}).items():
+            count = int(values.get("samples", 0))
+            buckets[name] = {
+                "samples": count,
+                "expected_up_rate": (
+                    float(values.get("sum_probability", 0)) / count if count else None
+                ),
+                "realized_up_rate": (
+                    float(values.get("actual_up", 0)) / count if count else None
+                ),
+            }
+        result[strategy] = {
+            "samples": samples,
+            "expected_up_rate": (
+                float(source.get("sum_expected_up_probability", 0)) / samples
+                if samples else None
+            ),
+            "realized_up_rate": (
+                float(source.get("sum_actual_up", 0)) / samples if samples else None
+            ),
+            "brier_score": (
+                float(source.get("sum_brier_score", 0)) / samples if samples else None
+            ),
+            "log_loss": (
+                float(source.get("sum_log_loss", 0)) / samples if samples else None
+            ),
+            "origin_accepted": int(source.get("origin_accepted", 0)),
+            "origin_rejected": int(source.get("origin_rejected", 0)),
+            "calibration_buckets": buckets,
+        }
+    return result
+
+
 def _save_strategy_state(path, state):
     now = time.monotonic()
     if state["last_saved"] and now - state["last_saved"] < 30:
@@ -604,6 +643,8 @@ def build_status(data_dir, log_file, state_file):
             "orphaned_positions": len(lifecycle_state.get("orphaned_positions", [])),
             "positions": list(lifecycle_state.get("positions", {}).values()),
             "completed_ids": len(lifecycle_state.get("completed", [])),
+            "pending_predictions": len(lifecycle_state.get("probability_predictions", {})),
+            "completed_predictions": len(lifecycle_state.get("completed_predictions", [])),
             "portfolio_rejections": dict(Counter(lifecycle_state.get("portfolio_rejections", {}).values())),
             "current_risk_halts": lifecycle_state.get("current_risk_halts", {}),
             "would_halt_reasons": lifecycle_state.get("would_halt_reasons", {}),
@@ -618,6 +659,9 @@ def build_status(data_dir, log_file, state_file):
             "real_orders": lifecycle_state.get("real_orders"),
             "real_fills": lifecycle_state.get("real_fills"),
         },
+        "probability_calibration": _probability_calibration_view(
+            lifecycle_state.get("probability_calibration", {})
+        ),
         "market_matrix": market_matrix,
         "market_reference_states": market_reference_states,
         "asset_latest_pnl": asset_latest_pnl,
