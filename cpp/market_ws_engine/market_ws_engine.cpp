@@ -728,7 +728,7 @@ private:
             }
             emit_terminal_hedge_evaluation(
                 item.first, market, directional_inputs, directional_decisions,
-                lottery_inputs, timestamp);
+                lottery_inputs, probability_input, timestamp);
         }
         const auto evaluation_finished = std::chrono::steady_clock::now();
         if (evaluated_any && last_clob_mutation_at_.time_since_epoch().count()) {
@@ -743,6 +743,7 @@ private:
             const std::map<std::string, strategy::EvaluationInput>& directional_inputs,
             const std::map<std::string, strategy::Decision>& directional_decisions,
             const std::map<std::string, strategy::EvaluationInput>& lottery_inputs,
+            const strategy::ProbabilityInput& probability_input,
             double timestamp) {
         if (directional_inputs.empty()) return;
         const int seconds_to_close = directional_inputs.begin()->second.seconds_to_close;
@@ -814,6 +815,19 @@ private:
             std::to_string(ws_session_id_) + ":" + market_id + ":terminal_hedge:" +
             std::to_string(sequence);
         std::ostringstream out;
+        const bool main_fill_available = main && main->target_depth_ok;
+        const bool hedge_fill_available = hedge && hedge->target_depth_ok;
+        const bool helper_evaluated = main && main_decision &&
+            main_decision->decision == "ACCEPT" && main->estimated_probability && hedge;
+        const bool full_cost_chain = helper_evaluated && result.total_cost > 0;
+        const auto optional = [&](const std::optional<double>& value) {
+            if (value && std::isfinite(*value)) out << *value;
+            else out << "null";
+        };
+        const auto available = [&](bool present, double value) {
+            if (present && std::isfinite(value)) out << value;
+            else out << "null";
+        };
         out << std::setprecision(15)
             << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
             << ",\"event_id\":\"" << reference_ipc::escaped(event_id)
@@ -827,14 +841,38 @@ private:
             << reference_ipc::escaped(market.window) << "\",\"generation\":" << generation_
             << ",\"session\":" << ws_session_id_ << ",\"evaluation_sequence\":" << sequence
             << ",\"main_outcome\":\"" << main_outcome << "\",\"hedge_outcome\":\""
-            << hedge_outcome << "\",\"main_size\":" << size_ << ",\"hedge_size\":" << result.hedge_size
-            << ",\"main_expected_fill_price\":" << (main ? main->expected_fill_price : 0)
-            << ",\"hedge_expected_fill_price\":" << (hedge ? hedge->expected_fill_price : 0)
-            << ",\"main_cost\":" << result.main_cost << ",\"hedge_cost\":" << result.hedge_cost
-            << ",\"total_cost\":" << result.total_cost << ",\"main_win_pnl\":" << result.main_win_pnl
-            << ",\"reversal_pnl\":" << result.reversal_pnl << ",\"expected_portfolio_pnl\":" << result.expected_pnl
-            << ",\"worst_case_pnl\":" << std::min(result.main_win_pnl, result.reversal_pnl)
-            << ",\"estimated_probability\":" << (main && main->estimated_probability ? *main->estimated_probability : 0)
+            << hedge_outcome << "\",\"main_size\":" << size_ << ",\"hedge_size\":";
+        available(result.hedge_size > 0, result.hedge_size);
+        out << ",\"main_expected_fill_price\":";
+        available(main_fill_available, main ? main->expected_fill_price : 0);
+        out << ",\"hedge_expected_fill_price\":";
+        available(hedge_fill_available, hedge ? hedge->expected_fill_price : 0);
+        out << ",\"main_cost\":";
+        available(helper_evaluated, result.main_cost);
+        out << ",\"hedge_cost\":";
+        available(result.hedge_cost > 0, result.hedge_cost);
+        out << ",\"total_cost\":";
+        available(full_cost_chain, result.total_cost);
+        out << ",\"main_win_pnl\":";
+        available(full_cost_chain, result.main_win_pnl);
+        out << ",\"reversal_pnl\":";
+        available(full_cost_chain, result.reversal_pnl);
+        out << ",\"expected_portfolio_pnl\":";
+        available(full_cost_chain, result.expected_pnl);
+        out << ",\"worst_case_pnl\":";
+        available(full_cost_chain, std::min(result.main_win_pnl, result.reversal_pnl));
+        out << ",\"estimated_probability\":";
+        optional(main ? main->estimated_probability : std::nullopt);
+        out << ",\"volatility_per_sqrt_second\":";
+        optional(probability_input.volatility_per_sqrt_second);
+        out << ",\"model_sample_count\":" << probability_input.model_sample_count
+            << ",\"model_sample_span_seconds\":" << probability_input.model_sample_span_seconds
+            << ",\"settlement_reference\":";
+        optional(probability_input.settlement_reference);
+        out << ",\"price_to_beat\":";
+        optional(probability_input.price_to_beat);
+        out << ",\"reference_quorum_met\":"
+            << (main && main->reference_quorum_met ? "true" : "false")
             << ",\"seconds_to_close\":" << (main ? main->seconds_to_close : 0)
             << ",\"decision\":\"" << combined.decision << "\",\"reason\":\"" << reason
             << "\",\"target_size\":" << size_ << ",\"config_version\":\"terminal-hedge-v1\""

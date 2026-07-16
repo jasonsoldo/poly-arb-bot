@@ -34,6 +34,9 @@ def test_cpp_engine_emits_four_independent_strategy_evaluations():
     assert "reversal_pnl" in ENGINE
     assert "strategy::directional_window" in ENGINE
     assert '"directional_not_accepted"' not in ENGINE
+    assert '\\"volatility_per_sqrt_second\\"' in ENGINE
+    assert '\\"model_sample_span_seconds\\"' in ENGINE
+    assert "main_fill_available" in ENGINE
     assert "for (const std::string outcome : {\"Up\", \"Down\"})" in ENGINE
     assert "strategy_audit_" in ENGINE
 

@@ -182,6 +182,11 @@ def test_terminal_reject_inherits_directional_reason_and_keeps_candidate_fields(
     assert combined["estimated_probability"] is not None
     assert combined["main_expected_fill_price"] is not None
     assert combined["seconds_to_close"] == 10
+    assert combined["main_cost"] is None
+    assert combined["expected_portfolio_pnl"] is None
+    assert combined["volatility_per_sqrt_second"] == .001
+    assert combined["model_sample_count"] == 40
+    assert combined["model_sample_span_seconds"] == 120
 
 
 def test_terminal_combination_is_not_evaluated_outside_directional_window():
