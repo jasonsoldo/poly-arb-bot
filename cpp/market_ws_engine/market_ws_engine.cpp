@@ -201,6 +201,8 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"maker_inventory_skew_per_unit", environment_value("MAKER_INVENTORY_SKEW_PER_UNIT", "0.005")},
         {"maker_minimum_pair_edge", environment_value("MAKER_MINIMUM_PAIR_EDGE", "0.01")},
         {"maker_orphan_loss", environment_value("MAKER_ORPHAN_LOSS", "0.02")},
+        {"maker_observation_window_seconds", environment_value(
+            "MAKER_OBSERVATION_WINDOW_SECONDS", "30")},
         {"maker_quote_half_spread", environment_value("MAKER_QUOTE_HALF_SPREAD", "0.02")},
         {"maker_tick_size", environment_value("MAKER_TICK_SIZE", "0.01")},
         {"minimum_liquidity", environment_value("STRATEGY_MIN_LIQUIDITY", "20")},
@@ -337,6 +339,12 @@ struct SessionStrategyCount {
     unsigned long long evaluations = 0;
     unsigned long long accepts = 0;
     unsigned long long rejections = 0;
+};
+
+struct MakerQuoteObservation {
+    double up_bid = 0, down_bid = 0, created_at = 0;
+    bool up_trade_through = false, down_trade_through = false;
+    unsigned long long generation = 0, session = 0;
 };
 
 ReferenceView build_reference_view(const reference_ipc::AssetSnapshot& asset,
@@ -1116,8 +1124,6 @@ private:
         } else if (up.book_age_ms > up.maximum_book_age_ms ||
                    down.book_age_ms > down.maximum_book_age_ms) {
             maker.reason = "clob_book_stale";
-        } else if (maker_both_fill_probability_ <= 0) {
-            maker.reason = "maker_fill_probability_unavailable";
         } else {
             const double inventory_skew = (
                 inventory.up_quantity - inventory.down_quantity
@@ -1161,12 +1167,111 @@ private:
                 << ",\"expected_rebate_per_pair\":" << maker_expected_rebate_per_pair_
                 << ",\"expected_value\":" << maker.expected_value
                 << ",\"fill_model\":\"configured_unverified\""
+                << ",\"quote_geometry_qualified\":"
+                << (maker.quote_geometry_qualified ? "true" : "false")
                 << ",\"decision\":\"" << maker.decision << "\",\"reason\":\""
                 << maker.reason << "\",\"config_version\":\"maker-complete-set-v1\""
                 << ",\"config_hash\":\"" << maker_strategy_config_hash_ << "\""
                 << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
             if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
-            else record_session_strategy("maker_complete_set_arb", maker.decision);
+            else {
+                record_session_strategy("maker_complete_set_arb", maker.decision);
+                if (maker.quote_geometry_qualified) {
+                    remember_maker_quote(market_id, maker, timestamp);
+                }
+            }
+        }
+    }
+
+    void remember_maker_quote(
+            const std::string& market_id, const complete_set::MakerDecision& maker,
+            double timestamp) {
+        auto& observation = maker_quote_observations_[market_id];
+        const bool changed = observation.generation != generation_ ||
+            observation.session != ws_session_id_ ||
+            std::abs(observation.up_bid - maker.up_bid) > 1e-12 ||
+            std::abs(observation.down_bid - maker.down_bid) > 1e-12;
+        if (!changed) return;
+        observation = {
+            maker.up_bid, maker.down_bid, timestamp, false, false,
+            generation_, ws_session_id_,
+        };
+        ++maker_quote_geometry_candidates_;
+    }
+
+    void observe_maker_trade(const ptree& message, const std::string& token) {
+        const double trade_price = message.get<double>("price", 0);
+        const double trade_size = message.get<double>("size", 0);
+        if (trade_price <= 0 || trade_size <= 0) return;
+        ++maker_trade_events_;
+        const double timestamp = now_seconds();
+        for (const auto& item : markets_) {
+            const bool up_token = item.second.up == token;
+            const bool down_token = item.second.down == token;
+            if (!up_token && !down_token) continue;
+            const auto found = maker_quote_observations_.find(item.first);
+            if (found == maker_quote_observations_.end()) return;
+            auto& observation = found->second;
+            if (observation.generation != generation_ ||
+                observation.session != ws_session_id_ ||
+                timestamp - observation.created_at > maker_observation_window_seconds_) {
+                maker_quote_observations_.erase(found);
+                return;
+            }
+            bool touched = false;
+            if (up_token && !observation.up_trade_through &&
+                trade_price <= observation.up_bid + 1e-12) {
+                observation.up_trade_through = true;
+                touched = true;
+            }
+            if (down_token && !observation.down_trade_through &&
+                trade_price <= observation.down_bid + 1e-12) {
+                observation.down_trade_through = true;
+                touched = true;
+            }
+            if (!touched) return;
+            ++maker_single_leg_trade_throughs_;
+            const bool both = observation.up_trade_through &&
+                observation.down_trade_through;
+            if (both) ++maker_both_leg_trade_throughs_;
+            const unsigned long long sequence = ++strategy_evaluation_sequence_;
+            std::ostringstream out;
+            out << std::setprecision(15)
+                << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
+                << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':'
+                << ws_session_id_ << ':' << item.first << ":maker_trade_through:"
+                << sequence << "\",\"event_type\":\""
+                << (both ? "shadow_maker_both_legs_trade_through"
+                         : "shadow_maker_single_leg_trade_through")
+                << "\",\"strategy\":\"maker_complete_set_arb\",\"market_id\":\""
+                << reference_ipc::escaped(item.first) << "\",\"condition_id\":\""
+                << reference_ipc::escaped(item.second.condition_id)
+                << "\",\"asset\":\"" << reference_ipc::escaped(item.second.asset)
+                << "\",\"timeframe\":\""
+                << reference_ipc::escaped(item.second.interval)
+                << "\",\"window\":\"" << reference_ipc::escaped(item.second.window)
+                << "\",\"generation\":" << generation_ << ",\"session\":"
+                << ws_session_id_ << ",\"evaluation_sequence\":" << sequence
+                << ",\"trade_token\":\"" << reference_ipc::escaped(token)
+                << "\",\"trade_price\":" << trade_price << ",\"trade_size\":"
+                << trade_size << ",\"trade_side\":\""
+                << reference_ipc::escaped(message.get<std::string>("side", ""))
+                << "\",\"up_bid_quote\":" << observation.up_bid
+                << ",\"down_bid_quote\":" << observation.down_bid
+                << ",\"up_trade_through\":"
+                << (observation.up_trade_through ? "true" : "false")
+                << ",\"down_trade_through\":"
+                << (observation.down_trade_through ? "true" : "false")
+                << ",\"quote_age_ms\":"
+                << (timestamp - observation.created_at) * 1000
+                << ",\"observation_semantics\":\"price_reached_quote_not_queue_fill\""
+                << ",\"simulated_fill\":false,\"decision\":\"OBSERVED\",\"reason\":\""
+                << (both ? "both_legs_trade_through_observed"
+                         : "single_leg_trade_through_observed")
+                << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
+            if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
+            if (both) maker_quote_observations_.erase(found);
+            return;
         }
     }
 
@@ -1478,6 +1583,8 @@ private:
             }
             if (changed) last_clob_mutation_at_ = std::chrono::steady_clock::now();
             ++price_changes_;
+        } else if (type == "last_trade_price" && books_.count(asset)) {
+            observe_maker_trade(message, asset);
         }
         if (type == "book" || (type == "price_change" && price_changes_ % 100 == 0))
             std::cerr << "WS_DATA type=" << type << " books=" << book_events_ << " changes=" << price_changes_ << "\n";
@@ -1654,6 +1761,13 @@ private:
             << ",\"strategy_audit_queue\":" << strategy_audit_.queued()
             << ",\"strategy_audit_backpressure\":" << strategy_audit_backpressure_
             << ",\"strategy_evaluations\":" << strategy_evaluation_sequence_
+            << ",\"maker_quote_geometry_candidates\":"
+            << maker_quote_geometry_candidates_
+            << ",\"maker_trade_events\":" << maker_trade_events_
+            << ",\"maker_single_leg_trade_throughs\":"
+            << maker_single_leg_trade_throughs_
+            << ",\"maker_both_leg_trade_throughs\":"
+            << maker_both_leg_trade_throughs_
             << ",\"run_id\":\"" << run_id_ << "\""
             << ",\"engine_started_at\":" << engine_started_at_
             << ",\"paired_config_hash\":\"" << paired_config_hash_ << "\""
@@ -1749,6 +1863,7 @@ private:
             }
             std::vector<std::string> added, removed;
             ++generation_;
+            maker_quote_observations_.clear();
             for (auto& book : books_) book.second.generation = generation_;
             for (const auto& token : next_tokens) if (!old_tokens.count(token.first)) {
                 books_[token.first] = Book{};
@@ -1870,6 +1985,8 @@ private:
     double maker_both_fill_probability_ = environment_double(
         "MAKER_BOTH_FILL_PROBABILITY", "0");
     double maker_orphan_loss_ = environment_double("MAKER_ORPHAN_LOSS", "0.02");
+    double maker_observation_window_seconds_ = environment_double(
+        "MAKER_OBSERVATION_WINDOW_SECONDS", "30");
     std::string inventory_state_path_ = environment_value(
         "COMPLETE_SET_INVENTORY_STATE_PATH", "state/complete-set-inventory.json");
     std::string directional_strategy_config_hash_ = strategy_config_hash("late_window_directional_ev");
@@ -1879,12 +1996,16 @@ private:
     std::string paired_config_hash_;
     std::map<std::string, std::pair<std::string, double>> strategy_emission_state_;
     std::map<std::string, SessionStrategyCount> session_strategy_counts_;
+    std::map<std::string, MakerQuoteObservation> maker_quote_observations_;
     double strategy_accept_heartbeat_seconds_ = 5, strategy_reject_heartbeat_seconds_ = 60;
     double last_health_write_ = 0;
     double engine_started_at_ = now_seconds();
     unsigned long long document_version_, generation_, ws_session_id_, full_resync_count_ = 0;
     unsigned long long evaluation_sequence_ = 0, opportunity_sequence_ = 0;
     unsigned long long strategy_evaluation_sequence_ = 0, strategy_audit_backpressure_ = 0;
+    unsigned long long maker_quote_geometry_candidates_ = 0, maker_trade_events_ = 0;
+    unsigned long long maker_single_leg_trade_throughs_ = 0;
+    unsigned long long maker_both_leg_trade_throughs_ = 0;
     static std::atomic<unsigned long long> next_session_id_;
 };
 

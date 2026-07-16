@@ -73,13 +73,14 @@ def test_dashboard_separates_complete_set_arbitrage_strategies():
         assert strategy in source
     for element_id in ("inventoryCard", "makerCard"):
         assert f'id="{element_id}"' in source
-    assert "NO FILLS SIMULATED" in source
+    assert "NO FILLS INFERRED" in source
+    assert "GEOMETRY" in source
 
 
 def test_dashboard_header_uses_unambiguous_complete_set_metrics():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for label in (
-        "PAIRED EVALS", "INVENTORY ACTIONS", "MAKER QUOTES",
+        "PAIRED EVALS", "INVENTORY ACTIONS", "MAKER GEOMETRY",
         "LOCKED COMPLETE", "REAL ORDERS",
     ):
         assert label in source
@@ -88,7 +89,7 @@ def test_dashboard_header_uses_unambiguous_complete_set_metrics():
     assert "session_strategy_counts" in source
     assert "session.strategy_counts?.paired_lock?.evaluations" in source
     assert "session.strategy_counts?.inventory_rebalancing_arb?.accepts" in source
-    assert "session.strategy_counts?.maker_complete_set_arb?.accepts" in source
+    assert "maker_quote_geometry_candidates" in source
     assert "locked_complete" in source
 
 

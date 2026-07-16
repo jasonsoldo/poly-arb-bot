@@ -639,6 +639,10 @@ def test_web_status_exposes_unambiguous_complete_set_counts(tmp_path):
         "paired_config_hash": "paired-current",
         "inventory_config_hash": "inventory-current",
         "maker_config_hash": "maker-current",
+        "maker_quote_geometry_candidates": 7,
+        "maker_trade_events": 11,
+        "maker_single_leg_trade_throughs": 3,
+        "maker_both_leg_trade_throughs": 1,
     }), encoding="utf-8")
 
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
@@ -651,6 +655,10 @@ def test_web_status_exposes_unambiguous_complete_set_counts(tmp_path):
     assert counts["inventory_actions"] == 1
     assert counts["maker_evaluations"] == 1
     assert counts["maker_quote_candidates"] == 1
+    assert counts["maker_quote_geometry_candidates"] == 7
+    assert counts["maker_trade_events"] == 11
+    assert counts["maker_single_leg_trade_throughs"] == 3
+    assert counts["maker_both_leg_trade_throughs"] == 1
     assert counts["complete_set_evaluations"] == 5
     assert counts["locked_complete"] == 2
 

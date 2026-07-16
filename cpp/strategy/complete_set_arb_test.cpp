@@ -136,5 +136,16 @@ int main() {
         assert(result.decision == "REJECT");
         assert(result.reason == "post_only_would_cross");
     }
+    {
+        complete_set::MakerInput row;
+        row.up_probability = .55;
+        row.up_best_ask = .56;
+        row.down_best_ask = .46;
+        const auto result = complete_set::evaluate_maker(row);
+        assert(result.decision == "REJECT");
+        assert(result.quote_geometry_qualified);
+        assert(result.reason == "maker_fill_probability_unavailable");
+        assert(result.locked_edge >= row.minimum_pair_edge);
+    }
     std::cout << "complete-set arbitrage tests passed\n";
 }

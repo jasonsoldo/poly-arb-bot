@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 ENGINE = Path("cpp/market_ws_engine/market_ws_engine.cpp").read_text(encoding="utf-8")
+COMPLETE_SET = Path("cpp/strategy/complete_set_arb.hpp").read_text(encoding="utf-8")
 SCRIPT = Path("scripts/run_shadow_loop.sh").read_text(encoding="utf-8")
 
 
@@ -47,7 +48,9 @@ def test_cpp_engine_evaluates_polymarket_only_complete_set_strategies():
     assert "complete_set::evaluate_maker" in ENGINE
     assert '\\"strategy\\":\\"inventory_rebalancing_arb\\"' in ENGINE
     assert '\\"strategy\\":\\"maker_complete_set_arb\\"' in ENGINE
-    assert "maker_fill_probability_unavailable" in ENGINE
+    assert "maker_fill_probability_unavailable" in COMPLETE_SET
+    assert "observe_maker_trade" in ENGINE
+    assert "price_reached_quote_not_queue_fill" in ENGINE
     assert '\\"realized_locked_profit\\"' in ENGINE
 
 

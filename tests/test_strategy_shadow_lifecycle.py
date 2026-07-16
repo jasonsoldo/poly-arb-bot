@@ -201,6 +201,26 @@ def test_maker_quote_is_observation_only_and_never_counts_as_fill(tmp_path):
     assert lifecycle.data["maker_quotes"]["m1"]["pair_quote_cost"] == .96
 
 
+def test_maker_trade_through_observation_never_opens_position(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "execution.jsonl"
+    )
+    changed = lifecycle.consume({
+        "event_id": "maker-through",
+        "event_type": "shadow_maker_both_legs_trade_through",
+        "strategy": "maker_complete_set_arb",
+        "market_id": "m1",
+        "decision": "OBSERVED",
+        "simulated_fill": False,
+        "up_trade_through": True,
+        "down_trade_through": True,
+    }, {"m1": {"market_id": "m1"}})
+
+    assert changed is False
+    assert lifecycle.data["positions"] == {}
+    assert lifecycle.data["completed"] == []
+
+
 def test_unmatched_complete_set_inventory_is_settled_and_loss_is_recorded(tmp_path):
     log = tmp_path / "events.jsonl"
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)

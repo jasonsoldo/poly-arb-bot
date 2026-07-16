@@ -162,3 +162,14 @@ def test_health_exposes_current_engine_session_strategy_counts():
     assert '\\"run_id\\"' in SOURCE
     assert '\\"engine_started_at\\"' in SOURCE
     assert '\\"session_strategy_counts\\"' in SOURCE
+
+
+def test_maker_shadow_observes_official_trade_through_without_claiming_fill():
+    assert 'type == "last_trade_price"' in SOURCE
+    assert "observe_maker_trade" in SOURCE
+    assert "maker_quote_geometry_candidates" in SOURCE
+    assert "maker_single_leg_trade_throughs" in SOURCE
+    assert "maker_both_leg_trade_throughs" in SOURCE
+    assert "price_reached_quote_not_queue_fill" in SOURCE
+    assert '\\"simulated_fill\\":false' in SOURCE
+    assert "maker_quote_observations_.clear()" in SOURCE

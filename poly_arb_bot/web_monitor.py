@@ -813,6 +813,16 @@ def build_status(data_dir, log_file, state_file):
             "inventory_actions": inventory_actions,
             "maker_evaluations": maker_evaluations,
             "maker_quote_candidates": maker_quote_candidates,
+            "maker_quote_geometry_candidates": int(
+                shadow_health.get("maker_quote_geometry_candidates", 0)
+            ),
+            "maker_trade_events": int(shadow_health.get("maker_trade_events", 0)),
+            "maker_single_leg_trade_throughs": int(
+                shadow_health.get("maker_single_leg_trade_throughs", 0)
+            ),
+            "maker_both_leg_trade_throughs": int(
+                shadow_health.get("maker_both_leg_trade_throughs", 0)
+            ),
             "complete_set_evaluations": complete_set_evaluations,
             "fok_passed": report["fok_passed"],
             "shadow_accepts": max(strategy_accepts, report["accepts"]),

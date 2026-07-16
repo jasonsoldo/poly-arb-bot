@@ -89,7 +89,7 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
     <div class="headstat"><label>SESSION EVALS</label><b id="raw">N/A</b></div>
     <div class="headstat"><label>PAIRED EVALS</label><b id="pairedEvals">N/A</b></div>
     <div class="headstat"><label>INVENTORY ACTIONS</label><b id="inventoryActions">N/A</b></div>
-    <div class="headstat"><label>MAKER QUOTES</label><b id="makerQuotes">N/A</b></div>
+    <div class="headstat"><label>MAKER GEOMETRY</label><b id="makerQuotes">N/A</b></div>
     <div class="headstat"><label>CURRENT LOCKED COMPLETE</label><b id="lockedComplete">N/A</b></div>
     <div class="headstat"><label>REAL ORDERS</label><b id="realOrders">0</b></div>
   </div>
@@ -250,7 +250,7 @@ function strategyCard(id,title,key,d){
   const probability=['late_window_directional_ev','low_price_lottery_ev'].includes(key);
   let detail='COMPLETE-SET MATH';
   if(key==='inventory_rebalancing_arb')detail=`${latest.action||'HOLD'} / RISK ${money(latest.maximum_loss)} / LOCK ${money(latest.projected_locked_profit)}`;
-  if(key==='maker_complete_set_arb')detail=`PAIR ${fmt(latest.pair_quote_cost,3)} / NO FILLS SIMULATED`;
+  if(key==='maker_complete_set_arb')detail=`PAIR ${fmt(latest.pair_quote_cost,3)} / GEOMETRY ${latest.quote_geometry_qualified?'PASS':'BLOCKED'} / NO FILLS INFERRED`;
   if(probability)detail=`PRED ${cal.samples??0} / BRIER ${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)}`;
   $(id).innerHTML=`<label>${title}</label><b class="${latest.decision==='ACCEPT'?'good':'warn'}">${latest.decision||'NO EVALUATION'}</b>
     <div>SESSION EVAL ${session.evaluations??0} / ACCEPT ${session.accepts??0} / REJECT ${session.rejections??0}</div>
@@ -267,7 +267,7 @@ function render(d){
   $('raw').textContent=session.evaluations??'N/A';
   $('pairedEvals').textContent=session.strategy_counts?.paired_lock?.evaluations??'N/A';
   $('inventoryActions').textContent=session.strategy_counts?.inventory_rebalancing_arb?.accepts??'N/A';
-  $('makerQuotes').textContent=session.strategy_counts?.maker_complete_set_arb?.accepts??'N/A';
+  $('makerQuotes').textContent=c.maker_quote_geometry_candidates??'N/A';
   $('lockedComplete').textContent=c.locked_complete??'N/A';
   $('realOrders').textContent=c.executed_orders??0;
   $('simPnl').textContent=money(p.simulated_pnl);
@@ -318,7 +318,7 @@ function render(d){
   $('rejectionCoverage').textContent=`SHOWN ${shownCount} / TOTAL ${totalReject} / OTHER ${totalReject-shownCount}`;
 
   const cr=d.clob_readiness||{},execution=d.shadow_execution||{};
-  const healthRows=[['DISCOVERED',cr.discovered_markets],['PAIRED MARKETS READY',cr.paired_markets_ready],['NOT READY',cr.not_ready],['WAIT UP',cr.waiting_up_snapshot],['WAIT DOWN',cr.waiting_down_snapshot],['SUBSCRIPTION GEN',health.subscription_generation],['WS SESSION',health.ws_session_id],['RESYNCS',health.resyncs],['AUDIT QUEUE',health.strategy_audit_queue],['BACKPRESSURE',health.strategy_audit_backpressure],['EXECUTION STATE',execution.state||'IDLE'],['REAL FILLS',execution.real_fills??0]];
+  const healthRows=[['DISCOVERED',cr.discovered_markets],['PAIRED MARKETS READY',cr.paired_markets_ready],['NOT READY',cr.not_ready],['WAIT UP',cr.waiting_up_snapshot],['WAIT DOWN',cr.waiting_down_snapshot],['SUBSCRIPTION GEN',health.subscription_generation],['WS SESSION',health.ws_session_id],['RESYNCS',health.resyncs],['MAKER GEOMETRY',c.maker_quote_geometry_candidates],['TRADE EVENTS',c.maker_trade_events],['ONE-LEG THROUGH',c.maker_single_leg_trade_throughs],['BOTH-LEGS THROUGH',c.maker_both_leg_trade_throughs],['AUDIT QUEUE',health.strategy_audit_queue],['BACKPRESSURE',health.strategy_audit_backpressure],['EXECUTION STATE',execution.state||'IDLE'],['REAL FILLS',execution.real_fills??0]];
   $('health').innerHTML=healthRows.map(x=>`<div class="health-row"><span>${x[0]}</span><b>${x[1]??'N/A'}</b></div>`).join('');
 
   const cohorts=life.inventory_cohorts||{},legacy=cohorts.legacy||{},current=cohorts.current||{},inventory=life.complete_set_inventory||[];

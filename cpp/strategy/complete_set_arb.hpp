@@ -200,6 +200,7 @@ struct MakerInput {
 struct MakerDecision {
     std::string decision = "REJECT";
     std::string reason = "maker_pair_edge_below_threshold";
+    bool quote_geometry_qualified = false;
     double up_bid = 0;
     double down_bid = 0;
     double pair_cost = 0;
@@ -232,6 +233,11 @@ inline MakerDecision evaluate_maker(const MakerInput& row) {
         (1 - row.both_fill_probability) * row.orphan_loss;
     if (result.locked_edge < row.minimum_pair_edge)
         return result;
+    result.quote_geometry_qualified = true;
+    if (row.both_fill_probability <= 0) {
+        result.reason = "maker_fill_probability_unavailable";
+        return result;
+    }
     if (result.expected_value <= 0) {
         result.reason = "maker_expected_value_below_threshold";
         return result;
