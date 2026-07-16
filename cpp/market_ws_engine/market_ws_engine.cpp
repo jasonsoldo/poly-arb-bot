@@ -333,6 +333,12 @@ struct ReferenceView {
     double maximum_reference_age_ms = 3000;
 };
 
+struct SessionStrategyCount {
+    unsigned long long evaluations = 0;
+    unsigned long long accepts = 0;
+    unsigned long long rejections = 0;
+};
+
 ReferenceView build_reference_view(const reference_ipc::AssetSnapshot& asset,
                                    const std::string& settlement_source,
                                    double transport_age_ms, const strategy::Config& config) {
@@ -544,6 +550,13 @@ public:
         load_complete_set_inventory();
         strategy_accept_heartbeat_seconds_ = environment_double("STRATEGY_ACCEPT_AUDIT_HEARTBEAT_SECONDS", "5");
         strategy_reject_heartbeat_seconds_ = environment_double("STRATEGY_REJECT_AUDIT_HEARTBEAT_SECONDS", "60");
+        for (const std::string strategy : {
+                 "late_window_directional_ev", "low_price_lottery_ev",
+                 "paired_lock", "inventory_rebalancing_arb",
+                 "maker_complete_set_arb",
+             }) {
+            session_strategy_counts_[strategy];
+        }
         for (auto& item : books_) item.second.generation = generation_;
     }
 
@@ -1083,6 +1096,7 @@ private:
                 << ",\"config_hash\":\"" << inventory_strategy_config_hash_ << "\""
                 << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
             if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
+            else record_session_strategy("inventory_rebalancing_arb", rebalance.decision);
         }
 
         complete_set::MakerDecision maker;
@@ -1152,6 +1166,7 @@ private:
                 << ",\"config_hash\":\"" << maker_strategy_config_hash_ << "\""
                 << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
             if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
+            else record_session_strategy("maker_complete_set_arb", maker.decision);
         }
     }
 
@@ -1298,6 +1313,7 @@ private:
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
             << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
         if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
+        else record_session_strategy(decision.strategy, decision.decision);
     }
 
     void load_complete_set_inventory() {
@@ -1551,6 +1567,7 @@ private:
                                    << ",\"config_version\":\"paired-lock-shadow-v2\",\"config_hash\":\""
                                    << paired_config_hash_ << "\",\"decision\":\""
                                    << (good ? "ACCEPT" : "REJECT") << "\"}\n" << std::flush;
+                record_session_strategy("paired_lock", good ? "ACCEPT" : "REJECT");
                 item.second.last_reason = reason;
                 item.second.last_audit = timestamp;
             }
@@ -1598,6 +1615,14 @@ private:
         if (now_seconds() - last_health_write_ >= 1) write_health(true);
     }
 
+    void record_session_strategy(
+            const std::string& strategy_name, const std::string& decision) {
+        auto& count = session_strategy_counts_[strategy_name];
+        ++count.evaluations;
+        if (decision == "ACCEPT") ++count.accepts;
+        else ++count.rejections;
+    }
+
     void write_health(bool connected) {
         size_t ready = 0, waiting_up = 0, waiting_down = 0;
         for (const auto& item : markets_) {
@@ -1629,10 +1654,21 @@ private:
             << ",\"strategy_audit_queue\":" << strategy_audit_.queued()
             << ",\"strategy_audit_backpressure\":" << strategy_audit_backpressure_
             << ",\"strategy_evaluations\":" << strategy_evaluation_sequence_
+            << ",\"run_id\":\"" << run_id_ << "\""
+            << ",\"engine_started_at\":" << engine_started_at_
             << ",\"paired_config_hash\":\"" << paired_config_hash_ << "\""
             << ",\"inventory_config_hash\":\"" << inventory_strategy_config_hash_ << "\""
             << ",\"maker_config_hash\":\"" << maker_strategy_config_hash_ << "\""
-            << ",\"reference_receive_age_ms\":";
+            << ",\"session_strategy_counts\":{";
+        bool first_strategy = true;
+        for (const auto& item : session_strategy_counts_) {
+            if (!first_strategy) out << ',';
+            first_strategy = false;
+            out << '"' << item.first << "\":{\"evaluations\":"
+                << item.second.evaluations << ",\"accepts\":" << item.second.accepts
+                << ",\"rejections\":" << item.second.rejections << '}';
+        }
+        out << "},\"reference_receive_age_ms\":";
         if (reference_receive_age_ms >= 0) out << reference_receive_age_ms;
         else out << "null";
         out << ",\"reference_ipc_receive_age_ms_latest\":";
@@ -1842,8 +1878,10 @@ private:
     std::string maker_strategy_config_hash_ = strategy_config_hash("maker_complete_set_arb");
     std::string paired_config_hash_;
     std::map<std::string, std::pair<std::string, double>> strategy_emission_state_;
+    std::map<std::string, SessionStrategyCount> session_strategy_counts_;
     double strategy_accept_heartbeat_seconds_ = 5, strategy_reject_heartbeat_seconds_ = 60;
     double last_health_write_ = 0;
+    double engine_started_at_ = now_seconds();
     unsigned long long document_version_, generation_, ws_session_id_, full_resync_count_ = 0;
     unsigned long long evaluation_sequence_ = 0, opportunity_sequence_ = 0;
     unsigned long long strategy_evaluation_sequence_ = 0, strategy_audit_backpressure_ = 0;

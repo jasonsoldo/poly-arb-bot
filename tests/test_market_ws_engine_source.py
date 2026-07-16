@@ -154,3 +154,11 @@ def test_health_exposes_bounded_local_pipeline_percentiles():
     assert '\\"reference_ipc_receive_age_samples\\"' in SOURCE
     assert '\\"clob_to_strategy_evaluation_samples\\"' in SOURCE
     assert '\\"reference_coalesced_frames\\"' in SOURCE
+
+
+def test_health_exposes_current_engine_session_strategy_counts():
+    assert "SessionStrategyCount" in SOURCE
+    assert "record_session_strategy" in SOURCE
+    assert '\\"run_id\\"' in SOURCE
+    assert '\\"engine_started_at\\"' in SOURCE
+    assert '\\"session_strategy_counts\\"' in SOURCE

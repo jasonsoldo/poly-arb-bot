@@ -1,31 +1,344 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>POLY//HORIZON</title>
 <style>
-:root{--bg:#06100d;--panel:#0a1814;--line:#28503f;--text:#dcf6e4;--muted:#78a18f;--green:#91ffad;--cyan:#62efd0;--yellow:#ffd36b;--pink:#ff79bd}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:11px/1.35 Consolas,monospace}header{height:60px;background:#020806;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 16px;gap:18px}.logo{background:var(--green);color:#020806;font:24px Georgia;padding:5px 11px;border-radius:4px}.brand{font-size:15px;color:var(--green);font-weight:bold}.sub,label{display:block;color:var(--muted);font-size:8px}.headstats{display:flex;gap:25px}.headstats b{font-size:14px}.engine{margin-left:auto;text-align:right;color:var(--green)}.ticker{padding:7px 16px;border-bottom:1px solid var(--line);color:var(--muted)}main{padding:10px;max-width:1900px;margin:auto}.grid{display:grid;grid-template-columns:32% 46% 22%;gap:8px}.stack{display:grid;gap:8px;align-content:start}.panel{border:1px solid var(--line);background:var(--panel);padding:12px;min-width:0}.panel h2{margin:0 0 10px;color:var(--cyan);font-size:9px;letter-spacing:.12em}.hero{font-size:38px;color:var(--green);margin:13px 0}.metrics{display:grid;grid-template-columns:repeat(4,1fr);border-block:1px solid var(--line)}.metric{padding:9px;border-right:1px solid var(--line)}.metric:last-child{border:0}.metric b{display:block;font-size:17px;margin-top:4px}.na{color:var(--muted)}.warn{color:var(--yellow)}.good{color:var(--green)}.chart{height:190px;margin-top:12px;border-bottom:1px solid var(--line);position:relative;background:repeating-linear-gradient(0deg,transparent 0 37px,#143127 38px)}.chart svg{width:100%;height:100%}.empty{height:100%;display:grid;place-items:center;color:var(--muted)}.row{display:grid;grid-template-columns:1fr repeat(4,70px);gap:7px;padding:7px 0;border-bottom:1px solid #173229}.headrow{color:var(--muted);font-size:8px}.strategy{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:12px;align-items:end}.strategy strong{font-size:22px;color:var(--green)}.strategy-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}.strategy-card{border:1px solid var(--line);padding:8px;min-height:78px}.strategy-card b{color:var(--green)}.flow{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}.step{border:1px solid var(--line);padding:9px 5px;color:var(--muted)}.step.on{border-color:var(--green);color:var(--text)}.step.block{border-color:var(--yellow)}.step i{display:block;color:var(--cyan);font-style:normal}.ledger{max-height:260px;overflow:auto}.trade{display:grid;grid-template-columns:1fr 90px 80px 80px;gap:8px;padding:7px 0;border-bottom:1px solid #173229}.matrix{width:100%;border-spacing:2px}.matrix td,.matrix th{padding:6px;text-align:center}.matrix td{border:1px solid var(--line)}.matrix td:first-child{border:0;text-align:left}.hot{background:#1f533f}.bar{display:grid;grid-template-columns:100px 1fr 55px;gap:7px;align-items:center;padding:5px 0}.track{height:5px;background:#173229}.fill{height:100%;background:var(--cyan)}.refs{display:grid;grid-template-columns:42px repeat(4,minmax(68px,1fr));gap:3px;overflow:auto}.refs div{padding:5px;border-bottom:1px solid #173229}.scoreparts{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:8px}.scoreparts div{border:1px solid var(--line);padding:6px;text-align:center}footer{margin-top:9px;border-top:1px solid var(--line);padding:8px;color:var(--muted);display:flex;justify-content:space-between}@media(max-width:1150px){.grid{grid-template-columns:1fr}.headstats{display:none}}@media(max-width:700px){.metrics{grid-template-columns:repeat(2,1fr)}.strategy,.strategy-grid{grid-template-columns:1fr}.flow{grid-template-columns:repeat(2,1fr)}}
-.matrix .pnl{min-width:78px;white-space:nowrap}
-</style></head><body>
-<header><div class="logo">C</div><div class="brand">POLY//HORIZON<span class="sub">7 ASSETS / 4 WINDOWS / CLOB SHADOW</span></div><div class="headstats"><div><label>MARKETS</label><b id="markets">N/A</b></div><div><label>ALL STRATEGY EVALS</label><b id="raw">N/A</b></div><div><label>PAIRED EVALS</label><b id="pairedEvals">N/A</b></div><div><label>FOK PASSED</label><b id="fok">N/A</b></div><div><label>INVENTORY ACTIONS</label><b id="inventoryActions">N/A</b></div><div><label>MAKER QUOTES</label><b id="makerQuotes">N/A</b></div><div><label>LOCKED COMPLETE</label><b id="lockedComplete">N/A</b></div><div><label>REAL ORDERS</label><b id="realOrders">0</b></div></div><div class="engine"><label>ENGINE STATUS</label><b id="status">OFFLINE</b></div></header>
-<div class="ticker">DIRECTIONAL EV / LOW-PRICE LOTTERY / INSTANT COMPLETE SET / INVENTORY REBALANCE / MAKER COMPLETE SET &nbsp; <b>5M / 15M / 1H / 4H</b> &nbsp; MODE <b>DRY RUN</b></div>
-<main><div class="grid">
-<section class="stack"><div class="panel"><h2>SHADOW PERFORMANCE / REAL AUDIT</h2><label>SIMULATED COMPLETED PNL</label><div class="hero" id="simPnl">N/A</div><div class="metrics"><div class="metric"><label>WIN RATE</label><b id="winRate">N/A</b></div><div class="metric"><label>SHARPE</label><b id="sharpe">N/A</b><small id="sharpeSamples" class="sub">0 COMPLETED TRADES</small></div><div class="metric"><label>REAL PNL</label><b>$0.00</b></div><div class="metric"><label>REAL ORDERS</label><b>0</b></div></div><div class="chart" id="equityChart"><div class="empty">NO COMPLETED SIMULATIONS</div></div></div><div class="panel"><h2>TOP REJECTION REASONS</h2><div id="rejectionReasons"></div><div class="sub" id="rejectionCoverage"></div></div></section>
-<section class="stack"><div class="panel"><h2>INDEPENDENT STRATEGY STATUS</h2><div class="strategy-grid"><div class="strategy-card" id="directionalCard"></div><div class="strategy-card" id="lotteryCard"></div><div class="strategy-card" id="pairedCard"></div><div class="strategy-card" id="inventoryCard"></div><div class="strategy-card" id="makerCard"></div></div></div><div class="panel"><h2>TERMINAL DIRECTIONAL + REVERSAL HEDGE / SHADOW</h2><div class="strategy"><div><label>MARKET / LAST COMBINED EVALUATION</label><b id="hedgeMarket">N/A</b></div><div><label>MAIN LEG</label><strong id="hedgeMain">N/A</strong></div><div><label>PROTECTION LEG</label><strong id="hedgeProtection">N/A</strong></div><div><label>EXPECTED PNL</label><strong id="hedgeExpected">N/A</strong></div><div><label>SECONDS LEFT</label><strong id="hedgeSeconds">N/A</strong></div></div><div class="row headrow"><span>TOTAL COST / MAIN SIZE / HEDGE SIZE</span><span>MAIN-WIN PNL</span><span>REVERSAL PNL</span><span>WORST CASE</span><span>DECISION</span></div><div class="row" id="hedgeAudit"></div><span class="sub" id="hedgeReason">NO COMBINED EVALUATION</span></div><div class="panel"><h2>STRATEGY CONSOLE / PAIRED LOCK</h2><div class="strategy"><div><label>CRYPTO PAIRED LOCK / SHADOW</label><b id="currentMarket">N/A</b></div><div><label>UP VWAP</label><strong id="upVwap">N/A</strong></div><div><label>DOWN VWAP</label><strong id="downVwap">N/A</strong></div><div><label>EXPECTED EXEC VALUE</label><strong id="eev">N/A</strong></div><div><label>STRATEGY SCORE</label><strong id="strategyScore">0</strong></div></div><div class="scoreparts" id="scoreBreakdown"></div><div class="row headrow"><span>GROSS COST / FEES / BUFFER</span><span>NET COST</span><span>GUARANTEED PAYOUT</span><span>LOCKED PROFIT</span><span>DECISION</span></div><div class="row" id="pairAudit"></div></div><div class="panel flow" id="pipelineSteps"></div><div class="panel"><h2>SIMULATED EQUITY / PNL METER</h2><div id="pnlMeter"></div></div><div class="panel"><h2>TRADE AND EVALUATION LEDGER</h2><div class="ledger" id="tradeLedger"></div></div></section>
-<aside class="stack"><div class="panel"><h2>MARKETS / ASSET x TIMEFRAME</h2><table class="matrix" id="marketMatrix"></table><span class="sub">ZERO MEANS NO OFFICIAL CURRENT SERIES FOUND</span></div><div class="panel"><h2>LIVE REFERENCE PRICES</h2><span class="sub">REFERENCE ONLY FOR PAIRED LOCK / REQUIRED QUORUM FOR DIRECTIONAL</span><div class="refs"><div>ASSET</div><div>BINANCE</div><div>COINBASE</div><div>KRAKEN</div><div>CHAINLINK</div></div><div class="refs" id="referencePrices"></div></div><div class="panel"><h2>MESSAGE AGE / OBSERVED ONLY</h2><div id="latencyRankings"></div></div><div class="panel"><h2>CLOB / EXECUTION HEALTH</h2><span class="sub">CLOB READY = PAIRED MARKETS READY / NOT READY / SUBSCRIPTION GEN / EXECUTION STATE</span><div id="health"></div></div></aside>
-</div><footer><span id="footerHealth">SHADOW / NO LIVE ORDERS</span><span>REFRESH 2S / <span id="sync">N/A</span></span></footer></main>
+:root{
+  --bg:#040b09;--panel:#081510;--panel2:#0b1d16;--line:#275141;
+  --line2:#17372b;--text:#dff7e8;--muted:#79a491;--green:#91ffad;
+  --cyan:#62efd0;--yellow:#ffd36b;--pink:#ff79bd;--red:#ff7d83;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;overflow-x:hidden;background:var(--bg);color:var(--text);font:11px/1.35 Consolas,monospace}
+body{border-top:5px solid #2f3431}
+header{height:58px;background:#020806;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 14px;gap:14px}
+.logo{width:36px;height:36px;display:grid;place-items:center;background:var(--green);color:#020806;font:25px Georgia;border-radius:4px}
+.brand{min-width:170px;color:var(--green);font-size:14px;font-weight:700}
+.sub,label{display:block;color:var(--muted);font-size:8px;font-weight:400}
+.headstats{display:flex;align-self:stretch}
+.headstat{min-width:92px;padding:11px 13px;border-left:1px solid var(--line2)}
+.headstat b{display:block;margin-top:4px;font-size:14px;color:var(--text)}
+.engine{margin-left:auto;text-align:right;color:var(--green)}
+.ticker{height:25px;display:flex;align-items:center;gap:30px;padding:0 14px;border-bottom:1px solid var(--line);color:var(--muted);white-space:nowrap;overflow:hidden}
+.ticker b{color:var(--green)}
+main{padding:8px;max-width:1920px;margin:auto}
+.dashboard{display:grid;grid-template-columns:35% 43% 22%;grid-template-areas:
+  "profile command matrix"
+  "profile strategies matrix"
+  "equity replay references"
+  "rejections replay health"
+  "legacy pnl latency";gap:7px}
+.panel{border:1px solid var(--line);background:var(--panel);padding:11px;min-width:0;overflow:hidden}
+.panel h2{margin:0 0 9px;color:var(--cyan);font-size:9px;letter-spacing:.11em}
+.profile{grid-area:profile}.command{grid-area:command}.matrix-panel{grid-area:matrix}
+.strategies{grid-area:strategies}.equity-panel{grid-area:equity}.replay{grid-area:replay}
+.references{grid-area:references}.rejections{grid-area:rejections}.health-panel{grid-area:health}
+.legacy{grid-area:legacy}.pnl-panel{grid-area:pnl}.latency-panel{grid-area:latency}
+.profile-head{display:flex;justify-content:space-between;align-items:start;border-bottom:1px solid var(--line);padding-bottom:8px}
+.tag{border:1px solid var(--green);padding:3px 7px;color:var(--green);font-size:8px}
+.hero{font-size:42px;color:var(--green);margin:18px 0 1px}
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);margin-top:14px;border-block:1px solid var(--line)}
+.metric{padding:9px;border-right:1px solid var(--line)}
+.metric:last-child{border:0}.metric b{display:block;font-size:17px;margin-top:4px}
+.session-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:12px}
+.session-cell{border:1px solid var(--line2);padding:7px;min-height:47px}.session-cell b{display:block;margin-top:4px}
+.command-grid{display:grid;grid-template-columns:1.3fr repeat(5,1fr);gap:12px;align-items:end}
+.command-grid strong{display:block;color:var(--green);font-size:24px;margin-top:4px}
+.pair-title{font-size:15px;font-weight:700;color:var(--text);margin:20px 0 4px}
+.cost-chain{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:5px;margin-top:16px;border-top:1px solid var(--line);padding-top:10px}
+.cost-chain div{min-width:0}.cost-chain b{display:block;margin-top:5px;font-size:13px}
+.checks{display:grid;grid-template-columns:repeat(5,1fr);gap:3px;margin-top:10px}
+.check{border:1px solid var(--line);padding:6px;text-align:center}.check.good{border-color:var(--green)}.check.warn{border-color:var(--yellow)}
+.strategy-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+.strategy-card{border:1px solid var(--line);padding:7px;min-height:107px;background:var(--panel2)}
+.strategy-card>label{color:var(--cyan)}.strategy-card>b{display:block;margin:5px 0;color:var(--green)}
+.strategy-card .history{margin-top:5px;padding-top:5px;border-top:1px solid var(--line2)}
+.flow{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-top:7px}
+.step{border:1px solid var(--line);padding:7px 5px;color:var(--muted);min-height:44px}
+.step.on{border-color:var(--green);color:var(--text)}.step.block{border-color:var(--yellow)}
+.step i{display:block;color:var(--cyan);font-style:normal}
+.chart{height:205px;border-bottom:1px solid var(--line);background:repeating-linear-gradient(0deg,transparent 0 40px,#143127 41px)}
+.chart svg{width:100%;height:100%}.empty{height:100%;display:grid;place-items:center;color:var(--muted)}
+.bar{display:grid;grid-template-columns:145px 1fr 62px;gap:7px;align-items:center;padding:4px 0}
+.track{height:5px;background:#173229}.fill{height:100%;background:var(--cyan)}
+.ledger{max-height:292px;overflow:auto}
+.trade{display:grid;grid-template-columns:1fr 75px 65px 76px;gap:7px;padding:6px 0;border-bottom:1px solid var(--line2)}
+.matrix{width:100%;border-spacing:2px}.matrix td,.matrix th{padding:6px;text-align:center}.matrix td{border:1px solid var(--line)}
+.matrix td:first-child{border:0;text-align:left}.hot{background:#1f533f}.pnl{min-width:68px;white-space:nowrap}
+.refs{display:grid;grid-template-columns:38px repeat(4,minmax(60px,1fr));gap:2px;overflow:auto}
+.refs div{padding:5px;border-bottom:1px solid var(--line2)}
+.health-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}.health-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--line2)}
+.inventory-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}.inventory-summary div{border:1px solid var(--line);padding:7px}
+.inventory-list{max-height:120px;overflow:auto;margin-top:8px}.inventory-row{display:grid;grid-template-columns:42px 34px 1fr 70px 66px;gap:7px;padding:5px 0;border-bottom:1px solid var(--line2)}
+.latency-row{display:grid;grid-template-columns:82px 1fr 50px;gap:7px;align-items:center;padding:5px 0}
+.pnl-meter{display:grid;grid-template-columns:90px 1fr 70px;gap:8px;align-items:center;padding:7px 0}
+.good{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}.na{color:var(--muted)}
+footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--muted);display:flex;justify-content:space-between}
+@media(max-width:1300px){.dashboard{grid-template-columns:34% 66%;grid-template-areas:"profile command" "profile strategies" "equity matrix" "rejections references" "replay health" "legacy legacy" "pnl latency"}.headstat{min-width:78px;padding-inline:8px}}
+@media(max-width:850px){header{padding-inline:10px}.engine{font-size:9px}.dashboard{display:block}.panel{margin-bottom:7px}.headstats{display:none}.metrics,.session-strip,.inventory-summary{grid-template-columns:1fr 1fr}.strategy-grid{grid-template-columns:1fr}.command-grid{grid-template-columns:1fr 1fr}.cost-chain{grid-template-columns:1fr 1fr}.flow{grid-template-columns:repeat(2,1fr)}.refs{grid-template-columns:38px repeat(4,86px)}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">C</div>
+  <div class="brand">POLY//HORIZON<span class="sub">CRYPTO ARBITRAGE / CLOB SHADOW / DRY RUN</span></div>
+  <div class="headstats">
+    <div class="headstat"><label>MARKETS</label><b id="markets">N/A</b></div>
+    <div class="headstat"><label>SESSION EVALS</label><b id="raw">N/A</b></div>
+    <div class="headstat"><label>PAIRED EVALS</label><b id="pairedEvals">N/A</b></div>
+    <div class="headstat"><label>INVENTORY ACTIONS</label><b id="inventoryActions">N/A</b></div>
+    <div class="headstat"><label>MAKER QUOTES</label><b id="makerQuotes">N/A</b></div>
+    <div class="headstat"><label>CURRENT LOCKED COMPLETE</label><b id="lockedComplete">N/A</b></div>
+    <div class="headstat"><label>REAL ORDERS</label><b id="realOrders">0</b></div>
+  </div>
+  <div class="engine"><label>ENGINE STATUS</label><b id="status">OFFLINE</b></div>
+</header>
+<div class="ticker">
+  <span>INSTANT COMPLETE SET / INVENTORY REBALANCE / MAKER COMPLETE SET</span>
+  <span>PROBABILITY RESEARCH: DIRECTIONAL EV / LOW-PRICE LOTTERY</span>
+  <span>WINDOWS <b>5M / 15M / 1H / 4H</b></span>
+</div>
+<main>
+<div class="dashboard">
+  <section class="panel profile">
+    <div class="profile-head"><div><h2>@POLY//OPERATOR</h2><span class="sub">CURRENT CONFIG PERFORMANCE / REAL AUDIT</span></div><span class="tag">SHADOW MODE</span></div>
+    <label style="margin-top:14px">SIMULATED COMPLETED PNL</label>
+    <div class="hero" id="simPnl">N/A</div>
+    <span class="sub">CURRENT CONFIG ONLY / HISTORICAL CONFIGS EXCLUDED</span>
+    <div class="metrics">
+      <div class="metric"><label>WIN RATE</label><b id="winRate">N/A</b></div>
+      <div class="metric"><label>SHARPE</label><b id="sharpe">N/A</b><small id="sharpeSamples" class="sub">0 COMPLETED TRADES</small></div>
+      <div class="metric"><label>REAL PNL</label><b>$0.00</b></div>
+      <div class="metric"><label>REAL ORDERS</label><b>0</b></div>
+    </div>
+    <div class="session-strip">
+      <div class="session-cell"><label>RUN ID</label><b id="sessionRun">N/A</b></div>
+      <div class="session-cell"><label>SESSION AGE</label><b id="sessionAge">N/A</b></div>
+      <div class="session-cell"><label>ANALYTICS</label><b id="analyticsState">N/A</b></div>
+      <div class="session-cell"><label>HIST EXCLUDED</label><b id="historicalExcluded">N/A</b></div>
+    </div>
+  </section>
+
+  <section class="panel command">
+    <h2>STRATEGY CONSOLE / INSTANT COMPLETE SET</h2>
+    <div class="command-grid">
+      <div><div class="pair-title">CRYPTO PAIRED LOCK / SHADOW</div><span id="currentMarket" class="sub">N/A</span></div>
+      <div><label>UP VWAP</label><strong id="upVwap">N/A</strong></div>
+      <div><label>DOWN VWAP</label><strong id="downVwap">N/A</strong></div>
+      <div><label>EXPECTED EXEC VALUE</label><strong id="eev">N/A</strong></div>
+      <div><label>LOCKED PROFIT</label><strong id="lockedProfit">N/A</strong></div>
+      <div><label>STRATEGY SCORE</label><strong id="strategyScore">N/A</strong></div>
+    </div>
+    <div class="checks" id="scoreBreakdown"></div>
+    <div class="cost-chain" id="pairAudit"></div>
+  </section>
+
+  <section class="panel matrix-panel">
+    <h2>ROBUSTNESS MATRIX / ASSET x TIMEFRAME</h2>
+    <table class="matrix" id="marketMatrix"></table>
+    <span class="sub">COUNT = OFFICIAL ACTIVE MARKETS / DIR REF = REFERENCE READY</span>
+  </section>
+
+  <section class="panel strategies">
+    <h2>INDEPENDENT STRATEGY STATUS / CURRENT SESSION + HISTORY</h2>
+    <div class="strategy-grid">
+      <div class="strategy-card" id="directionalCard"></div>
+      <div class="strategy-card" id="lotteryCard"></div>
+      <div class="strategy-card" id="pairedCard"></div>
+      <div class="strategy-card" id="inventoryCard"></div>
+      <div class="strategy-card" id="makerCard"></div>
+    </div>
+    <div class="flow" id="pipelineSteps"></div>
+  </section>
+
+  <section class="panel equity-panel">
+    <h2>SIMULATED EQUITY / CURRENT CONFIG</h2>
+    <div class="chart" id="equityChart"><div class="empty">NO COMPLETED SIMULATIONS / CURRENT CONFIG</div></div>
+  </section>
+
+  <section class="panel replay">
+    <h2>POLYMARKET REPLAY / SHADOW LEDGER</h2>
+    <div class="ledger" id="tradeLedger"></div>
+    <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:9px">
+      <h2>TERMINAL DIRECTIONAL + REVERSAL HEDGE / RESEARCH</h2>
+      <div class="command-grid">
+        <div><label>MARKET</label><b id="hedgeMarket">N/A</b></div>
+        <div><label>MAIN</label><b id="hedgeMain">N/A</b></div>
+        <div><label>PROTECTION</label><b id="hedgeProtection">N/A</b></div>
+        <div><label>EXPECTED PNL</label><b id="hedgeExpected">N/A</b></div>
+        <div><label>SECONDS</label><b id="hedgeSeconds">N/A</b></div>
+      </div>
+      <div id="hedgeAudit" class="sub" style="margin-top:7px"></div>
+      <div id="hedgeReason" class="sub"></div>
+    </div>
+  </section>
+
+  <section class="panel references">
+    <h2>LIVE REFERENCE PRICES</h2>
+    <span class="sub">REFERENCE ONLY FOR COMPLETE SET / REQUIRED QUORUM FOR DIRECTIONAL</span>
+    <div class="refs"><div>ASSET</div><div>BINANCE</div><div>COINBASE</div><div>KRAKEN</div><div>CHAINLINK</div></div>
+    <div class="refs" id="referencePrices"></div>
+  </section>
+
+  <section class="panel rejections">
+    <h2>PAIRED LOCK REJECTION DISTRIBUTION</h2>
+    <div id="rejectionReasons"></div>
+    <div class="sub" id="rejectionCoverage"></div>
+  </section>
+
+  <section class="panel health-panel">
+    <h2>CLOB READY / EXECUTION HEALTH</h2>
+    <div class="health-grid" id="health"></div>
+  </section>
+
+  <section class="panel legacy">
+    <h2>LEGACY INVENTORY / TAIL-RISK CONTAINMENT</h2>
+    <div class="inventory-summary">
+      <div><label>LEGACY POSITIONS</label><b id="legacyPositions">0</b></div>
+      <div><label>LEGACY COST / MAX LOSS</label><b id="legacyCost">N/A</b></div>
+      <div><label>CURRENT POSITIONS / COST</label><b id="currentInventory">N/A</b></div>
+      <div><label>NEXT CLOSE</label><b id="legacyNextClose">N/A</b></div>
+    </div>
+    <div class="inventory-list" id="inventoryRows"></div>
+  </section>
+
+  <section class="panel pnl-panel">
+    <h2>PNL METER / CURRENT CONFIG</h2>
+    <div id="pnlMeter"></div>
+  </section>
+
+  <section class="panel latency-panel">
+    <h2>MESSAGE AGE + ENGINE PROCESSING</h2>
+    <div id="latencyRankings"></div>
+  </section>
+</div>
+<footer><span id="footerHealth">SHADOW / NO LIVE ORDERS</span><span>REFRESH 2S / <span id="sync">N/A</span></span></footer>
+</main>
 <script>
-const $=id=>document.getElementById(id),fmt=(v,n=2)=>v==null?'N/A':Number(v).toFixed(n),money=v=>v==null?'N/A':'$'+Number(v).toFixed(2),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function equity(points){if(!points?.length)return '<div class="empty">NO COMPLETED SIMULATIONS</div>';const w=600,h=180,min=Math.min(...points.map(x=>x.equity)),max=Math.max(...points.map(x=>x.equity)),span=max-min||1,p=points.map((x,i)=>`${i/(points.length-1||1)*w},${h-(x.equity-min)/span*(h-20)-10}`).join(' ');return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="#91ffad" stroke-width="2" points="${p}"/></svg>`}
-function source(v,key,staleKey){const value=v[key],raw=v[key+'_status']||(v[staleKey]?'STALE':'NOT_RECEIVED'),status=raw==='NOT_RECEIVED'?'NOT RECEIVED':raw;return value==null?`<span class="${status==='STALE'||status==='DISCONNECTED'?'warn':'na'}">${status}</span>`:`${fmt(value,2)} <small class="sub">${fmt(v[key+'_source_age_ms'],0)}ms / ${status}</small>`}
-function sourceState(v,key){const s=v.sources?.[key];if(!s)return source(v,key,key+'_stale');const status=(s.status||'NOT_RECEIVED').replace('_',' ');return s.price==null?`<span class="${status==='STALE'||status==='DISCONNECTED'?'warn':'na'}">${status}</span>`:`${fmt(s.price,2)} <small class="sub">${fmt(s.message_age_ms,0)}ms / ${status}</small>`}
-function assetPnlCell(item){if(!item)return '<td class="pnl na" title="NO COMPLETED SHADOW TRADE">N/A</td>';const cls=Number(item.pnl)>0?'good':Number(item.pnl)<0?'warn':'',when=new Date(Number(item.ts)*1000).toLocaleString(),tip=`${item.strategy||'N/A'} / ${item.timeframe||'N/A'} / ${when} / ${item.market_id||'N/A'}`;return `<td class="pnl ${cls}" title="${esc(tip)}">${money(item.pnl)}</td>`}
-function render(d){const c=d.counts||{},p=d.performance||{},m=d.market_matrix||{},assets=['BTC','ETH','SOL','XRP','BNB','DOGE','HYPE'],frames=['5m','15m','1h','4h'],rows=d.shadow_markets||[],latest=rows[0],refs=d.reference_prices?d.reference_prices.assets||{}:{},analyticsRefreshing=Boolean(d.analytics_refreshing),analyticsValue=v=>analyticsRefreshing?'N/A':v??'N/A';
-$('status').textContent=(d.system_status||'BLOCKED')+' / SHADOW';$('sync').textContent=new Date((d.ts||0)*1000).toLocaleTimeString();$('markets').textContent=assets.reduce((n,a)=>n+frames.reduce((q,f)=>q+Number(m[a]?.[f]?.count||0),0),0);$('raw').textContent=analyticsValue(c.total_strategy_evaluations);$('pairedEvals').textContent=analyticsValue(c.paired_evaluations);$('fok').textContent=c.fok_passed??'N/A';$('inventoryActions').textContent=analyticsValue(c.inventory_actions);$('makerQuotes').textContent=analyticsValue(c.maker_quote_candidates);$('lockedComplete').textContent=c.locked_complete??'N/A';$('realOrders').textContent=c.executed_orders??0;$('simPnl').textContent=money(p.simulated_pnl);$('winRate').textContent=p.win_rate==null?'N/A':fmt(p.win_rate*100,1)+'%';$('sharpe').textContent=fmt(p.sharpe,2);$('sharpeSamples').textContent=(p.completed??0)+' COMPLETED TRADES';$('equityChart').innerHTML=equity(d.equity_curve);
-const th=d.current_terminal_hedge||{},terminal=d.terminal_hedge||{},hasMain=Boolean(th.main_outcome),terminalReasons=Object.entries(terminal.rejection_reasons||{}).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>`${k} ${v}`).join(' / '),prob=v=>v==null?'N/A':fmt(Number(v)*100,1)+'%';$('hedgeMarket').textContent=th.market_id?String(th.market_id).slice(0,18):'N/A';$('hedgeMain').textContent=hasMain?`${th.main_outcome} ${fmt(th.main_expected_fill_price,3)} / P ${prob(th.main_probability??th.estimated_probability)}`:'N/A';$('hedgeProtection').textContent=hasMain?`${th.hedge_outcome||'N/A'} ${fmt(th.hedge_expected_fill_price,3)} / P ${prob(th.hedge_probability)}`:'N/A';$('hedgeExpected').textContent=hasMain?money(th.expected_portfolio_pnl):'N/A';$('hedgeSeconds').textContent=hasMain?fmt(th.seconds_to_close,1)+'s':'N/A';$('hedgeAudit').innerHTML=`<span>${hasMain?money(th.total_cost):'N/A'} / ${hasMain?fmt(th.main_size,2):'N/A'} / ${hasMain?fmt(th.hedge_size,2):'N/A'}</span><b>${hasMain?money(th.main_win_pnl):'N/A'}</b><span>${hasMain?money(th.reversal_pnl):'N/A'}</span><span>${hasMain?money(th.worst_case_pnl):'N/A'}</span><span class="${th.decision==='ACCEPT'?'good':'warn'}">${th.decision||'N/A'}</span>`;$('hedgeReason').textContent=`${th.reason||'NO COMBINED EVALUATION'} / MAIN EV ${th.main_net_ev_per_share==null?'N/A':fmt(th.main_net_ev_per_share,4)} / HEDGE EV ${th.hedge_net_ev_per_share==null?'N/A':fmt(th.hedge_net_ev_per_share,4)} / EVAL ${analyticsValue(c.terminal_hedge_evaluations)} / ACCEPT ${analyticsValue(c.terminal_hedge_accepts)} / TOP REJECT ${terminalReasons||'N/A'} / REAL ORDERS 0`;
-const pair=d.current_pair||{};$('currentMarket').textContent=pair.market_id?String(pair.market_id).slice(0,18):'N/A';$('upVwap').textContent=fmt(pair.up_vwap,3);$('downVwap').textContent=fmt(pair.down_vwap,3);$('eev').textContent=money(pair.expected_execution_value);const score=d.strategy_score||{total:0,checks:{}},checks=score.checks||{};$('strategyScore').textContent=fmt(score.total,0);$('scoreBreakdown').innerHTML=Object.entries({DEPTH:checks.depth,FRESH:checks.freshness,'BOOK SYNC':checks.book_sync,'LEG RISK':checks.leg_risk,'NET COST':checks.net_cost}).map(([k,v])=>`<div><label>${k}</label>${v||'N/A'}</div>`).join('');$('pairAudit').innerHTML=`<span>${money(pair.gross_cost)} / ${money((pair.up_fee??0)+(pair.down_fee??0))} / ${money(pair.buffer)}</span><b>${money(pair.net_cost)}</b><span>${money(pair.guaranteed_payout)}</span><span>${money(pair.locked_profit)}</span><span class="${pair.decision==='ACCEPT'?'good':'warn'}">${pair.decision||'N/A'}</span>`;
-const sc=d.strategy_counts||{},sl=d.strategy_latest||{},sr=d.strategy_recent||{},sp=d.performance_by_strategy||{},pc=d.probability_calibration||{};function card(id,title,key){const n=sc[key]||{},x=sl[key]||{},r=sr[key]||{},p=sp[key]||{},cal=pc[key]||{},reasons=Object.entries(r.rejection_reasons||{}).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([k,v])=>`${k} ${v}`).join(' / '),probabilityStrategy=['late_window_directional_ev','low_price_lottery_ev'].includes(key),detail=key==='inventory_rebalancing_arb'?`ACTION ${x.action||'N/A'} / LOCK ${money(x.projected_locked_profit)} / LOCK ROI ${x.projected_locked_roi==null?'N/A':fmt(x.projected_locked_roi*100,1)+'%'} / GUARANTEED LOSS ${money(x.guaranteed_loss)} / RISK CUT ${x.loss_reduction_ratio==null?'N/A':fmt(x.loss_reduction_ratio*100,1)+'%'} / RISK ${money(x.maximum_loss)} / EV ${money(x.expected_value)} / RESIDUAL ${(Number(x.residual_up_quantity||0)+Number(x.residual_down_quantity||0)).toFixed(2)}`:key==='maker_complete_set_arb'?`PAIR QUOTE ${fmt(x.pair_quote_cost,3)} / EDGE ${fmt(x.locked_edge_if_both_fill,4)} / NO FILLS SIMULATED`:probabilityStrategy?`PRED ${cal.samples??0} / BRIER ${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)}`:'COMPLETE-SET MATH';$(id).innerHTML=`<label>${title}</label><b>${x.decision||'NO EVALUATION'}</b><div class="sub">${esc(x.asset||'N/A')} ${esc(x.timeframe||'')} / EVAL ${analyticsValue(n.evaluations)} / ACCEPT ${analyticsValue(n.accepts)} / REJECT ${analyticsValue(n.rejections)}</div><div class="sub">SETTLED ${p.completed??0} / PNL ${money(p.simulated_pnl)}</div><div class="sub">${detail}</div><div class="${x.decision==='ACCEPT'?'good':'warn'}">${esc(x.reason||'N/A')}</div><div class="sub">RECENT: ${esc(reasons||'N/A')}</div>`}card('directionalCard','DIRECTIONAL EV','late_window_directional_ev');card('lotteryCard','LOW-PRICE LOTTERY','low_price_lottery_ev');card('pairedCard','INSTANT COMPLETE SET','paired_lock');card('inventoryCard','INVENTORY REBALANCE','inventory_rebalancing_arb');card('makerCard','MAKER COMPLETE SET','maker_complete_set_arb');
-const labels={ingest:'INGEST',clob_snap:'CLOB SNAP',replay:'REPLAY',backtest:'BACKTEST',validate:'VALIDATE',approve:'APPROVE',deploy:'DEPLOY'},pipeline=d.pipeline_steps||{};$('pipelineSteps').innerHTML=Object.entries(labels).map(([k,x],i)=>`<div class="step ${pipeline[k]==='PASS'?'on':pipeline[k]==='BLOCKED'?'block':''}"><i>0${i+1}</i>${x}<small class="sub">${pipeline[k]||'N/A'}</small></div>`).join('');$('tradeLedger').innerHTML=(d.trade_ledger||[]).map(x=>`<div class="trade"><span>${esc(x.market_id)}</span><span>${new Date(x.ts*1000).toLocaleTimeString()}</span><b>${money(x.pnl)}</b><span class="good">${esc(x.state)}</span></div>`).join('')||'<div class="empty">NO COMPLETED SIMULATIONS</div>';
-$('pnlMeter').innerHTML=`<div class="bar"><span>SIM PNL</span><div class="track"><div class="fill" style="width:${p.simulated_pnl==null?0:Math.min(100,Math.abs(Number(p.simulated_pnl))*10)}%"></div></div><b>${money(p.simulated_pnl)}</b></div>`;const reasons=d.rejection_reasons||{},total=Object.values(reasons).reduce((a,b)=>a+b,0),shown=Object.entries(reasons).sort((a,b)=>b[1]-a[1]).slice(0,8),shownCount=shown.reduce((n,x)=>n+x[1],0);$('rejectionReasons').innerHTML=shown.map(([k,v])=>`<div class="bar"><span>${esc(k)}</span><div class="track"><div class="fill" style="width:${total?v/total*100:0}%"></div></div><b>${v}</b></div>`).join('')||'<span class="na">N/A</span>';$('rejectionCoverage').textContent=`REJECTIONS SHOWN ${shownCount} / TOTAL REJECTIONS ${total} / OTHER ${total-shownCount}`;
-const assetPnls=d.asset_latest_pnl||{};$('marketMatrix').innerHTML='<tr><th>ASSET</th>'+frames.map(f=>`<th>${f.toUpperCase()}</th>`).join('')+'<th class="pnl">LATEST SIM PNL</th></tr>'+assets.map(a=>'<tr><td>'+a+'</td>'+frames.map(f=>{const cell=m[a]?.[f]||{},ready=cell.reference_ready??0,total=cell.count??0,blocked=cell.reference_blocked??0,tip=(cell.markets||[]).map(x=>`${x.slot||''} ${x.reference?.reference_state||'N/A'} ${x.reference?.reference_block_reason||''}`).join(' / ');return `<td class="${total?'hot':''}" title="${esc(tip)}">${total}<small class="sub ${blocked?'warn':'good'}">DIR REF ${ready}/${total}</small></td>`}).join('')+assetPnlCell(assetPnls[a])+'</tr>').join('');$('referencePrices').innerHTML=assets.map(a=>{const v=refs[a]||{};return `<div>${a}</div>${['binance','coinbase','kraken','chainlink'].map(s=>`<div>${sourceState(v,s)}</div>`).join('')}`}).join('');
-const lat=d.latency_rankings||{};$('latencyRankings').innerHTML=Object.entries(lat).map(([name,v])=>`<div class="row"><span>${name.toUpperCase()}</span><b>${v.latest==null?'N/A':fmt(v.latest,1)+v.unit}</b><span>P50 ${fmt(v.p50,1)}</span><span>P95 ${fmt(v.p95,1)}</span><span>N ${v.samples??0}</span></div>`).join('')||'<span class="na">N/A / NO OBSERVED SAMPLES</span>';const h=d.shadow_health||{},e=d.shadow_execution||{},life=d.shadow_lifecycle||{},cr=d.clob_readiness||{},historicalBlocks=Object.values(life.portfolio_rejections||{}).reduce((a,b)=>a+Number(b),0),riskHalts=Object.keys(life.current_risk_halts||{}).length;$('health').innerHTML=[['DISCOVERED',cr.discovered_markets],['PAIRED READY',cr.paired_markets_ready],['NOT READY',cr.not_ready],['WAIT UP',cr.waiting_up_snapshot],['WAIT DOWN',cr.waiting_down_snapshot],['OPEN SHADOW',life.open_positions],['SETTLED SHADOW',c.simulated_complete],['RISK MODE',life.risk_mode],['CURRENT HALTS',riskHalts],['HIST BLOCKS',historicalBlocks],['RISK CONFIG',life.config_version],['GENERATION',h.subscription_generation],['WS SESSION',h.ws_session_id],['RESYNCS',h.resyncs],['EXEC STATE',e.state||'IDLE']].map(x=>`<div class="row"><span>${x[0]}</span><b>${x[1]??'N/A'}</b></div>`).join('');$('footerHealth').textContent=`WS ${h.ws_connected?'CONNECTED':'BLOCKED'} / ${life.calibration_mode?'CALIBRATION UNTHROTTLED':'PORTFOLIO LIMITS ENFORCED'} / REAL SUBMISSIONS ${e.real_order_submissions??0}${analyticsRefreshing?' / ANALYTICS REFRESHING':''}`}
-async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error(r.status);render(await r.json())}catch(e){$('status').textContent='OFFLINE'}}refresh();setInterval(refresh,2000);
-</script></body></html>
+const $=id=>document.getElementById(id);
+const fmt=(v,n=2)=>v==null?'N/A':Number(v).toFixed(n);
+const money=v=>v==null?'N/A':'$'+Number(v).toFixed(2);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const duration=s=>s==null?'N/A':s<60?fmt(s,0)+'s':s<3600?fmt(s/60,1)+'m':fmt(s/3600,1)+'h';
+
+function equity(points){
+  if(!points?.length)return '<div class="empty">NO COMPLETED SIMULATIONS / CURRENT CONFIG</div>';
+  const w=620,h=200,min=Math.min(...points.map(x=>x.equity)),max=Math.max(...points.map(x=>x.equity)),span=max-min||1;
+  const p=points.map((x,i)=>`${i/(points.length-1||1)*w},${h-(x.equity-min)/span*(h-24)-12}`).join(' ');
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="#91ffad" stroke-width="2" points="${p}"/></svg>`;
+}
+function sourceState(v,key){
+  const s=v.sources?.[key];
+  if(!s)return '<span class="na">NOT RECEIVED</span>';
+  const status=(s.status||'NOT_RECEIVED').replace('_',' ');
+  const cls=status==='FRESH'?'good':status==='STALE'||status==='DISCONNECTED'?'warn':'na';
+  return s.price==null?`<span class="${cls}">${status}</span>`:`${fmt(s.price,2)}<small class="sub">${fmt(s.message_age_ms,0)}ms / ${status}</small>`;
+}
+function assetPnlCell(item){
+  if(!item)return '<td class="pnl na" title="NO COMPLETED SHADOW TRADE">N/A</td>';
+  const cls=Number(item.pnl)>0?'good':Number(item.pnl)<0?'bad':'';
+  const tip=`${item.strategy||'N/A'} / ${item.timeframe||'N/A'} / ${item.market_id||'N/A'}`;
+  return `<td class="pnl ${cls}" title="${esc(tip)}">${money(item.pnl)}</td>`;
+}
+function strategyCard(id,title,key,d){
+  const hist=d.strategy_counts?.[key]||{},session=d.session_strategy_counts?.[key]||{};
+  const latest=d.strategy_latest?.[key]||{},perf=d.performance_by_strategy?.[key]||{};
+  const recent=d.strategy_recent?.[key]||{},cal=d.probability_calibration?.[key]||{};
+  const reasons=Object.entries(recent.rejection_reasons||{}).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([k,v])=>`${k} ${v}`).join(' / ');
+  const probability=['late_window_directional_ev','low_price_lottery_ev'].includes(key);
+  let detail='COMPLETE-SET MATH';
+  if(key==='inventory_rebalancing_arb')detail=`${latest.action||'HOLD'} / RISK ${money(latest.maximum_loss)} / LOCK ${money(latest.projected_locked_profit)}`;
+  if(key==='maker_complete_set_arb')detail=`PAIR ${fmt(latest.pair_quote_cost,3)} / NO FILLS SIMULATED`;
+  if(probability)detail=`PRED ${cal.samples??0} / BRIER ${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)}`;
+  $(id).innerHTML=`<label>${title}</label><b class="${latest.decision==='ACCEPT'?'good':'warn'}">${latest.decision||'NO EVALUATION'}</b>
+    <div>SESSION EVAL ${session.evaluations??0} / ACCEPT ${session.accepts??0} / REJECT ${session.rejections??0}</div>
+    <div>${detail}</div><div class="${latest.decision==='ACCEPT'?'good':'warn'}">${esc(latest.reason||'N/A')}</div>
+    <div class="history sub">HISTORY EVAL ${hist.evaluations??0} / SETTLED ${perf.completed??0} / PNL ${money(perf.simulated_pnl)}<br>TOP ${esc(reasons||'N/A')}</div>`;
+}
+function render(d){
+  const c=d.counts||{},p=d.performance||{},session=d.engine_session||{},m=d.market_matrix||{};
+  const assets=['BTC','ETH','SOL','XRP','BNB','DOGE','HYPE'],frames=['5m','15m','1h','4h'];
+  const refs=d.reference_prices?d.reference_prices.assets||{}:{},life=d.shadow_lifecycle||{},health=d.shadow_health||{};
+  $('status').textContent=(d.system_status||'BLOCKED')+' / SHADOW';
+  $('sync').textContent=new Date((d.ts||0)*1000).toLocaleTimeString();
+  $('markets').textContent=assets.reduce((n,a)=>n+frames.reduce((q,f)=>q+Number(m[a]?.[f]?.count||0),0),0);
+  $('raw').textContent=session.evaluations??'N/A';
+  $('pairedEvals').textContent=session.strategy_counts?.paired_lock?.evaluations??'N/A';
+  $('inventoryActions').textContent=session.strategy_counts?.inventory_rebalancing_arb?.accepts??'N/A';
+  $('makerQuotes').textContent=session.strategy_counts?.maker_complete_set_arb?.accepts??'N/A';
+  $('lockedComplete').textContent=c.locked_complete??'N/A';
+  $('realOrders').textContent=c.executed_orders??0;
+  $('simPnl').textContent=money(p.simulated_pnl);
+  $('winRate').textContent=p.win_rate==null?'N/A':fmt(p.win_rate*100,1)+'%';
+  $('sharpe').textContent=fmt(p.sharpe,2);
+  $('sharpeSamples').textContent=(p.completed??0)+' COMPLETED TRADES';
+  $('sessionRun').textContent=session.run_id?String(session.run_id).slice(-10):'N/A';
+  $('sessionAge').textContent=duration(session.age_seconds);
+  $('analyticsState').textContent=d.analytics_status||'N/A';
+  $('historicalExcluded').textContent=life.historical_completed_excluded??0;
+  $('equityChart').innerHTML=equity(d.equity_curve);
+
+  const pair=d.current_pair||{},score=d.strategy_score||{checks:{}},checks=score.checks||{};
+  $('currentMarket').textContent=pair.market_id?String(pair.market_id).slice(0,24):'N/A';
+  $('upVwap').textContent=fmt(pair.up_vwap,3);$('downVwap').textContent=fmt(pair.down_vwap,3);
+  $('eev').textContent=money(pair.expected_execution_value);$('lockedProfit').textContent=money(pair.locked_profit);
+  $('strategyScore').textContent=fmt(score.total,0);
+  $('scoreBreakdown').innerHTML=Object.entries({DEPTH:checks.depth,FRESH:checks.freshness,'BOOK SYNC':checks.book_sync,'LEG RISK':checks.leg_risk,'NET COST':checks.net_cost}).map(([k,v])=>`<div class="check ${v==='PASS'?'good':v==='FAIL'?'warn':''}"><label>${k}</label>${v||'N/A'}</div>`).join('');
+  $('pairAudit').innerHTML=`<div><label>GROSS COST / FEES / BUFFER</label><b>${money(pair.gross_cost)} / ${money((pair.up_fee??0)+(pair.down_fee??0))} / ${money(pair.buffer)}</b></div>
+    <div><label>NET COST</label><b>${money(pair.net_cost)}</b></div><div><label>GUARANTEED PAYOUT</label><b>${money(pair.guaranteed_payout)}</b></div>
+    <div><label>LOCKED PROFIT</label><b>${money(pair.locked_profit)}</b></div><div><label>DECISION</label><b class="${pair.decision==='ACCEPT'?'good':'warn'}">${pair.decision||'N/A'}<small class="sub">${esc(pair.reason||'N/A')}</small></b></div>`;
+
+  strategyCard('directionalCard','DIRECTIONAL EV','late_window_directional_ev',d);
+  strategyCard('lotteryCard','LOW-PRICE LOTTERY','low_price_lottery_ev',d);
+  strategyCard('pairedCard','INSTANT COMPLETE SET','paired_lock',d);
+  strategyCard('inventoryCard','INVENTORY REBALANCE','inventory_rebalancing_arb',d);
+  strategyCard('makerCard','MAKER COMPLETE SET','maker_complete_set_arb',d);
+
+  const labels={ingest:'INGEST',clob_snap:'CLOB SNAP',replay:'REPLAY',backtest:'BACKTEST',validate:'VALIDATE',approve:'APPROVE',deploy:'DEPLOY'},pipeline=d.pipeline_steps||{};
+  $('pipelineSteps').innerHTML=Object.entries(labels).map(([k,x],i)=>`<div class="step ${pipeline[k]==='PASS'?'on':pipeline[k]==='BLOCKED'?'block':''}"><i>0${i+1}</i>${x}<small class="sub">${pipeline[k]||'N/A'}</small></div>`).join('');
+  $('tradeLedger').innerHTML=(d.trade_ledger||[]).map(x=>`<div class="trade"><span>${esc(String(x.market_id||'').slice(0,20))}</span><span>${new Date(x.ts*1000).toLocaleTimeString()}</span><b class="${Number(x.pnl)>=0?'good':'bad'}">${money(x.pnl)}</b><span>${esc(x.strategy||'N/A')}</span></div>`).join('')||'<div class="empty">NO CURRENT CONFIG COMPLETIONS</div>';
+
+  const th=d.current_terminal_hedge||{},hasMain=Boolean(th.main_outcome);
+  $('hedgeMarket').textContent=th.market_id?String(th.market_id).slice(0,16):'N/A';
+  $('hedgeMain').textContent=hasMain?`${th.main_outcome} ${fmt(th.main_expected_fill_price,3)}`:'N/A';
+  $('hedgeProtection').textContent=hasMain?`${th.hedge_outcome||'N/A'} ${fmt(th.hedge_expected_fill_price,3)}`:'N/A';
+  $('hedgeExpected').textContent=hasMain?money(th.expected_portfolio_pnl):'N/A';
+  $('hedgeSeconds').textContent=hasMain?fmt(th.seconds_to_close,1)+'s':'N/A';
+  $('hedgeAudit').textContent=hasMain?`COST ${money(th.total_cost)} / MAIN-WIN ${money(th.main_win_pnl)} / REVERSAL ${money(th.reversal_pnl)} / WORST ${money(th.worst_case_pnl)}`:'NO COMBINED EVALUATION';
+  $('hedgeReason').textContent=`${th.reason||'N/A'} / SESSION HEDGE ACCEPT ${c.terminal_hedge_accepts??0} / REAL ORDERS 0`;
+
+  const assetPnls=d.asset_latest_pnl||{};
+  $('marketMatrix').innerHTML='<tr><th>ASSET</th>'+frames.map(f=>`<th>${f.toUpperCase()}</th>`).join('')+'<th>LATEST SIM PNL</th></tr>'+assets.map(a=>'<tr><td>'+a+'</td>'+frames.map(f=>{const cell=m[a]?.[f]||{},ready=cell.reference_ready??0,total=cell.count??0;return `<td class="${total?'hot':''}">${total}<small class="sub">DIR REF ${ready}/${total}</small></td>`}).join('')+assetPnlCell(assetPnls[a])+'</tr>').join('');
+  $('referencePrices').innerHTML=assets.map(a=>{const v=refs[a]||{};return `<div>${a}</div>${['binance','coinbase','kraken','chainlink'].map(s=>`<div>${sourceState(v,s)}</div>`).join('')}`}).join('');
+
+  const reasons=d.rejection_reasons||{},totalReject=Object.values(reasons).reduce((a,b)=>a+b,0),shown=Object.entries(reasons).sort((a,b)=>b[1]-a[1]).slice(0,8),shownCount=shown.reduce((n,x)=>n+x[1],0);
+  $('rejectionReasons').innerHTML=shown.map(([k,v])=>`<div class="bar"><span>${esc(k)}</span><div class="track"><div class="fill" style="width:${totalReject?v/totalReject*100:0}%"></div></div><b>${v}</b></div>`).join('')||'<span class="na">N/A</span>';
+  $('rejectionCoverage').textContent=`SHOWN ${shownCount} / TOTAL ${totalReject} / OTHER ${totalReject-shownCount}`;
+
+  const cr=d.clob_readiness||{},execution=d.shadow_execution||{};
+  const healthRows=[['DISCOVERED',cr.discovered_markets],['PAIRED MARKETS READY',cr.paired_markets_ready],['NOT READY',cr.not_ready],['WAIT UP',cr.waiting_up_snapshot],['WAIT DOWN',cr.waiting_down_snapshot],['SUBSCRIPTION GEN',health.subscription_generation],['WS SESSION',health.ws_session_id],['RESYNCS',health.resyncs],['AUDIT QUEUE',health.strategy_audit_queue],['BACKPRESSURE',health.strategy_audit_backpressure],['EXECUTION STATE',execution.state||'IDLE'],['REAL FILLS',execution.real_fills??0]];
+  $('health').innerHTML=healthRows.map(x=>`<div class="health-row"><span>${x[0]}</span><b>${x[1]??'N/A'}</b></div>`).join('');
+
+  const cohorts=life.inventory_cohorts||{},legacy=cohorts.legacy||{},current=cohorts.current||{},inventory=life.complete_set_inventory||[];
+  $('legacyPositions').textContent=legacy.positions??0;$('legacyCost').textContent=`${money(legacy.cost)} / ${money(legacy.maximum_loss)}`;
+  $('currentInventory').textContent=`${current.positions??0} / ${money(current.cost)}`;$('legacyNextClose').textContent=duration(legacy.next_close_seconds);
+  $('inventoryRows').innerHTML=inventory.map(x=>`<div class="inventory-row"><b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'')}</span><span class="${x.cohort==='LEGACY'?'warn':'good'}">${x.cohort} ${esc(x.action||'HOLD')}</span><span>${money(x.cost)}</span><span>${duration(x.seconds_to_close)}</span></div>`).join('')||'<span class="na">NO OPEN INVENTORY</span>';
+
+  const maxEquity=Math.max(1,...(d.equity_curve||[]).map(x=>Math.abs(Number(x.equity)||0))),pnl=Number(p.simulated_pnl||0);
+  $('pnlMeter').innerHTML=`<div class="pnl-meter"><span>SIM PNL</span><div class="track"><div class="fill" style="width:${Math.min(100,Math.abs(pnl)/maxEquity*100)}%"></div></div><b class="${pnl>=0?'good':'bad'}">${money(p.simulated_pnl)}</b></div>
+    <div class="pnl-meter"><span>COMPLETED</span><div class="track"><div class="fill" style="width:${Math.min(100,Number(p.completed||0))}%"></div></div><b>${p.completed??0}</b></div>`;
+
+  const lat=d.latency_rankings||{},latRows=Object.entries(lat),maxLatency=Math.max(1,...latRows.map(([,v])=>Number(v.latest)||0));
+  $('latencyRankings').innerHTML=latRows.map(([name,v])=>`<div class="latency-row"><span>${name.toUpperCase()}</span><div class="track"><div class="fill" style="width:${v.latest==null?0:Number(v.latest)/maxLatency*100}%"></div></div><b>${v.latest==null?'N/A':fmt(v.latest,1)+v.unit}</b></div>`).join('')||'<span class="na">NO OBSERVED SAMPLES</span>';
+  $('footerHealth').textContent=`WS ${health.ws_connected?'CONNECTED':'BLOCKED'} / SESSION ${session.run_id?String(session.run_id).slice(-8):'N/A'} / REAL SUBMISSIONS ${execution.real_order_submissions??0}${d.analytics_refreshing?' / ANALYTICS REFRESHING':''}`;
+}
+async function refresh(){
+  try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error(r.status);render(await r.json())}
+  catch(e){$('status').textContent='OFFLINE / SHADOW'}
+}
+refresh();setInterval(refresh,2000);
+</script>
+</body>
+</html>

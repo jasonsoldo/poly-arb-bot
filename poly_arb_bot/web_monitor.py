@@ -634,6 +634,17 @@ def build_status(data_dir, log_file, state_file):
         name: strategy_count_result.get(name, empty_counts[name])
         for name in STRATEGIES
     }
+    raw_session_counts = shadow_health.get("session_strategy_counts", {})
+    session_strategy_counts = {
+        name: {
+            field: int(raw_session_counts.get(name, {}).get(field, 0))
+            for field in ("evaluations", "accepts", "rejections")
+        }
+        for name in STRATEGIES
+    }
+    session_strategy_evaluations = sum(
+        row["evaluations"] for row in session_strategy_counts.values()
+    )
     analytics_refreshing = report_refreshing or strategy_refreshing
     strategy_evaluations = sum(row["evaluations"] for row in strategy_counts.values())
     strategy_accepts = sum(row["accepts"] for row in strategy_counts.values())
@@ -716,6 +727,45 @@ def build_status(data_dir, log_file, state_file):
         report["performance_by_strategy"][name]["completed"]
         for name in ("paired_lock", "inventory_rebalancing_arb")
     )
+    current_inventory_hash = shadow_health.get("inventory_config_hash")
+    complete_set_inventory = []
+    for item in lifecycle_state.get("complete_set_inventory", {}).values():
+        row = dict(item)
+        origin_hash = row.get("origin_config_hash") or row.get("config_hash")
+        if current_inventory_hash and origin_hash:
+            cohort = "CURRENT" if origin_hash == current_inventory_hash else "LEGACY"
+        else:
+            cohort = "UNKNOWN"
+        row["cohort"] = cohort
+        row["cost"] = float(row.get("up_cost") or 0) + float(row.get("down_cost") or 0)
+        row["quantity"] = (
+            float(row.get("up_quantity") or 0)
+            + float(row.get("down_quantity") or 0)
+        )
+        row["seconds_to_close"] = (
+            max(0.0, float(row.get("close_ts") or 0) - time.time())
+            if row.get("close_ts") is not None else None
+        )
+        complete_set_inventory.append(row)
+
+    def inventory_summary(cohort):
+        rows = [item for item in complete_set_inventory if item["cohort"] == cohort]
+        return {
+            "positions": len(rows),
+            "cost": round(sum(item["cost"] for item in rows), 12),
+            "quantity": round(sum(item["quantity"] for item in rows), 12),
+            "maximum_loss": round(sum(item["cost"] for item in rows), 12),
+            "next_close_seconds": min(
+                (item["seconds_to_close"] for item in rows
+                 if item["seconds_to_close"] is not None),
+                default=None,
+            ),
+        }
+
+    inventory_cohorts = {
+        cohort.lower(): inventory_summary(cohort)
+        for cohort in ("CURRENT", "LEGACY", "UNKNOWN")
+    }
     engine_latency = reference_prices.get("engine_latency_us")
     def age_snapshot(source):
         values = []
@@ -782,9 +832,18 @@ def build_status(data_dir, log_file, state_file):
             ),
             "simulated_complete": simulated_complete,
             "locked_complete": locked_complete,
+            "session_strategy_evaluations": session_strategy_evaluations,
+            "session_paired_evaluations": session_strategy_counts["paired_lock"]["evaluations"],
+            "session_inventory_actions": session_strategy_counts[
+                "inventory_rebalancing_arb"
+            ]["accepts"],
+            "session_maker_quote_candidates": session_strategy_counts[
+                "maker_complete_set_arb"
+            ]["accepts"],
         },
         "shadow_markets": list(latest_shadow.values()),
         "strategy_counts": strategy_counts,
+        "session_strategy_counts": session_strategy_counts,
         "strategy_latest": strategy_latest,
         "strategy_recent": strategy_recent,
         "reference_prices": reference_prices,
@@ -805,9 +864,8 @@ def build_status(data_dir, log_file, state_file):
             ),
             "orphaned_positions": len(lifecycle_state.get("orphaned_positions", [])),
             "positions": current_positions,
-            "complete_set_inventory": list(
-                lifecycle_state.get("complete_set_inventory", {}).values()
-            ),
+            "complete_set_inventory": complete_set_inventory,
+            "inventory_cohorts": inventory_cohorts,
             "maker_quotes": list(lifecycle_state.get("maker_quotes", {}).values()),
             "completed_ids": simulated_complete,
             "historical_completed_excluded": report.get("excluded_other_strategy_config", 0),
@@ -835,6 +893,16 @@ def build_status(data_dir, log_file, state_file):
         "asset_latest_pnl": asset_latest_pnl,
         "analytics_refreshing": analytics_refreshing,
         "analytics_status": "REBUILDING" if analytics_refreshing else "READY",
+        "engine_session": {
+            "run_id": shadow_health.get("run_id"),
+            "started_at": shadow_health.get("engine_started_at"),
+            "age_seconds": (
+                max(0.0, time.time() - float(shadow_health["engine_started_at"]))
+                if shadow_health.get("engine_started_at") is not None else None
+            ),
+            "strategy_counts": session_strategy_counts,
+            "evaluations": session_strategy_evaluations,
+        },
         "system_status": system_status,
         "rejection_reasons": report["rejection_reasons"] or dict(rejection_reasons),
         "shadow_report": report,
@@ -875,7 +943,7 @@ def make_handler(web_dir, data_dir, log_file, state_file):
             self.end_headers()
             try:
                 self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 return
 
         def do_GET(self):  # noqa: N802

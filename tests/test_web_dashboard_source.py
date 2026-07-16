@@ -84,11 +84,23 @@ def test_dashboard_header_uses_unambiguous_complete_set_metrics():
     ):
         assert label in source
     assert "SIM OPENED" not in source
-    assert "total_strategy_evaluations" in source
-    assert "paired_evaluations" in source
-    assert "inventory_actions" in source
-    assert "maker_quote_candidates" in source
+    assert "engine_session" in source
+    assert "session_strategy_counts" in source
+    assert "session.strategy_counts?.paired_lock?.evaluations" in source
+    assert "session.strategy_counts?.inventory_rebalancing_arb?.accepts" in source
+    assert "session.strategy_counts?.maker_complete_set_arb?.accepts" in source
     assert "locked_complete" in source
+
+
+def test_dashboard_separates_current_session_history_and_legacy_inventory():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    for label in (
+        "CURRENT CONFIG PERFORMANCE", "SESSION EVAL", "HISTORY EVAL",
+        "LEGACY INVENTORY", "LEGACY COST / MAX LOSS", "CURRENT POSITIONS / COST",
+    ):
+        assert label in source
+    assert "inventory_cohorts" in source
+    assert "historical_completed_excluded" in source
 
 
 def test_dashboard_renders_latest_asset_pnl_from_completed_shadow_data():

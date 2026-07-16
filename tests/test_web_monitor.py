@@ -655,6 +655,67 @@ def test_web_status_exposes_unambiguous_complete_set_counts(tmp_path):
     assert counts["locked_complete"] == 2
 
 
+def test_web_status_separates_engine_session_counts_and_legacy_inventory(tmp_path):
+    data = tmp_path / "data"
+    state = tmp_path / "state"
+    data.mkdir(); state.mkdir()
+    now = time.time()
+    (data / "shadow-health.json").write_text(json.dumps({
+        "updated_at": now,
+        "ws_connected": True,
+        "run_id": "run-1",
+        "engine_started_at": now - 30,
+        "inventory_config_hash": "current-inventory",
+        "session_strategy_counts": {
+            "paired_lock": {"evaluations": 12, "accepts": 2, "rejections": 10},
+            "inventory_rebalancing_arb": {
+                "evaluations": 8, "accepts": 1, "rejections": 7,
+            },
+        },
+    }), encoding="utf-8")
+    (state / "strategy-shadow.json").write_text(json.dumps({
+        "positions": {},
+        "completed": [],
+        "complete_set_inventory": {
+            "legacy": {
+                "market_id": "legacy", "asset": "DOGE", "timeframe": "4h",
+                "up_quantity": 0, "down_quantity": 10,
+                "up_cost": 0, "down_cost": 7.65,
+                "close_ts": now + 100,
+                "origin_config_hash": "old-inventory",
+            },
+            "current": {
+                "market_id": "current", "asset": "BTC", "timeframe": "5m",
+                "up_quantity": 2, "down_quantity": 0,
+                "up_cost": .4, "down_cost": 0,
+                "close_ts": now + 50,
+                "origin_config_hash": "current-inventory",
+            },
+        },
+    }), encoding="utf-8")
+
+    status = build_status(data, tmp_path / "missing.jsonl", state / "orders.json")
+
+    assert status["engine_session"]["run_id"] == "run-1"
+    assert status["engine_session"]["evaluations"] == 20
+    assert status["counts"]["session_paired_evaluations"] == 12
+    assert status["counts"]["session_inventory_actions"] == 1
+    assert status["session_strategy_counts"]["maker_complete_set_arb"] == {
+        "evaluations": 0, "accepts": 0, "rejections": 0,
+    }
+    cohorts = status["shadow_lifecycle"]["inventory_cohorts"]
+    assert cohorts["legacy"]["positions"] == 1
+    assert cohorts["legacy"]["cost"] == 7.65
+    assert cohorts["current"]["positions"] == 1
+    assert cohorts["current"]["cost"] == .4
+    inventory = {
+        row["market_id"]: row
+        for row in status["shadow_lifecycle"]["complete_set_inventory"]
+    }
+    assert inventory["legacy"]["cohort"] == "LEGACY"
+    assert inventory["current"]["cohort"] == "CURRENT"
+
+
 def test_web_status_ages_each_normalized_reference_source(tmp_path):
     now_ms = time.time() * 1000
     (tmp_path / "venue-status.json").write_text(json.dumps({
