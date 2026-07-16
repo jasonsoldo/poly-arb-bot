@@ -2148,6 +2148,12 @@ private:
         if (stopped_) return;
         stopped_ = true; timer_.cancel(); reload_timer_.cancel(); evaluation_timer_.cancel();
         if (reference_client_) reference_client_->stop();
+        for (auto& item : books_) {
+            item.second.ws_snapshot = false;
+            item.second.bids.clear();
+            item.second.asks.clear();
+        }
+        maker_quote_observations_.clear();
         write_health(false);
         std::cerr << "WS_ERROR stage=" << stage << " code=" << ec.value() << " message=" << ec.message() << "\n";
     }

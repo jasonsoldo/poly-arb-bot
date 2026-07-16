@@ -195,3 +195,14 @@ def test_split_sell_lock_uses_bid_vwap_fees_buffer_and_independent_audit():
     assert "last_split_sell_down_version" in SOURCE
     assert '\\"profit_threshold_shortfall\\":' in SOURCE
     assert '\\"required_gross_improvement_bps\\":' in SOURCE
+
+
+def test_websocket_failure_invalidates_all_snapshot_readiness():
+    fail_body = SOURCE.split(
+        "void fail(const char* stage, beast::error_code ec)", 1
+    )[1].split("const std::string host_", 1)[0]
+    assert "item.second.ws_snapshot = false" in fail_body
+    assert "item.second.bids.clear()" in fail_body
+    assert "item.second.asks.clear()" in fail_body
+    assert "maker_quote_observations_.clear()" in fail_body
+    assert "write_health(false)" in fail_body
