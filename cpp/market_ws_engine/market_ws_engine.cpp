@@ -1808,6 +1808,8 @@ private:
                            << ",\"down_sell_fill\":" << down_sell.first
                            << ",\"up_sell_vwap\":" << up_sell.second
                            << ",\"down_sell_vwap\":" << down_sell.second
+                           << ",\"combined_bid_vwap\":"
+                           << split_sell.combined_bid_vwap
                            << ",\"gross_proceeds\":" << split_sell.gross_proceeds
                            << ",\"up_fee\":" << up_sell_fee
                            << ",\"down_fee\":" << down_sell_fee
@@ -1818,6 +1820,16 @@ private:
                            << split_sell.collateral_cost
                            << ",\"locked_profit\":" << split_sell.locked_profit
                            << ",\"locked_roi\":" << split_sell.locked_roi
+                           << ",\"observed_break_even_bid_sum\":"
+                           << split_sell.observed_break_even_bid_sum
+                           << ",\"observed_profit_threshold_bid_sum\":"
+                           << split_sell.observed_profit_threshold_bid_sum
+                           << ",\"profit_threshold_shortfall\":"
+                           << split_sell.profit_threshold_shortfall
+                           << ",\"required_gross_improvement_per_share\":"
+                           << split_sell.required_gross_improvement_per_share
+                           << ",\"required_gross_improvement_bps\":"
+                           << split_sell.required_gross_improvement_bps
                            << ",\"expected_execution_value\":"
                            << split_sell.expected_execution_value
                            << ",\"leg_1_fill_probability\":"
@@ -1873,6 +1885,8 @@ private:
                        << ",\"down_sell_fill\":" << down_sell.first
                        << ",\"up_sell_vwap\":" << up_sell.second
                        << ",\"down_sell_vwap\":" << down_sell.second
+                       << ",\"combined_bid_vwap\":"
+                       << split_sell.combined_bid_vwap
                        << ",\"gross_proceeds\":" << split_sell.gross_proceeds
                        << ",\"up_fee\":" << up_sell_fee
                        << ",\"down_fee\":" << down_sell_fee
@@ -1883,6 +1897,16 @@ private:
                        << split_sell.collateral_cost
                        << ",\"locked_profit\":" << split_sell.locked_profit
                        << ",\"locked_roi\":" << split_sell.locked_roi
+                       << ",\"observed_break_even_bid_sum\":"
+                       << split_sell.observed_break_even_bid_sum
+                       << ",\"observed_profit_threshold_bid_sum\":"
+                       << split_sell.observed_profit_threshold_bid_sum
+                       << ",\"profit_threshold_shortfall\":"
+                       << split_sell.profit_threshold_shortfall
+                       << ",\"required_gross_improvement_per_share\":"
+                       << split_sell.required_gross_improvement_per_share
+                       << ",\"required_gross_improvement_bps\":"
+                       << split_sell.required_gross_improvement_bps
                        << ",\"expected_execution_value\":"
                        << split_sell.expected_execution_value
                        << ",\"leg_1_fill_probability\":"

@@ -683,6 +683,10 @@ def test_web_status_exposes_split_sell_as_independent_locked_method(tmp_path):
         "market_id": "m1",
         "up_sell_vwap": .54,
         "down_sell_vwap": .49,
+        "combined_bid_vwap": 1.03,
+        "observed_profit_threshold_bid_sum": 1.01,
+        "profit_threshold_shortfall": 0,
+        "required_gross_improvement_bps": 0,
         "net_proceeds": 10.22,
         "split_collateral_cost": 10,
         "locked_profit": .22,
@@ -717,8 +721,63 @@ def test_web_status_exposes_split_sell_as_independent_locked_method(tmp_path):
     assert status["counts"]["session_split_sell_evaluations"] == 3
     assert status["counts"]["session_split_sell_accepts"] == 1
     assert status["current_split_sell"]["locked_profit"] == .22
+    assert status["current_split_sell"]["combined_bid_vwap"] == 1.03
     assert status["performance_by_strategy"]["split_sell_lock"]["completed"] == 1
     assert status["performance_by_strategy"]["split_sell_lock"]["simulated_pnl"] == .22
+
+
+def test_web_status_ranks_latest_split_sell_near_misses(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir()
+    logs.mkdir()
+    now = time.time()
+    markets = [
+        {"market_id": "m1", "asset": "BTC", "interval": "5m", "close_ts": now + 100},
+        {"market_id": "m2", "asset": "ETH", "interval": "15m", "close_ts": now + 200},
+    ]
+    (data / "live_markets.json").write_text(
+        json.dumps({"markets": markets}), encoding="utf-8"
+    )
+    rows = [
+        {
+            "ts": now, "event_id": "m1-new", "event_type": "shadow_split_sell_eval",
+            "strategy": "split_sell_lock", "market_id": "m1", "asset": "BTC",
+            "timeframe": "5m", "decision": "REJECT",
+            "reason": "split_sell_profit_below_threshold",
+            "profit_threshold_shortfall": .12,
+            "required_gross_improvement_bps": 120,
+        },
+        {
+            "ts": now - 1, "event_id": "m2-new", "event_type": "shadow_split_sell_eval",
+            "strategy": "split_sell_lock", "market_id": "m2", "asset": "ETH",
+            "timeframe": "15m", "decision": "REJECT",
+            "reason": "split_sell_profit_below_threshold",
+            "profit_threshold_shortfall": .04,
+            "required_gross_improvement_bps": 40,
+        },
+        {
+            "ts": now - 2, "event_id": "m1-old", "event_type": "shadow_split_sell_eval",
+            "strategy": "split_sell_lock", "market_id": "m1", "asset": "BTC",
+            "timeframe": "5m", "decision": "REJECT",
+            "reason": "split_sell_profit_below_threshold",
+            "profit_threshold_shortfall": .01,
+            "required_gross_improvement_bps": 10,
+        },
+    ]
+    (logs / "shadow-audit.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
+    (logs / "strategy-audit.jsonl").write_text("", encoding="utf-8")
+
+    status = build_status(
+        data, logs / "shadow-audit.jsonl", tmp_path / "orders.json"
+    )
+
+    assert [row["market_id"] for row in status["split_sell_near_misses"]] == [
+        "m2", "m1",
+    ]
+    assert status["split_sell_near_misses"][1]["profit_threshold_shortfall"] == .12
 
 
 def test_web_status_separates_engine_session_counts_and_legacy_inventory(tmp_path):

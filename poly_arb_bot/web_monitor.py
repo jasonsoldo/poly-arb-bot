@@ -713,14 +713,35 @@ def build_status(data_dir, log_file, state_file):
         None,
     )
     split_sell_fields = (
-        "market_id", "up_sell_vwap", "down_sell_vwap", "gross_proceeds",
+        "market_id", "asset", "timeframe", "window", "seconds_to_close",
+        "up_sell_vwap", "down_sell_vwap", "combined_bid_vwap", "gross_proceeds",
         "up_fee", "down_fee", "total_fees", "execution_buffer",
         "net_proceeds", "split_collateral_cost", "locked_profit", "locked_roi",
+        "observed_break_even_bid_sum", "observed_profit_threshold_bid_sum",
+        "profit_threshold_shortfall", "required_gross_improvement_per_share",
+        "required_gross_improvement_bps",
         "expected_execution_value", "decision", "reason",
     )
     current_split_sell = {
         key: latest_split_sell.get(key) for key in split_sell_fields
     } if latest_split_sell else {}
+    split_sell_latest_by_market = {}
+    for item in shadow_events:
+        if (
+            item.get("strategy") == "split_sell_lock"
+            and item.get("event_type") == "shadow_split_sell_eval"
+            and item.get("market_id") in market_ids
+        ):
+            split_sell_latest_by_market.setdefault(item.get("market_id"), item)
+    split_sell_near_misses = sorted(
+        (
+            {key: item.get(key) for key in split_sell_fields}
+            for item in split_sell_latest_by_market.values()
+            if item.get("reason") == "split_sell_profit_below_threshold"
+            and item.get("profit_threshold_shortfall") is not None
+        ),
+        key=lambda item: float(item["profit_threshold_shortfall"]),
+    )[:8]
     latest_terminal_hedge = terminal_hedge_summary.get("latest") or next(
         (item for item in shadow_events if item.get("event_type") in {
             "shadow_hedge_eval", "shadow_hedged_opportunity",
@@ -957,6 +978,7 @@ def build_status(data_dir, log_file, state_file):
         "strategy_score": strategy_score,
         "current_pair": current_pair,
         "current_split_sell": current_split_sell,
+        "split_sell_near_misses": split_sell_near_misses,
         "current_terminal_hedge": latest_terminal_hedge or {},
         "terminal_hedge": terminal_hedge_summary,
         "clob_readiness": clob_readiness,

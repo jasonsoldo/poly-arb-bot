@@ -90,6 +90,8 @@ def test_dashboard_header_uses_unambiguous_complete_set_metrics():
     assert "session_strategy_counts" in source
     assert "session.strategy_counts?.paired_lock?.evaluations" in source
     assert "session.strategy_counts?.split_sell_lock?.accepts" in source
+    assert "split_sell_near_misses" in source
+    assert "required_gross_improvement_bps" in source
     assert "session.strategy_counts?.inventory_rebalancing_arb?.accepts" in source
     assert "maker_quote_geometry_candidates" in source
     assert "locked_complete" in source

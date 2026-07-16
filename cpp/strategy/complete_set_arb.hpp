@@ -216,18 +216,25 @@ struct SplitSellInput {
 struct SplitSellDecision {
     std::string decision = "REJECT";
     std::string reason = "sell_depth";
+    double combined_bid_vwap = 0;
     double gross_proceeds = 0;
     double total_fees = 0;
     double net_proceeds = 0;
     double collateral_cost = 0;
     double locked_profit = 0;
     double locked_roi = 0;
+    double observed_break_even_bid_sum = 0;
+    double observed_profit_threshold_bid_sum = 0;
+    double profit_threshold_shortfall = 0;
+    double required_gross_improvement_per_share = 0;
+    double required_gross_improvement_bps = 0;
     double expected_execution_value = 0;
 };
 
 inline SplitSellDecision evaluate_split_sell(const SplitSellInput& row) {
     SplitSellDecision result;
-    result.gross_proceeds = row.target_size * (row.up_vwap + row.down_vwap);
+    result.combined_bid_vwap = row.up_vwap + row.down_vwap;
+    result.gross_proceeds = row.target_size * result.combined_bid_vwap;
     result.total_fees = row.up_fee + row.down_fee;
     result.net_proceeds = result.gross_proceeds - result.total_fees -
         row.execution_buffer;
@@ -240,6 +247,19 @@ inline SplitSellDecision evaluate_split_sell(const SplitSellInput& row) {
     result.expected_execution_value = both_fill_probability * result.locked_profit -
         row.leg_1_fill_probability * (1 - row.leg_2_fill_probability) *
         row.orphan_leg_loss;
+    if (row.target_size > 0) {
+        result.observed_break_even_bid_sum = result.combined_bid_vwap -
+            result.locked_profit / row.target_size;
+        result.observed_profit_threshold_bid_sum =
+            result.observed_break_even_bid_sum +
+            row.minimum_locked_profit / row.target_size;
+        result.profit_threshold_shortfall = std::max(
+            0.0, row.minimum_locked_profit - result.locked_profit);
+        result.required_gross_improvement_per_share =
+            result.profit_threshold_shortfall / row.target_size;
+        result.required_gross_improvement_bps =
+            result.required_gross_improvement_per_share * 10000;
+    }
     if (row.up_fill < row.target_size) result.reason = "up_bid_depth";
     else if (row.down_fill < row.target_size) result.reason = "down_bid_depth";
     else if (result.locked_profit < row.minimum_locked_profit)

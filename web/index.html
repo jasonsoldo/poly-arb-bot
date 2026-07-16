@@ -55,6 +55,8 @@ main{padding:8px;max-width:1920px;margin:auto}
 .strategy-card{border:1px solid var(--line);padding:7px;min-height:107px;background:var(--panel2)}
 .strategy-card>label{color:var(--cyan)}.strategy-card>b{display:block;margin:5px 0;color:var(--green)}
 .strategy-card .history{margin-top:5px;padding-top:5px;border-top:1px solid var(--line2)}
+.near-misses{margin-top:7px;border-top:1px solid var(--line);padding-top:7px}
+.near-row{display:grid;grid-template-columns:42px 35px 1fr 70px 70px;gap:7px;padding:4px 0;border-bottom:1px solid var(--line2)}
 .flow{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-top:7px}
 .step{border:1px solid var(--line);padding:7px 5px;color:var(--muted);min-height:44px}
 .step.on{border-color:var(--green);color:var(--text)}.step.block{border-color:var(--yellow)}
@@ -153,6 +155,10 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
       <div class="strategy-card" id="makerCard"></div>
     </div>
     <div class="flow" id="pipelineSteps"></div>
+    <div class="near-misses">
+      <h2>SPLIT + SELL / NEAREST LOCKED ARBITRAGE</h2>
+      <div id="splitSellNearMisses"></div>
+    </div>
   </section>
 
   <section class="panel equity-panel">
@@ -252,7 +258,7 @@ function strategyCard(id,title,key,d){
   const probability=['late_window_directional_ev','low_price_lottery_ev'].includes(key);
   let detail='COMPLETE-SET MATH';
   if(key==='inventory_rebalancing_arb')detail=`${latest.action||'HOLD'} / RISK ${money(latest.maximum_loss)} / LOCK ${money(latest.projected_locked_profit)}`;
-  if(key==='split_sell_lock')detail=`BIDS ${fmt(latest.up_sell_vwap,3)} + ${fmt(latest.down_sell_vwap,3)} / NET ${money(latest.net_proceeds)} / LOCK ${money(latest.locked_profit)}`;
+  if(key==='split_sell_lock')detail=`BIDS ${fmt(latest.combined_bid_vwap,3)} / HURDLE ${fmt(latest.observed_profit_threshold_bid_sum,3)} / SHORT ${money(latest.profit_threshold_shortfall)}`;
   if(key==='maker_complete_set_arb')detail=`PAIR ${fmt(latest.pair_quote_cost,3)} / GEOMETRY ${latest.quote_geometry_qualified?'PASS':'BLOCKED'} / NO FILLS INFERRED`;
   if(probability)detail=`PRED ${cal.samples??0} / BRIER ${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)}`;
   $(id).innerHTML=`<label>${title}</label><b class="${latest.decision==='ACCEPT'?'good':'warn'}">${latest.decision||'NO EVALUATION'}</b>
@@ -300,6 +306,12 @@ function render(d){
   strategyCard('splitSellCard','SPLIT + SELL BOTH','split_sell_lock',d);
   strategyCard('inventoryCard','INVENTORY REBALANCE','inventory_rebalancing_arb',d);
   strategyCard('makerCard','MAKER COMPLETE SET','maker_complete_set_arb',d);
+  $('splitSellNearMisses').innerHTML=(d.split_sell_near_misses||[]).map(x=>`<div class="near-row">
+    <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span>
+    <span>${fmt(x.combined_bid_vwap,4)} / NEED ${fmt(x.observed_profit_threshold_bid_sum,4)}</span>
+    <b class="warn">${money(x.profit_threshold_shortfall)}</b>
+    <span>${fmt(x.required_gross_improvement_bps,1)} bps</span>
+  </div>`).join('')||'<div class="empty" style="height:45px">NO ELIGIBLE NEAR-MISS SAMPLE</div>';
 
   const labels={ingest:'INGEST',clob_snap:'CLOB SNAP',replay:'REPLAY',backtest:'BACKTEST',validate:'VALIDATE',approve:'APPROVE',deploy:'DEPLOY'},pipeline=d.pipeline_steps||{};
   $('pipelineSteps').innerHTML=Object.entries(labels).map(([k,x],i)=>`<div class="step ${pipeline[k]==='PASS'?'on':pipeline[k]==='BLOCKED'?'block':''}"><i>0${i+1}</i>${x}<small class="sub">${pipeline[k]||'N/A'}</small></div>`).join('');

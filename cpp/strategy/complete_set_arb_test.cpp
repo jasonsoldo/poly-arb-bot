@@ -22,6 +22,9 @@ int main() {
         assert(result.reason == "split_sell_opportunity");
         assert(std::abs(result.gross_proceeds - 10.3) < 1e-12);
         assert(std::abs(result.locked_profit - .22) < 1e-12);
+        assert(std::abs(result.combined_bid_vwap - 1.03) < 1e-12);
+        assert(result.profit_threshold_shortfall == 0);
+        assert(result.required_gross_improvement_bps == 0);
         assert(result.expected_execution_value > 0);
     }
     {
@@ -35,6 +38,10 @@ int main() {
         const auto result = complete_set::evaluate_split_sell(row);
         assert(result.decision == "REJECT");
         assert(result.reason == "split_sell_profit_below_threshold");
+        assert(std::abs(result.observed_break_even_bid_sum - 1.002) < 1e-12);
+        assert(std::abs(result.observed_profit_threshold_bid_sum - 1.003) < 1e-12);
+        assert(std::abs(result.profit_threshold_shortfall - .03) < 1e-12);
+        assert(std::abs(result.required_gross_improvement_bps - 30) < 1e-9);
     }
     {
         complete_set::SplitSellInput row;

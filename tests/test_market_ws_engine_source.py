@@ -193,3 +193,5 @@ def test_split_sell_lock_uses_bid_vwap_fees_buffer_and_independent_audit():
     assert "split_sell_new_book_state" in SOURCE
     assert "last_split_sell_up_version" in SOURCE
     assert "last_split_sell_down_version" in SOURCE
+    assert '\\"profit_threshold_shortfall\\":' in SOURCE
+    assert '\\"required_gross_improvement_bps\\":' in SOURCE
