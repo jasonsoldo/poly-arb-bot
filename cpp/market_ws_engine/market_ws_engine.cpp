@@ -744,31 +744,53 @@ private:
             const std::map<std::string, strategy::Decision>& directional_decisions,
             const std::map<std::string, strategy::EvaluationInput>& lottery_inputs,
             double timestamp) {
+        if (directional_inputs.empty()) return;
+        const int seconds_to_close = directional_inputs.begin()->second.seconds_to_close;
+        const auto terminal_window = strategy::directional_window(market.interval, strategy_config_);
+        if (!terminal_window || seconds_to_close < terminal_window->first ||
+            seconds_to_close > terminal_window->second) return;
         const strategy::Decision* main_decision = nullptr;
         const strategy::EvaluationInput* main = nullptr;
         std::string main_outcome;
+        const strategy::Decision* diagnostic_decision = nullptr;
+        const strategy::EvaluationInput* diagnostic = nullptr;
+        std::string diagnostic_outcome;
         for (const std::string outcome : {"Up", "Down"}) {
             const auto decision = directional_decisions.find(outcome);
             const auto input = directional_inputs.find(outcome);
-            if (decision == directional_decisions.end() || input == directional_inputs.end() ||
-                decision->second.decision != "ACCEPT") continue;
+            if (decision == directional_decisions.end() || input == directional_inputs.end()) continue;
+            if (!diagnostic || input->second.estimated_probability.value_or(-1) >
+                diagnostic->estimated_probability.value_or(-1)) {
+                diagnostic_decision = &decision->second;
+                diagnostic = &input->second;
+                diagnostic_outcome = outcome;
+            }
+            if (decision->second.decision != "ACCEPT") continue;
             if (!main_decision || decision->second.net_ev.value_or(-1e9) > main_decision->net_ev.value_or(-1e9)) {
                 main_decision = &decision->second;
                 main = &input->second;
                 main_outcome = outcome;
             }
         }
-        std::string reason = "directional_not_accepted";
+        if (!main) {
+            main_decision = diagnostic_decision;
+            main = diagnostic;
+            main_outcome = diagnostic_outcome;
+        }
+        std::string reason = main_decision ? main_decision->reason : "directional_not_evaluated";
         bool accepted = false;
         strategy::TerminalHedgeOutput result;
         std::string hedge_outcome;
         const strategy::EvaluationInput* hedge = nullptr;
-        if (main && main_decision && main->estimated_probability) {
+        if (main) {
             hedge_outcome = main_outcome == "Up" ? "Down" : "Up";
             const auto found = lottery_inputs.find(hedge_outcome);
-            if (found == lottery_inputs.end()) reason = "hedge_quote_unavailable";
+            if (found != lottery_inputs.end()) hedge = &found->second;
+        }
+        if (main && main_decision && main_decision->decision == "ACCEPT" &&
+            main->estimated_probability) {
+            if (!hedge) reason = "hedge_quote_unavailable";
             else {
-                hedge = &found->second;
                 result = strategy::evaluate_terminal_hedge({
                     size_, *main->estimated_probability,
                     main->expected_fill_price, main->fee_per_share, main->slippage_per_share,

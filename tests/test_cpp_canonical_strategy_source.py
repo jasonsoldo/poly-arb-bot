@@ -32,6 +32,8 @@ def test_cpp_engine_emits_four_independent_strategy_evaluations():
     assert "shadow_hedged_opportunity" in ENGINE
     assert "expected_portfolio_pnl" in ENGINE
     assert "reversal_pnl" in ENGINE
+    assert "strategy::directional_window" in ENGINE
+    assert '"directional_not_accepted"' not in ENGINE
     assert "for (const std::string outcome : {\"Up\", \"Down\"})" in ENGINE
     assert "strategy_audit_" in ENGINE
 

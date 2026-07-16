@@ -161,6 +161,38 @@ def test_terminal_high_confidence_signal_emits_hedged_combination():
     assert all("strategy_config" not in row for row in rows)
 
 
+def test_terminal_reject_inherits_directional_reason_and_keeps_candidate_fields():
+    current_market = market()
+    current_market["close_ts"] = 1010
+    current_event = event()
+    current_event.update(
+        up_vwap=.60, up_best_ask=.60, up_fee=.01,
+        down_vwap=.40, down_best_ask=.40, down_fee=.01,
+    )
+
+    state = venue()
+    state["assets"]["BTC"]["settlement_reference"] = 100.0
+    state["assets"]["BTC"]["momentum_bps_30s"] = 0.0
+    state["assets"]["BTC"]["sources"]["chainlink"]["price"] = 100.0
+    rows = evaluate_market_event(current_event, current_market, state, now=1000.0)
+
+    combined = next(row for row in rows if row["event_type"] == "shadow_hedge_eval")
+    assert combined["reason"] == "model_confidence_below_threshold"
+    assert combined["main_outcome"] in {"Up", "Down"}
+    assert combined["estimated_probability"] is not None
+    assert combined["main_expected_fill_price"] is not None
+    assert combined["seconds_to_close"] == 10
+
+
+def test_terminal_combination_is_not_evaluated_outside_directional_window():
+    rows = evaluate_market_event(event(), market(), venue(), now=1000.0)
+
+    assert not any(
+        row["event_type"] in {"shadow_hedge_eval", "shadow_hedged_opportunity"}
+        for row in rows
+    )
+
+
 def test_process_once_emits_transitions_and_bounded_decision_heartbeats(tmp_path, monkeypatch):
     audit_path = tmp_path / "shadow-audit.jsonl"
     market_path = tmp_path / "markets.json"

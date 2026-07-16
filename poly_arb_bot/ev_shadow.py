@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from .ev_strategies import (
     DirectionalInput,
     decision_audit,
+    directional_windows,
     evaluate_directional,
     evaluate_lottery,
 )
@@ -544,56 +545,31 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
 
 
 def _terminal_hedge_audit(rows, event, market, size):
-    directional = [
-        row for row in rows
-        if row["strategy"] == "late_window_directional_ev" and row["decision"] == "ACCEPT"
-    ]
+    directional = [row for row in rows if row["strategy"] == "late_window_directional_ev"]
     if not directional:
         return None
-    main = max(directional, key=lambda row: row.get("net_ev") or float("-inf"))
+    seconds_to_close = int(directional[0]["seconds_to_close"])
+    window = directional_windows().get(market.get("interval"))
+    if not window or not window[0] <= seconds_to_close <= window[1]:
+        return None
+    accepted_directional = [row for row in directional if row["decision"] == "ACCEPT"]
+    main = max(
+        accepted_directional or directional,
+        key=lambda row: (
+            row.get("net_ev") if row.get("net_ev") is not None else float("-inf"),
+            row.get("estimated_probability") or float("-inf"),
+        ),
+    )
     hedge_outcome = "Down" if main["outcome"] == "Up" else "Up"
     hedge = next(
         (row for row in rows
          if row["strategy"] == "low_price_lottery_ev" and row["outcome"] == hedge_outcome),
         None,
     )
-    if not hedge:
-        return None
-    allowed_hedge_rejections = {"net_ev_below_threshold"}
-    blockers = set(hedge.get("blocking_reasons", ())) - allowed_hedge_rejections
-    if blockers or hedge["expected_fill_price"] > float(os.getenv("LOTTERY_MAX_PRICE", "0.05")):
-        return None
-    main_unit_cost = (
-        main["expected_fill_price"] + main["fees"] + main["slippage"]
-        + main["latency_risk_buffer"] + main["settlement_risk_buffer"]
-    )
-    hedge_unit_cost = (
-        hedge["expected_fill_price"] + hedge["fees"] + hedge["slippage"]
-        + hedge["model_uncertainty_buffer"] + hedge["execution_risk_buffer"]
-    )
-    if hedge_unit_cost >= 1:
-        return None
-    main_cost = size * main_unit_cost
-    max_reversal_loss = float(os.getenv("TERMINAL_HEDGE_MAX_REVERSAL_LOSS", "1.0"))
-    hedge_size = max(0.0, (main_cost - max_reversal_loss) / (1 - hedge_unit_cost))
-    if not 0 < hedge_size <= size * float(os.getenv("TERMINAL_HEDGE_MAX_SIZE_RATIO", "1.0")):
-        return None
-    hedge_cost = hedge_size * hedge_unit_cost
-    total_cost = main_cost + hedge_cost
-    main_win_pnl = size - total_cost
-    reversal_pnl = hedge_size - total_cost
-    probability = float(main["estimated_probability"])
-    expected_pnl = probability * main_win_pnl + (1 - probability) * reversal_pnl
-    if (
-        main_win_pnl <= 0
-        or reversal_pnl < -max_reversal_loss - 1e-9
-        or expected_pnl < float(os.getenv("TERMINAL_HEDGE_MIN_EXPECTED_PNL", "0.05"))
-    ):
-        return None
-    return {
+    audit = {
         "ts": event.get("ts"), "timestamp": event.get("ts"),
         "event_id": f'{event.get("event_id", market.get("market_id"))}:terminal_hedge',
-        "event_type": "shadow_hedged_opportunity",
+        "event_type": "shadow_hedge_eval",
         "strategy": "late_window_directional_ev",
         "hedge_strategy": "low_price_lottery_ev",
         "execution_mode": "terminal_hedged",
@@ -604,20 +580,77 @@ def _terminal_hedge_audit(rows, event, market, size):
         "session": event.get("ws_session_id", event.get("session")),
         "evaluation_sequence": event.get("evaluation_sequence"),
         "main_outcome": main["outcome"], "hedge_outcome": hedge_outcome,
-        "main_size": size, "hedge_size": hedge_size,
-        "main_expected_fill_price": main["expected_fill_price"],
-        "hedge_expected_fill_price": hedge["expected_fill_price"],
-        "main_cost": main_cost, "hedge_cost": hedge_cost, "total_cost": total_cost,
-        "main_win_pnl": main_win_pnl, "reversal_pnl": reversal_pnl,
-        "expected_portfolio_pnl": expected_pnl,
-        "worst_case_pnl": min(main_win_pnl, reversal_pnl),
-        "estimated_probability": probability,
-        "seconds_to_close": main["seconds_to_close"],
-        "decision": "ACCEPT", "reason": "terminal_hedged_opportunity",
+        "main_size": size, "hedge_size": 0.0,
+        "main_expected_fill_price": main.get("expected_fill_price"),
+        "hedge_expected_fill_price": hedge.get("expected_fill_price") if hedge else None,
+        "main_cost": 0.0, "hedge_cost": 0.0, "total_cost": 0.0,
+        "main_win_pnl": 0.0, "reversal_pnl": 0.0,
+        "expected_portfolio_pnl": 0.0, "worst_case_pnl": 0.0,
+        "estimated_probability": main.get("estimated_probability"),
+        "seconds_to_close": seconds_to_close,
+        "decision": "REJECT", "reason": main["reason"],
         "target_size": size, "config_version": "terminal-hedge-v1",
         "config_hash": strategy_config()[1],
         "real_order_submissions": 0, "real_orders": 0, "real_fills": 0,
     }
+    if not accepted_directional:
+        return audit
+    if not hedge:
+        audit["reason"] = "hedge_quote_unavailable"
+        return audit
+    allowed_hedge_rejections = {"net_ev_below_threshold"}
+    blockers = set(hedge.get("blocking_reasons", ())) - allowed_hedge_rejections
+    if blockers:
+        audit["reason"] = next(iter(blockers))
+        return audit
+    if hedge["expected_fill_price"] > float(os.getenv("LOTTERY_MAX_PRICE", "0.05")):
+        audit["reason"] = "hedge_price_above_limit"
+        return audit
+    main_unit_cost = (
+        main["expected_fill_price"] + main["fees"] + main["slippage"]
+        + main["latency_risk_buffer"] + main["settlement_risk_buffer"]
+    )
+    hedge_unit_cost = (
+        hedge["expected_fill_price"] + hedge["fees"] + hedge["slippage"]
+        + hedge["model_uncertainty_buffer"] + hedge["execution_risk_buffer"]
+    )
+    if hedge_unit_cost >= 1:
+        audit["reason"] = "hedge_unit_cost_invalid"
+        return audit
+    main_cost = size * main_unit_cost
+    max_reversal_loss = float(os.getenv("TERMINAL_HEDGE_MAX_REVERSAL_LOSS", "1.0"))
+    hedge_size = max(0.0, (main_cost - max_reversal_loss) / (1 - hedge_unit_cost))
+    if hedge_size <= 0:
+        audit.update(main_cost=main_cost, reason="hedge_not_required")
+        return audit
+    if hedge_size > size * float(os.getenv("TERMINAL_HEDGE_MAX_SIZE_RATIO", "1.0")):
+        audit.update(main_cost=main_cost, hedge_size=hedge_size, reason="hedge_size_above_limit")
+        return audit
+    hedge_cost = hedge_size * hedge_unit_cost
+    total_cost = main_cost + hedge_cost
+    main_win_pnl = size - total_cost
+    reversal_pnl = hedge_size - total_cost
+    probability = float(main["estimated_probability"])
+    expected_pnl = probability * main_win_pnl + (1 - probability) * reversal_pnl
+    audit.update(
+        hedge_size=hedge_size, main_cost=main_cost, hedge_cost=hedge_cost,
+        total_cost=total_cost, main_win_pnl=main_win_pnl,
+        reversal_pnl=reversal_pnl, expected_portfolio_pnl=expected_pnl,
+        worst_case_pnl=min(main_win_pnl, reversal_pnl),
+    )
+    if main_win_pnl <= 0:
+        audit["reason"] = "main_win_pnl_not_positive"
+    elif reversal_pnl < -max_reversal_loss - 1e-9:
+        audit["reason"] = "reversal_loss_above_limit"
+    elif expected_pnl < float(os.getenv("TERMINAL_HEDGE_MIN_EXPECTED_PNL", "0.05")):
+        audit["reason"] = "portfolio_ev_below_threshold"
+    else:
+        audit.update(
+            event_type="shadow_hedged_opportunity",
+            decision="ACCEPT",
+            reason="terminal_hedged_opportunity",
+        )
+    return audit
 
 
 def _load(path, default):
