@@ -124,15 +124,40 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
     assert all(row["event_id"].startswith("paired-1:") for row in rows)
     assert all(row["real_order_submissions"] == 0 for row in rows)
     assert all(row["target_size"] == 10 for row in rows)
-    assert all(row["config_version"] == "shadow-buy-rules-v6" for row in rows)
+    assert all(row["config_version"] == "shadow-buy-rules-v7" for row in rows)
+
+
+def test_terminal_high_confidence_signal_emits_hedged_combination():
+    current_market = market()
+    current_market["close_ts"] = 1010
+    current_event = event()
+    current_event.update(
+        up_vwap=.80, up_best_ask=.80, up_fee=.01,
+        down_vwap=.04, down_best_ask=.04, down_fee=.01,
+    )
+    state = venue(volatility=.0001)
+    state["assets"]["BTC"]["settlement_reference"] = 101.0
+    state["assets"]["BTC"]["sources"]["chainlink"]["price"] = 101.0
+
+    rows = evaluate_market_event(current_event, current_market, state, now=1000.0)
+
+    combined = next(row for row in rows if row["event_type"] == "shadow_hedged_opportunity")
+    assert combined["main_outcome"] == "Up"
+    assert combined["hedge_outcome"] == "Down"
+    assert combined["estimated_probability"] >= .9
+    assert combined["main_win_pnl"] > 0
+    assert combined["reversal_pnl"] >= -1.0
+    assert combined["expected_portfolio_pnl"] > 0
+    assert combined["real_order_submissions"] == 0
     assert all(len(row["config_hash"]) == 64 for row in rows)
-    assert all(row["volatility_per_sqrt_second"] == .001 for row in rows)
-    assert all(row["expected_move_log_std"] > 0 for row in rows)
-    assert all(row["paired_book_imbalance"] == .2 for row in rows)
+    model_rows = [row for row in rows if row["event_type"] == "shadow_eval"]
+    assert all(row["volatility_per_sqrt_second"] == .0001 for row in model_rows)
+    assert all(row["expected_move_log_std"] > 0 for row in model_rows)
+    assert all(row["paired_book_imbalance"] == .2 for row in model_rows)
     assert all(row["up_final_model_z"] == (
         row["up_standardized_distance"] + row["up_momentum_z"] + row["up_imbalance_z"]
-    ) for row in rows)
-    assert all(row["confidence_type"] == "input_quality_not_historical_accuracy" for row in rows)
+    ) for row in model_rows)
+    assert all(row["confidence_type"] == "input_quality_not_historical_accuracy" for row in model_rows)
     assert all("strategy_config" not in row for row in rows)
 
 
@@ -449,8 +474,8 @@ def test_cpp_verification_mode_writes_only_parity_mismatches(tmp_path):
     base = {
         "event_id": "cpp-1", "event_type": "shadow_eval",
         "strategy": "late_window_directional_ev", "timeframe": "5m",
-        "expected_fill_price": .56, "estimated_probability": .65,
-        "seconds_to_close": 45, "price_to_beat": 100,
+        "expected_fill_price": .56, "estimated_probability": .95,
+        "seconds_to_close": 10, "price_to_beat": 100,
         "fees": .01, "slippage": .002, "latency_risk_buffer": .003,
         "settlement_risk_buffer": .002, "model_uncertainty_buffer": .01,
         "execution_risk_buffer": .005, "liquidity": 100, "book_age_ms": 50,
@@ -462,7 +487,7 @@ def test_cpp_verification_mode_writes_only_parity_mismatches(tmp_path):
         "momentum_bps_30s": 2, "order_book_imbalance": .1,
         "reference_quorum_met": True, "settlement_source_verified": True,
         "decision": "ACCEPT", "reason": "positive_net_ev",
-        "gross_edge": .09, "net_ev": .073,
+        "gross_edge": .39, "net_ev": .373,
         "config_hash": ev_shadow.strategy_config()[1],
     }
     source.write_text(json.dumps(base) + "\n", encoding="utf-8")

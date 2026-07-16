@@ -27,7 +27,10 @@ def test_cpp_strategy_has_independent_models_and_fail_closed_gates():
     assert "lottery_market_blend_probability" in source
     assert "evaluate_directional" in source
     assert "evaluate_lottery" in source
+    assert "evaluate_terminal_hedge" in source
     assert "outside_time_window" in source
+    assert "model_confidence_below_threshold" in source
+    assert "directional_min_probability" in source
     assert "entry_price_above_limit" in source
     assert "settlement_reference_unverified" in source
 

@@ -30,8 +30,8 @@
     "strategy": "late_window_directional_ev",
     "timeframe": "5m",
     "expected_fill_price": 0.56,
-    "estimated_probability": 0.65,
-    "seconds_to_close": 45
+    "estimated_probability": 0.95,
+    "seconds_to_close": 10
   },
   {
     "name": "directional_time_window_15m",
@@ -40,7 +40,7 @@
     "timeframe": "15m",
     "expected_fill_price": 0.20,
     "estimated_probability": 0.50,
-    "seconds_to_close": 19
+    "seconds_to_close": 21
   },
   {
     "name": "directional_reference_blocked",
@@ -93,5 +93,37 @@
     "seconds_to_close": 60,
     "liquidity": 10,
     "target_depth_ok": false
+  },
+  {
+    "name": "terminal_hedge_accept",
+    "mode": "terminal_hedge",
+    "main_size": 10.0,
+    "main_probability": 0.97,
+    "main_expected_fill_price": 0.6,
+    "main_fee_per_share": 0.002,
+    "main_slippage_per_share": 0.001,
+    "hedge_expected_fill_price": 0.03,
+    "hedge_fee_per_share": 0.001,
+    "hedge_slippage_per_share": 0.001,
+    "hedge_liquidity": 100.0,
+    "hedge_minimum_liquidity": 20.0,
+    "hedge_maximum_slippage": 0.01,
+    "hedge_target_depth_ok": true
+  },
+  {
+    "name": "terminal_hedge_price_blocked",
+    "mode": "terminal_hedge",
+    "main_size": 10.0,
+    "main_probability": 0.97,
+    "main_expected_fill_price": 0.6,
+    "main_fee_per_share": 0.002,
+    "main_slippage_per_share": 0.001,
+    "hedge_expected_fill_price": 0.08,
+    "hedge_fee_per_share": 0.001,
+    "hedge_slippage_per_share": 0.001,
+    "hedge_liquidity": 100.0,
+    "hedge_minimum_liquidity": 20.0,
+    "hedge_maximum_slippage": 0.01,
+    "hedge_target_depth_ok": true
   }
 ]

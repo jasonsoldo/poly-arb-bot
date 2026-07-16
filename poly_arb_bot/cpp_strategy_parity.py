@@ -12,6 +12,57 @@ from .reference_layer import ReferenceState
 
 
 def python_result(case):
+    if case["mode"] == "terminal_hedge":
+        main_unit_cost = (
+            case["main_expected_fill_price"] + case["main_fee_per_share"]
+            + case["main_slippage_per_share"] + .003 + .002
+        )
+        hedge_unit_cost = (
+            case["hedge_expected_fill_price"] + case["hedge_fee_per_share"]
+            + case["hedge_slippage_per_share"] + .01 + .005
+        )
+        main_cost = case["main_size"] * main_unit_cost
+        hedge_size = hedge_cost = total_cost = 0.0
+        main_win_pnl = reversal_pnl = expected_pnl = 0.0
+        reason = None
+        if case["hedge_expected_fill_price"] > .05:
+            reason = "hedge_price_above_limit"
+        elif not case["hedge_target_depth_ok"] or case["hedge_liquidity"] < case["hedge_minimum_liquidity"]:
+            reason = "hedge_depth_insufficient"
+        elif case["hedge_slippage_per_share"] > case["hedge_maximum_slippage"]:
+            reason = "hedge_slippage_exceeded"
+        elif hedge_unit_cost >= 1:
+            reason = "hedge_unit_cost_invalid"
+        else:
+            hedge_size = max(0.0, (main_cost - 1.0) / (1 - hedge_unit_cost))
+            if hedge_size <= 0:
+                reason = "hedge_not_required"
+            elif hedge_size > case["main_size"]:
+                reason = "hedge_size_above_limit"
+            else:
+                hedge_cost = hedge_size * hedge_unit_cost
+                total_cost = main_cost + hedge_cost
+                main_win_pnl = case["main_size"] - total_cost
+                reversal_pnl = hedge_size - total_cost
+                expected_pnl = (
+                    case["main_probability"] * main_win_pnl
+                    + (1 - case["main_probability"]) * reversal_pnl
+                )
+                if main_win_pnl <= 0:
+                    reason = "main_win_pnl_not_positive"
+                elif reversal_pnl < -1.0 - 1e-9:
+                    reason = "reversal_loss_above_limit"
+                elif expected_pnl < .05:
+                    reason = "portfolio_ev_below_threshold"
+                else:
+                    reason = "terminal_hedged_opportunity"
+        accepted = reason == "terminal_hedged_opportunity"
+        return {
+            "accepted": accepted, "reason": reason, "hedge_size": hedge_size,
+            "main_cost": main_cost, "hedge_cost": hedge_cost, "total_cost": total_cost,
+            "main_win_pnl": main_win_pnl, "reversal_pnl": reversal_pnl,
+            "expected_pnl": expected_pnl,
+        }
     if case["mode"] in {"probability", "lottery_probability"}:
         asset = {
             "settlement_reference": case["settlement_reference"],

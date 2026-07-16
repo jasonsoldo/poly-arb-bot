@@ -6,6 +6,59 @@ import poly_arb_bot.web_monitor as web_monitor
 from poly_arb_bot.web_monitor import _jsonl, _strategy_counts, build_status
 
 
+def test_strategy_counts_separates_terminal_hedge_from_raw_model_accepts(tmp_path):
+    path = tmp_path / "strategy.jsonl"
+    rows = [
+        {"event_id": "raw", "event_type": "shadow_eval",
+         "strategy": "late_window_directional_ev", "decision": "ACCEPT",
+         "market_id": "m1", "outcome": "Up", "estimated_probability": 0.96},
+        {"event_id": "hedge-reject", "event_type": "shadow_hedge_eval",
+         "strategy": "late_window_directional_ev", "decision": "REJECT",
+         "market_id": "m1", "main_outcome": "Up", "reason": "hedge_price_above_limit"},
+        {"event_id": "hedge-accept", "event_type": "shadow_hedged_opportunity",
+         "strategy": "late_window_directional_ev", "decision": "ACCEPT",
+         "market_id": "m2", "main_outcome": "Down"},
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    counts = _strategy_counts((path,))["late_window_directional_ev"]
+
+    assert counts["evaluations"] == 1
+    assert counts["accepts"] == 1
+    assert counts["terminal_hedge_evaluations"] == 2
+    assert counts["terminal_hedge_accepts"] == 1
+    assert counts["terminal_hedge_rejections"] == 1
+
+
+def test_web_status_exposes_terminal_hedge_cost_chain(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (data / "live_markets.json").write_text(
+        json.dumps({"markets": [{"market_id": "m1", "asset": "BTC", "interval": "5m"}]}),
+        encoding="utf-8",
+    )
+    (logs / "shadow-audit.jsonl").write_text("", encoding="utf-8")
+    event = {
+        "ts": time.time(), "event_id": "hedged", "event_type": "shadow_hedged_opportunity",
+        "strategy": "late_window_directional_ev", "market_id": "m1", "decision": "ACCEPT",
+        "main_outcome": "Up", "hedge_outcome": "Down", "main_size": 10,
+        "hedge_size": 5, "main_expected_fill_price": .6,
+        "hedge_expected_fill_price": .03, "total_cost": 8.5,
+        "main_win_pnl": 1.5, "reversal_pnl": -3.5,
+        "expected_portfolio_pnl": 1.2, "worst_case_pnl": -3.5,
+        "seconds_to_close": 9,
+    }
+    (logs / "strategy-audit.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
+
+    assert status["current_terminal_hedge"]["event_id"] == "hedged"
+    assert status["current_terminal_hedge"]["reversal_pnl"] == -3.5
+    assert status["counts"]["terminal_hedge_evaluations"] == 1
+    assert status["counts"]["terminal_hedge_accepts"] == 1
+
+
 def test_web_status_ignores_snapshot_signals_without_current_market(tmp_path):
     (tmp_path / "live_snapshot.json").write_text(json.dumps({"signals": [{"market_id": "stale"}]}), encoding="utf-8")
     (tmp_path / "live_markets.json").write_text(json.dumps({"markets": []}), encoding="utf-8")
@@ -500,7 +553,13 @@ def test_web_status_keeps_three_strategy_statistics_separate(tmp_path):
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
 
     assert status["strategy_counts"]["paired_lock"] == {"evaluations": 1, "accepts": 0, "rejections": 1, "model_evaluations": 0, "latest_model_evaluated": False, "unique_opportunities": 0, "active_opportunities": 0}
-    assert status["strategy_counts"]["late_window_directional_ev"] == {"evaluations": 1, "accepts": 1, "rejections": 0, "model_evaluations": 1, "latest_model_evaluated": True, "unique_opportunities": 1, "active_opportunities": 1}
+    assert status["strategy_counts"]["late_window_directional_ev"] == {
+        "evaluations": 1, "accepts": 1, "rejections": 0,
+        "model_evaluations": 1, "latest_model_evaluated": True,
+        "unique_opportunities": 1, "active_opportunities": 1,
+        "terminal_hedge_evaluations": 0, "terminal_hedge_accepts": 0,
+        "terminal_hedge_rejections": 0,
+    }
     assert status["strategy_counts"]["low_price_lottery_ev"] == {"evaluations": 1, "accepts": 0, "rejections": 1, "model_evaluations": 1, "latest_model_evaluated": True, "unique_opportunities": 0, "active_opportunities": 0}
     assert status["counts"]["shadow_evaluations"] == 3
     assert status["current_pair"]["reason"] == "net_cost_above_threshold"

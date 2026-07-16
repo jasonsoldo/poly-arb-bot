@@ -1,10 +1,23 @@
+import os
 from dataclasses import dataclass
 from typing import Optional
 
 from .reference_layer import ReferenceState
 
 
-DIRECTIONAL_WINDOWS = {"5m": (15, 90), "15m": (20, 180), "1h": (30, 300), "4h": (60, 600)}
+DEFAULT_DIRECTIONAL_WINDOWS = {
+    "5m": (5, 15), "15m": (5, 20), "1h": (8, 30), "4h": (10, 45),
+}
+
+
+def directional_windows():
+    return {
+        timeframe: (
+            int(os.getenv(f"DIRECTIONAL_WINDOW_{timeframe.upper()}_MIN", minimum)),
+            int(os.getenv(f"DIRECTIONAL_WINDOW_{timeframe.upper()}_MAX", maximum)),
+        )
+        for timeframe, (minimum, maximum) in DEFAULT_DIRECTIONAL_WINDOWS.items()
+    }
 
 
 @dataclass(frozen=True)
@@ -100,11 +113,13 @@ def _common_rejections(row):
     return reasons
 
 
-def evaluate_directional(row, min_net_ev=.015):
+def evaluate_directional(row, min_net_ev=.015, min_probability=.90, windows=None):
     reasons = _common_rejections(row)
-    window = DIRECTIONAL_WINDOWS.get(row.timeframe)
+    window = (windows or directional_windows()).get(row.timeframe)
     if not window or not window[0] <= row.seconds_to_close <= window[1]:
         _append_reason(reasons, "outside_time_window")
+    if row.estimated_probability is not None and row.estimated_probability < min_probability:
+        _append_reason(reasons, "model_confidence_below_threshold")
     gross = row.estimated_probability - row.expected_fill_price if row.estimated_probability is not None else None
     net = gross - row.fee_per_share - row.slippage_per_share - row.latency_risk_buffer - row.settlement_risk_buffer if gross is not None else None
     if net is not None and net < min_net_ev:

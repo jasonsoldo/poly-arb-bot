@@ -58,6 +58,31 @@ int main() {
             std::cout << "}\n";
             continue;
         }
+        if (mode == "terminal_hedge") {
+            strategy::TerminalHedgeInput value;
+            value.main_size = row.get<double>("main_size");
+            value.main_probability = row.get<double>("main_probability");
+            value.main_expected_fill_price = row.get<double>("main_expected_fill_price");
+            value.main_fee_per_share = row.get<double>("main_fee_per_share");
+            value.main_slippage_per_share = row.get<double>("main_slippage_per_share");
+            value.hedge_expected_fill_price = row.get<double>("hedge_expected_fill_price");
+            value.hedge_fee_per_share = row.get<double>("hedge_fee_per_share");
+            value.hedge_slippage_per_share = row.get<double>("hedge_slippage_per_share");
+            value.hedge_liquidity = row.get<double>("hedge_liquidity");
+            value.hedge_minimum_liquidity = row.get<double>("hedge_minimum_liquidity");
+            value.hedge_maximum_slippage = row.get<double>("hedge_maximum_slippage");
+            value.hedge_target_depth_ok = row.get<bool>("hedge_target_depth_ok");
+            const auto output = strategy::evaluate_terminal_hedge(value);
+            std::cout << "{\"accepted\":" << (output.accepted ? "true" : "false")
+                      << ",\"reason\":\"" << output.reason << "\",\"hedge_size\":"
+                      << output.hedge_size << ",\"main_cost\":" << output.main_cost
+                      << ",\"hedge_cost\":" << output.hedge_cost
+                      << ",\"total_cost\":" << output.total_cost
+                      << ",\"main_win_pnl\":" << output.main_win_pnl
+                      << ",\"reversal_pnl\":" << output.reversal_pnl
+                      << ",\"expected_pnl\":" << output.expected_pnl << "}\n";
+            continue;
+        }
         strategy::EvaluationInput value;
         value.strategy = row.get<std::string>("strategy");
         value.timeframe = row.get<std::string>("timeframe");

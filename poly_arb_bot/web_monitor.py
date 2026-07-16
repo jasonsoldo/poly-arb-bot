@@ -146,12 +146,18 @@ def _jsonl(path, limit=100):
 
 
 def _empty_strategy_counts():
-    return {
+    counts = {
         name: {"evaluations": 0, "accepts": 0, "rejections": 0,
                "model_evaluations": 0, "latest_model_evaluated": False,
                "unique_opportunities": 0, "active_opportunities": 0}
         for name in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
     }
+    counts["late_window_directional_ev"].update({
+        "terminal_hedge_evaluations": 0,
+        "terminal_hedge_accepts": 0,
+        "terminal_hedge_rejections": 0,
+    })
+    return counts
 
 
 def _new_strategy_state():
@@ -279,7 +285,10 @@ def _strategy_counts(paths):
                                 except ValueError:
                                     continue
                             strategy = row.get("strategy", "paired_lock")
-                            if row.get("event_type") != "shadow_eval" or strategy not in state["counts"]:
+                            event_type = row.get("event_type")
+                            if strategy not in state["counts"] or event_type not in {
+                                "shadow_eval", "shadow_hedge_eval", "shadow_hedged_opportunity",
+                            }:
                                 continue
                             event_id = row.get("event_id")
                             if event_id and event_id in state["seen"]:
@@ -287,6 +296,12 @@ def _strategy_counts(paths):
                             if event_id:
                                 state["seen"].add(event_id)
                             bucket = state["counts"][strategy]
+                            if event_type in {"shadow_hedge_eval", "shadow_hedged_opportunity"}:
+                                accepted = event_type == "shadow_hedged_opportunity"
+                                bucket["terminal_hedge_evaluations"] += 1
+                                bucket["terminal_hedge_accepts"] += int(accepted)
+                                bucket["terminal_hedge_rejections"] += int(not accepted)
+                                continue
                             bucket["evaluations"] += 1
                             accepted = row.get("decision") == "ACCEPT"
                             bucket["accepts"] += int(accepted)
@@ -320,6 +335,13 @@ def _strategy_counts(paths):
                 total[name]["unique_opportunities"] += state["counts"][name].get("unique_opportunities", 0)
                 total[name]["active_opportunities"] += len(state["active"][name])
                 total[name]["latest_model_evaluated"] = state["counts"][name]["latest_model_evaluated"]
+            for field in (
+                "terminal_hedge_evaluations", "terminal_hedge_accepts",
+                "terminal_hedge_rejections",
+            ):
+                total["late_window_directional_ev"][field] += state["counts"][
+                    "late_window_directional_ev"
+                ][field]
     return total
 
 
@@ -423,7 +445,10 @@ def build_status(data_dir, log_file, state_file):
     events = [item for item in events if float(item.get("ts", 0)) <= time.time() + 300]
     execution_log = data_dir.parent / "logs" / "shadow-execution.jsonl"
     report, report_refreshing = _report_for_status(selected_log, execution_log)
-    shadow_events = [item for item in events if item.get("event_type") in {"shadow_eval", "shadow_opportunity"}]
+    shadow_events = [item for item in events if item.get("event_type") in {
+        "shadow_eval", "shadow_opportunity", "shadow_hedge_eval",
+        "shadow_hedged_opportunity",
+    }]
     paired_events = [item for item in shadow_events if item.get("strategy", "paired_lock") == "paired_lock"]
     latest_shadow = {}
     for item in paired_events:
@@ -550,6 +575,8 @@ def build_status(data_dir, log_file, state_file):
     active_opportunities = sum(row["active_opportunities"] for row in strategy_counts.values())
     strategy_latest = {}
     for item in shadow_events:
+        if item.get("event_type") != "shadow_eval":
+            continue
         strategy = item.get("strategy", "paired_lock")
         strategy_latest.setdefault(strategy, item)
     strategy_recent = {}
@@ -577,6 +604,12 @@ def build_status(data_dir, log_file, state_file):
                    "buffer", "net_cost", "guaranteed_payout", "locked_profit",
                    "expected_execution_value", "decision", "reason")
     current_pair = {key: latest_event.get(key) for key in pair_fields} if latest_event else {}
+    latest_terminal_hedge = next(
+        (item for item in shadow_events if item.get("event_type") in {
+            "shadow_hedge_eval", "shadow_hedged_opportunity",
+        }),
+        None,
+    )
     engine_latency = reference_prices.get("engine_latency_us")
     def age_snapshot(source):
         values = []
@@ -621,6 +654,12 @@ def build_status(data_dir, log_file, state_file):
             "shadow_accepts": max(strategy_accepts, report["accepts"]),
             "unique_opportunities": unique_opportunities,
             "active_opportunities": active_opportunities,
+            "terminal_hedge_evaluations": strategy_counts["late_window_directional_ev"].get(
+                "terminal_hedge_evaluations", 0
+            ),
+            "terminal_hedge_accepts": strategy_counts["late_window_directional_ev"].get(
+                "terminal_hedge_accepts", 0
+            ),
             "simulated_complete": report["performance"]["completed"],
         },
         "shadow_markets": list(latest_shadow.values()),
@@ -677,6 +716,7 @@ def build_status(data_dir, log_file, state_file):
         "pnl_meter": {"simulated_pnl": report["performance"]["simulated_pnl"], "realized_pnl": 0.0},
         "strategy_score": strategy_score,
         "current_pair": current_pair,
+        "current_terminal_hedge": latest_terminal_hedge or {},
         "clob_readiness": clob_readiness,
         "pipeline_steps": {
             "ingest": "PASS" if markets else "BLOCKED",

@@ -84,11 +84,15 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                        for row in strategy_rows)},
         {"name": "probability_models_evaluated",
          "passed": all(row.get("model_evaluations", 0) > 0 for row in probability_rows)},
+        {"name": "terminal_hedge_evaluated",
+         "passed": strategy_counts.get("late_window_directional_ev", {}).get(
+             "terminal_hedge_evaluations", 0
+         ) > 0},
     ]
     passed = all(item["passed"] for item in checks)
     incomplete_checks = {"analytics_ready", "market_data_present", "audit_data_present",
                          "three_strategy_evaluations", "probability_models_evaluated",
-                         "low_latency_observed"}
+                         "low_latency_observed", "terminal_hedge_evaluated"}
     incomplete_only = all(item["passed"] or item["name"] in incomplete_checks for item in checks)
     status = "PASS" if passed else "INCOMPLETE" if incomplete_only else "FAIL"
     return {"passed": passed, "status": status, "checks": checks,
@@ -97,6 +101,12 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                         "evaluations": shadow.get("evaluations", 0),
                         "strategy_evaluations": {name: strategy_counts.get(name, {}).get("evaluations", 0)
                                                  for name in strategy_names},
+                        "terminal_hedge_evaluations": strategy_counts.get(
+                            "late_window_directional_ev", {}
+                        ).get("terminal_hedge_evaluations", 0),
+                        "terminal_hedge_accepts": strategy_counts.get(
+                            "late_window_directional_ev", {}
+                        ).get("terminal_hedge_accepts", 0),
                         "duplicates": shadow.get("duplicate_events", 0),
                         "reference_ipc_receive_age_ms_p95": reference_age_p95,
                         "clob_to_strategy_evaluation_us_p95": strategy_latency_p95,

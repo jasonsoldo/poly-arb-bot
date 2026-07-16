@@ -16,7 +16,9 @@ def valid_status():
         "shadow_lifecycle": {"real_order_submissions": 0, "real_orders": 0, "real_fills": 0},
         "strategy_counts": {
             "paired_lock": {"evaluations": 10, "accepts": 2, "rejections": 8, "model_evaluations": 0},
-            "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19, "model_evaluations": 20, "latest_model_evaluated": True},
+            "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19, "model_evaluations": 20, "latest_model_evaluated": True,
+                                            "terminal_hedge_evaluations": 20, "terminal_hedge_accepts": 1,
+                                            "terminal_hedge_rejections": 19},
             "low_price_lottery_ev": {"evaluations": 20, "accepts": 0, "rejections": 20, "model_evaluations": 20, "latest_model_evaluated": True},
         },
         "strategy_latest": {
@@ -113,6 +115,17 @@ def test_acceptance_fails_when_probability_model_never_evaluated():
     report = evaluate_status(status)
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert "probability_models_evaluated" in failed
+
+
+def test_acceptance_marks_missing_terminal_hedge_evaluations_incomplete():
+    status = valid_status()
+    status["strategy_counts"]["late_window_directional_ev"]["terminal_hedge_evaluations"] = 0
+
+    report = evaluate_status(status)
+
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert failed == {"terminal_hedge_evaluated"}
+    assert report["status"] == "INCOMPLETE"
 
 
 def test_acceptance_uses_model_count_when_latest_row_fails_closed_before_model():

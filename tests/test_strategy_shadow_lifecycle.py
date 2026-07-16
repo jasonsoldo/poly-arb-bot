@@ -34,6 +34,21 @@ def paired(event_id="pair1"):
     }
 
 
+def hedged(event_id="hedge1", main_outcome="Up"):
+    return {
+        "event_id": event_id, "event_type": "shadow_hedged_opportunity",
+        "strategy": "late_window_directional_ev", "hedge_strategy": "low_price_lottery_ev",
+        "market_id": "m1", "decision": "ACCEPT", "asset": "BTC", "timeframe": "5m",
+        "main_outcome": main_outcome, "hedge_outcome": "Down" if main_outcome == "Up" else "Up",
+        "main_size": 10, "hedge_size": 8, "main_expected_fill_price": .8,
+        "hedge_expected_fill_price": .04, "main_cost": 8.05, "hedge_cost": .35,
+        "total_cost": 8.4, "main_win_pnl": 1.6, "reversal_pnl": -.4,
+        "expected_portfolio_pnl": 1.4, "worst_case_pnl": -.4,
+        "estimated_probability": .9, "seconds_to_close": 8, "target_size": 10,
+        "ts": 1000, "config_version": "terminal-hedge-v1", "config_hash": "hedge-hash",
+    }
+
+
 def market(source="chainlink", timeframe="5m"):
     return {"market_id": "m1", "asset": "BTC", "interval": timeframe,
             "settlement_source": source, "close_ts": 1100, "open_price": 100}
@@ -63,8 +78,42 @@ def test_repeated_accepts_open_one_position(tmp_path):
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["entry_cost"] == 4.1
     assert position["real_order_submissions"] == 0
-    assert position["config_version"] == "shadow-portfolio-v5"
+    assert position["config_version"] == "shadow-portfolio-v6"
     assert len(position["config_hash"]) == 64
+
+
+def test_raw_directional_accept_is_calibration_only_and_does_not_open_position(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    row = accepted()
+    row["config_version"] = "shadow-buy-rules-v7"
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["positions"] == {}
+
+
+def test_terminal_hedge_opens_one_combined_position(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    assert lifecycle.consume(hedged(), {"m1": market()}) is True
+    position = next(iter(lifecycle.data["positions"].values()))
+    assert position["outcome"] == "Up"
+    assert position["hedge_outcome"] == "Down"
+    assert position["entry_cost"] == 8.4
+    assert position["main_size"] == 10
+    assert position["hedge_size"] == 8
+    assert position["expected_portfolio_pnl"] == 1.4
+
+
+def test_terminal_hedge_settlement_uses_main_or_hedge_payout(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    lifecycle.consume(hedged(), {"m1": market()})
+    venue = {"assets": {"BTC": {"chainlink_settlement_samples": [
+        {"source_timestamp_ms": 1_100_000, "price": 99},
+    ]}}}
+    assert lifecycle.settle({"m1": market()}, venue, now=1101) == 1
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["winning_outcome"] == "Down"
+    assert complete["payout"] == 8
+    assert complete["realized_simulated_pnl"] == -.4
 
 
 def test_chainlink_settlement_completes_winning_up_position(tmp_path):

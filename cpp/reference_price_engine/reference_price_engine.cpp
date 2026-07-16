@@ -21,10 +21,14 @@
 #include <map>
 #include <mutex>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
+#ifdef __linux__
+#include <sys/timex.h>
+#endif
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -36,6 +40,24 @@ using boost::property_tree::ptree;
 double now_ms() {
     return std::chrono::duration<double, std::milli>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::optional<double> system_clock_skew_ms() {
+    if (const char* configured = std::getenv("CLOCK_SKEW_MS")) {
+        try {
+            const double value = std::stod(configured);
+            if (std::isfinite(value) && value >= 0) return value;
+        } catch (...) {}
+        return std::nullopt;
+    }
+#ifdef __linux__
+    timex state{};
+    if (adjtimex(&state) == TIME_ERROR || (state.status & STA_UNSYNC)) return std::nullopt;
+    const double divisor = state.status & STA_NANO ? 1'000'000.0 : 1'000.0;
+    return std::abs(static_cast<double>(state.offset)) / divisor;
+#else
+    return std::nullopt;
+#endif
 }
 
 struct SourceState {
@@ -234,6 +256,7 @@ double momentum_bps(const SourceState& source, double timestamp, double horizon_
 
 void publish_ipc_locked(SharedState& shared, bool force = false) {
     const double timestamp = now_ms();
+    const auto clock_skew_ms = system_clock_skew_ms();
     if (!shared.reference_publisher ||
         (!force && timestamp - shared.last_ipc_publish_ms < IPC_PUBLISH_INTERVAL_MS)) return;
     shared.last_ipc_publish_ms = timestamp;
@@ -264,7 +287,7 @@ void publish_ipc_locked(SharedState& shared, bool force = false) {
             return found != quote_medians.end() && found->second > 0 &&
                    std::abs(source.price - found->second) / found->second * 10000 > 100;
         };
-        double fast_price = 0, settlement_reference = 0, clock_skew_upper_bound_ms = 0;
+        double fast_price = 0, settlement_reference = 0;
         for (const auto& item : asset.sources) {
             const auto& source = item.second;
             auto& state = output.sources[item.first];
@@ -302,11 +325,6 @@ void publish_ipc_locked(SharedState& shared, bool force = false) {
                 continue;
             }
             if (source.market_type != "spot" || is_outlier(source)) continue;
-            if (state.source_timestamp_ms && source.received_at > 0) {
-                const double delta = std::abs(source.received_at - *state.source_timestamp_ms);
-                if (!clock_skew_upper_bound_ms || delta < clock_skew_upper_bound_ms)
-                    clock_skew_upper_bound_ms = delta;
-            }
             fresh_spot.push_back(source.price);
             ++output.fresh_exchange_source_count;
             if (source.quote_currency == "USD") {
@@ -337,7 +355,7 @@ void publish_ipc_locked(SharedState& shared, bool force = false) {
         const double volatility = median(volatilities);
         if (volatility > 0) output.volatility_per_sqrt_second = volatility;
         if (!momentums.empty()) output.momentum_bps_30s = median(momentums);
-        if (clock_skew_upper_bound_ms > 0) output.clock_skew_ms = clock_skew_upper_bound_ms;
+        output.clock_skew_ms = clock_skew_ms;
         output.model_sample_count = static_cast<int>(median(model_sample_counts));
         output.model_sample_span_seconds = median(model_sample_spans);
         output.reference_quorum_met = output.fresh_exchange_source_count >= 2 &&
@@ -348,6 +366,7 @@ void publish_ipc_locked(SharedState& shared, bool force = false) {
 
 void write_status_locked(SharedState& shared, bool force = false) {
     const double timestamp = now_ms();
+    const auto clock_skew_ms = system_clock_skew_ms();
     if (!force && timestamp - shared.last_status_write_ms < STATUS_WRITE_INTERVAL_MS) return;
     shared.last_status_write_ms = timestamp;
     ++shared.status_writes;
@@ -374,7 +393,6 @@ void write_status_locked(SharedState& shared, bool force = false) {
                    std::abs(source.price - found->second) / found->second * 10000 > 100;
         };
         double fast_price = 0, settlement_reference = 0;
-        double clock_skew_upper_bound_ms = 0;
         int fresh_sources = 0, fresh_usd_sources = 0;
         std::vector<double> volatilities, momentums;
         std::vector<double> model_sample_counts, model_sample_spans;
@@ -386,15 +404,6 @@ void write_status_locked(SharedState& shared, bool force = false) {
                 continue;
             }
             if (source.market_type != "spot" || is_outlier(source)) continue;
-            if (!source.source_timestamp.empty()) {
-                try {
-                    double source_ms = std::stod(source.source_timestamp);
-                    if (source_ms > 0 && source_ms < 1e12) source_ms *= 1000;
-                    const double delta = std::abs(source.received_at - source_ms);
-                    if (source_ms > 0 && (!clock_skew_upper_bound_ms || delta < clock_skew_upper_bound_ms))
-                        clock_skew_upper_bound_ms = delta;
-                } catch (...) {}
-            }
             fresh_spot.push_back(source.price);
             ++fresh_sources;
             if (source.quote_currency == "USD") { fresh_usd.push_back(source.price); ++fresh_usd_sources; }
@@ -450,8 +459,9 @@ void write_status_locked(SharedState& shared, bool force = false) {
             << ",\"fresh_usd_spot_source_count\":" << fresh_usd_sources
             << ",\"consensus_price\":"; write_number(out, consensus);
         out << ",\"fast_price\":"; write_number(out, fast_price);
-        out << ",\"clock_skew_ms\":"; write_number(out, clock_skew_upper_bound_ms);
-        out << ",\"clock_skew_basis\":\"minimum_reference_receive_delta_upper_bound\"";
+        out << ",\"clock_skew_ms\":";
+        if (clock_skew_ms) out << *clock_skew_ms; else out << "null";
+        out << ",\"clock_skew_basis\":\"system_ntp_offset\"";
         out << ",\"settlement_reference\":"; write_number(out, settlement_reference);
         out << ",\"cross_source_divergence_bps\":";
         if (fresh_spot.size() > 1) out << divergence; else out << "null";

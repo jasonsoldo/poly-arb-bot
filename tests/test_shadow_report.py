@@ -73,6 +73,28 @@ def test_shadow_report_uses_realized_shadow_complete_pnl(tmp_path):
     assert report["performance_by_strategy"]["paired_lock"]["completed"] == 0
 
 
+def test_shadow_report_keeps_terminal_hedge_fields_in_ledger(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    audit.write_text("", encoding="utf-8")
+    current_hash = strategy_config("late_window_directional_ev")[1]
+    execution.write_text(json.dumps({
+        "ts": 1101, "event_type": "shadow_complete", "event_id": "h1",
+        "strategy": "late_window_directional_ev", "market_id": "m1",
+        "strategy_config_hash": current_hash, "realized_simulated_pnl": -0.4,
+        "execution_mode": "terminal_hedged", "main_outcome": "Up",
+        "hedge_outcome": "Down", "main_size": 10, "hedge_size": 8.5,
+        "total_entry_cost": 8.9,
+    }) + "\n", encoding="utf-8")
+
+    row = build_report(audit, execution)["trade_ledger"][0]
+
+    assert row["execution_mode"] == "terminal_hedged"
+    assert row["main_outcome"] == "Up"
+    assert row["hedge_outcome"] == "Down"
+    assert row["hedge_size"] == 8.5
+
+
 def test_shadow_report_excludes_other_hash_from_current_performance(tmp_path):
     audit = tmp_path / "audit.jsonl"
     execution = tmp_path / "execution.jsonl"

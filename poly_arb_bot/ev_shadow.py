@@ -25,12 +25,21 @@ BINANCE_SYMBOLS = {
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
-STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v6"
+STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v7"
 
 
 def strategy_config(strategy=None):
     values = {
         "directional_min_net_ev": os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015"),
+        "directional_min_probability": os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0.90"),
+        "directional_window_5m_min": os.getenv("DIRECTIONAL_WINDOW_5M_MIN", "5"),
+        "directional_window_5m_max": os.getenv("DIRECTIONAL_WINDOW_5M_MAX", "15"),
+        "directional_window_15m_min": os.getenv("DIRECTIONAL_WINDOW_15M_MIN", "5"),
+        "directional_window_15m_max": os.getenv("DIRECTIONAL_WINDOW_15M_MAX", "20"),
+        "directional_window_1h_min": os.getenv("DIRECTIONAL_WINDOW_1H_MIN", "8"),
+        "directional_window_1h_max": os.getenv("DIRECTIONAL_WINDOW_1H_MAX", "30"),
+        "directional_window_4h_min": os.getenv("DIRECTIONAL_WINDOW_4H_MIN", "10"),
+        "directional_window_4h_max": os.getenv("DIRECTIONAL_WINDOW_4H_MAX", "45"),
         "directional_latency_buffer": os.getenv("DIRECTIONAL_LATENCY_BUFFER", "0.003"),
         "directional_settlement_buffer": os.getenv("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002"),
         "lottery_min_price": os.getenv("LOTTERY_MIN_PRICE", "0.01"),
@@ -51,6 +60,9 @@ def strategy_config(strategy=None):
         "lottery_imbalance_z": os.getenv("LOTTERY_IMBALANCE_Z", "0.10"),
         "lottery_market_blend": os.getenv("LOTTERY_MARKET_BLEND", "0.50"),
         "minimum_model_sample_span_seconds": os.getenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"),
+        "terminal_hedge_max_reversal_loss": os.getenv("TERMINAL_HEDGE_MAX_REVERSAL_LOSS", "1.0"),
+        "terminal_hedge_min_expected_pnl": os.getenv("TERMINAL_HEDGE_MIN_EXPECTED_PNL", "0.05"),
+        "terminal_hedge_max_size_ratio": os.getenv("TERMINAL_HEDGE_MAX_SIZE_RATIO", "1.0"),
         "probability_reference": "settlement_reference",
     }
     if strategy:
@@ -58,11 +70,18 @@ def strategy_config(strategy=None):
             "coinbase_reference_max_age_ms", "minimum_liquidity", "maximum_slippage",
             "maximum_reference_age_ms", "maximum_book_age_ms", "maximum_clock_skew_ms",
             "minimum_model_sample_span_seconds", "probability_reference",
+            "terminal_hedge_max_reversal_loss", "terminal_hedge_min_expected_pnl",
+            "terminal_hedge_max_size_ratio",
         }
         strategy_keys = {
             "late_window_directional_ev": {
                 "directional_min_net_ev", "directional_latency_buffer",
-                "directional_settlement_buffer", "momentum_z_per_bps", "imbalance_z",
+                "directional_settlement_buffer", "directional_min_probability",
+                "directional_window_5m_min", "directional_window_5m_max",
+                "directional_window_15m_min", "directional_window_15m_max",
+                "directional_window_1h_min", "directional_window_1h_max",
+                "directional_window_4h_min", "directional_window_4h_max",
+                "momentum_z_per_bps", "imbalance_z",
             },
             "low_price_lottery_ev": {
                 "lottery_min_price", "lottery_max_price", "lottery_min_net_ev",
@@ -479,7 +498,11 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                 strategy=strategy, estimated_probability=probability, **common,
             )
             if strategy == "late_window_directional_ev":
-                result = evaluator(input_row, float(os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015")))
+                result = evaluator(
+                    input_row,
+                    float(os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015")),
+                    float(os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0.90")),
+                )
             else:
                 result = evaluator(
                     input_row, float(os.getenv("LOTTERY_MIN_PRICE", "0.01")),
@@ -514,7 +537,87 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             audit["config_version"] = STRATEGY_CONFIG_VERSION
             audit["config_hash"] = strategy_config(strategy)[1]
             rows.append(audit)
+    combined = _terminal_hedge_audit(rows, event, market, size)
+    if combined:
+        rows.append(combined)
     return rows
+
+
+def _terminal_hedge_audit(rows, event, market, size):
+    directional = [
+        row for row in rows
+        if row["strategy"] == "late_window_directional_ev" and row["decision"] == "ACCEPT"
+    ]
+    if not directional:
+        return None
+    main = max(directional, key=lambda row: row.get("net_ev") or float("-inf"))
+    hedge_outcome = "Down" if main["outcome"] == "Up" else "Up"
+    hedge = next(
+        (row for row in rows
+         if row["strategy"] == "low_price_lottery_ev" and row["outcome"] == hedge_outcome),
+        None,
+    )
+    if not hedge:
+        return None
+    allowed_hedge_rejections = {"net_ev_below_threshold"}
+    blockers = set(hedge.get("blocking_reasons", ())) - allowed_hedge_rejections
+    if blockers or hedge["expected_fill_price"] > float(os.getenv("LOTTERY_MAX_PRICE", "0.05")):
+        return None
+    main_unit_cost = (
+        main["expected_fill_price"] + main["fees"] + main["slippage"]
+        + main["latency_risk_buffer"] + main["settlement_risk_buffer"]
+    )
+    hedge_unit_cost = (
+        hedge["expected_fill_price"] + hedge["fees"] + hedge["slippage"]
+        + hedge["model_uncertainty_buffer"] + hedge["execution_risk_buffer"]
+    )
+    if hedge_unit_cost >= 1:
+        return None
+    main_cost = size * main_unit_cost
+    max_reversal_loss = float(os.getenv("TERMINAL_HEDGE_MAX_REVERSAL_LOSS", "1.0"))
+    hedge_size = max(0.0, (main_cost - max_reversal_loss) / (1 - hedge_unit_cost))
+    if not 0 < hedge_size <= size * float(os.getenv("TERMINAL_HEDGE_MAX_SIZE_RATIO", "1.0")):
+        return None
+    hedge_cost = hedge_size * hedge_unit_cost
+    total_cost = main_cost + hedge_cost
+    main_win_pnl = size - total_cost
+    reversal_pnl = hedge_size - total_cost
+    probability = float(main["estimated_probability"])
+    expected_pnl = probability * main_win_pnl + (1 - probability) * reversal_pnl
+    if (
+        main_win_pnl <= 0
+        or reversal_pnl < -max_reversal_loss - 1e-9
+        or expected_pnl < float(os.getenv("TERMINAL_HEDGE_MIN_EXPECTED_PNL", "0.05"))
+    ):
+        return None
+    return {
+        "ts": event.get("ts"), "timestamp": event.get("ts"),
+        "event_id": f'{event.get("event_id", market.get("market_id"))}:terminal_hedge',
+        "event_type": "shadow_hedged_opportunity",
+        "strategy": "late_window_directional_ev",
+        "hedge_strategy": "low_price_lottery_ev",
+        "execution_mode": "terminal_hedged",
+        "market_id": market.get("market_id"), "condition_id": market.get("condition_id"),
+        "asset": market.get("asset"), "timeframe": market.get("interval"),
+        "window": market.get("window", "current"),
+        "generation": event.get("subscription_generation", event.get("generation")),
+        "session": event.get("ws_session_id", event.get("session")),
+        "evaluation_sequence": event.get("evaluation_sequence"),
+        "main_outcome": main["outcome"], "hedge_outcome": hedge_outcome,
+        "main_size": size, "hedge_size": hedge_size,
+        "main_expected_fill_price": main["expected_fill_price"],
+        "hedge_expected_fill_price": hedge["expected_fill_price"],
+        "main_cost": main_cost, "hedge_cost": hedge_cost, "total_cost": total_cost,
+        "main_win_pnl": main_win_pnl, "reversal_pnl": reversal_pnl,
+        "expected_portfolio_pnl": expected_pnl,
+        "worst_case_pnl": min(main_win_pnl, reversal_pnl),
+        "estimated_probability": probability,
+        "seconds_to_close": main["seconds_to_close"],
+        "decision": "ACCEPT", "reason": "terminal_hedged_opportunity",
+        "target_size": size, "config_version": "terminal-hedge-v1",
+        "config_hash": strategy_config()[1],
+        "real_order_submissions": 0, "real_orders": 0, "real_fills": 0,
+    }
 
 
 def _load(path, default):
@@ -659,7 +762,11 @@ def _verify_cpp_strategy_row(row):
         settlement_source=row.get("settlement_source", ""),
     )
     if row["strategy"] == "late_window_directional_ev":
-        decision = evaluate_directional(value, float(os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015")))
+        decision = evaluate_directional(
+            value,
+            float(os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015")),
+            float(os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0.90")),
+        )
     else:
         decision = evaluate_lottery(
             value, float(os.getenv("LOTTERY_MIN_PRICE", "0.01")),

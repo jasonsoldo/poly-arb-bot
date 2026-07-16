@@ -56,12 +56,18 @@ def _performance_from_rows(rows):
     for row in rows:
         event_id = row.get("event_id")
         pnl = float(row["realized_simulated_pnl"])
-        ledger.append({"ts": float(row.get("ts", 0)), "event_id": event_id,
-                       "market_id": row.get("market_id"), "strategy": row.get("strategy"),
-                       "asset": row.get("asset"), "timeframe": row.get("timeframe"),
-                       "strategy_config_version": row.get("strategy_config_version"),
-                       "strategy_config_hash": row.get("strategy_config_hash"),
-                       "pnl": pnl, "state": "COMPLETE"})
+        fields = (
+            "market_id", "strategy", "asset", "timeframe", "execution_mode",
+            "main_outcome", "hedge_outcome", "main_size", "hedge_size",
+            "main_expected_fill_price", "hedge_expected_fill_price",
+            "total_entry_cost",
+        )
+        item = {"ts": float(row.get("ts", 0)), "event_id": event_id,
+                "pnl": pnl, "state": "COMPLETE",
+                "strategy_config_version": row.get("strategy_config_version"),
+                "strategy_config_hash": row.get("strategy_config_hash")}
+        item.update({field: row.get(field) for field in fields})
+        ledger.append(item)
     ledger.sort(key=lambda item: item["ts"])
     current_hash = strategy_config()[1]
     current_hashes = {

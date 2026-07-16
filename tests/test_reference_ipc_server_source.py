@@ -42,6 +42,15 @@ def test_reference_engine_publishes_ipc_and_slows_only_diagnostic_file():
     assert "IPC_PUBLISH_INTERVAL_MS = 20" in ENGINE
 
 
+def test_reference_engine_separates_system_clock_skew_from_message_transport_age():
+    assert "system_clock_skew_ms" in ENGINE
+    assert "adjtimex" in ENGINE
+    assert 'std::getenv("CLOCK_SKEW_MS")' in ENGINE
+    assert "system_ntp_offset" in ENGINE
+    assert "std::abs(source.received_at - *state.source_timestamp_ms)" not in ENGINE
+    assert "std::abs(source.received_at - source_ms)" not in ENGINE
+
+
 def test_reference_server_test_binary_is_built_on_linux_and_windows():
     for script in (BUILD_SH, BUILD_PS1):
         assert "latest_value_server_test.cpp" in script

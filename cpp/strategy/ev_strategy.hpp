@@ -11,6 +11,7 @@ namespace strategy {
 
 struct Config {
     double directional_min_net_ev = .015;
+    double directional_min_probability = .90;
     double directional_latency_buffer = .003;
     double directional_settlement_buffer = .002;
     double lottery_min_price = .01;
@@ -30,6 +31,12 @@ struct Config {
     double lottery_imbalance_z = .10;
     double lottery_market_blend = .50;
     double minimum_model_sample_span_seconds = 60;
+    double terminal_hedge_max_reversal_loss = 1.0;
+    double terminal_hedge_min_expected_pnl = .05;
+    double terminal_hedge_max_size_ratio = 1.0;
+    std::map<std::string, std::pair<int, int>> directional_windows = {
+        {"5m", {5, 15}}, {"15m", {5, 20}}, {"1h", {8, 30}}, {"4h", {10, 45}},
+    };
 };
 
 struct ProbabilityInput {
@@ -157,6 +164,79 @@ struct Decision {
     std::vector<std::string> blocking_reasons;
 };
 
+struct TerminalHedgeInput {
+    double main_size = 0;
+    double main_probability = 0;
+    double main_expected_fill_price = 0;
+    double main_fee_per_share = 0;
+    double main_slippage_per_share = 0;
+    double hedge_expected_fill_price = 0;
+    double hedge_fee_per_share = 0;
+    double hedge_slippage_per_share = 0;
+    double hedge_liquidity = 0;
+    double hedge_minimum_liquidity = 0;
+    double hedge_maximum_slippage = 0;
+    bool hedge_target_depth_ok = false;
+};
+
+struct TerminalHedgeOutput {
+    bool accepted = false;
+    std::string reason = "directional_not_accepted";
+    double hedge_size = 0;
+    double main_cost = 0;
+    double hedge_cost = 0;
+    double total_cost = 0;
+    double main_win_pnl = 0;
+    double reversal_pnl = 0;
+    double expected_pnl = 0;
+};
+
+inline TerminalHedgeOutput evaluate_terminal_hedge(
+        const TerminalHedgeInput& row, const Config& config = {}) {
+    TerminalHedgeOutput result;
+    const double main_unit_cost = row.main_expected_fill_price + row.main_fee_per_share +
+        row.main_slippage_per_share + config.directional_latency_buffer +
+        config.directional_settlement_buffer;
+    const double hedge_unit_cost = row.hedge_expected_fill_price + row.hedge_fee_per_share +
+        row.hedge_slippage_per_share + config.lottery_model_buffer +
+        config.lottery_execution_buffer;
+    result.main_cost = row.main_size * main_unit_cost;
+    if (row.hedge_expected_fill_price > config.lottery_max_price)
+        result.reason = "hedge_price_above_limit";
+    else if (!row.hedge_target_depth_ok || row.hedge_liquidity < row.hedge_minimum_liquidity)
+        result.reason = "hedge_depth_insufficient";
+    else if (row.hedge_slippage_per_share > row.hedge_maximum_slippage)
+        result.reason = "hedge_slippage_exceeded";
+    else if (hedge_unit_cost >= 1)
+        result.reason = "hedge_unit_cost_invalid";
+    else {
+        result.hedge_size = std::max(
+            0.0, (result.main_cost - config.terminal_hedge_max_reversal_loss) /
+                (1 - hedge_unit_cost));
+        if (result.hedge_size <= 0) result.reason = "hedge_not_required";
+        else if (result.hedge_size > row.main_size * config.terminal_hedge_max_size_ratio)
+            result.reason = "hedge_size_above_limit";
+        else {
+            result.hedge_cost = result.hedge_size * hedge_unit_cost;
+            result.total_cost = result.main_cost + result.hedge_cost;
+            result.main_win_pnl = row.main_size - result.total_cost;
+            result.reversal_pnl = result.hedge_size - result.total_cost;
+            result.expected_pnl = row.main_probability * result.main_win_pnl +
+                (1 - row.main_probability) * result.reversal_pnl;
+            if (result.main_win_pnl <= 0) result.reason = "main_win_pnl_not_positive";
+            else if (result.reversal_pnl < -config.terminal_hedge_max_reversal_loss - 1e-9)
+                result.reason = "reversal_loss_above_limit";
+            else if (result.expected_pnl < config.terminal_hedge_min_expected_pnl)
+                result.reason = "portfolio_ev_below_threshold";
+            else {
+                result.reason = "terminal_hedged_opportunity";
+                result.accepted = true;
+            }
+        }
+    }
+    return result;
+}
+
 inline void append_reason(std::vector<std::string>& reasons, const std::string& reason) {
     if (!reason.empty() && std::find(reasons.begin(), reasons.end(), reason) == reasons.end())
         reasons.push_back(reason);
@@ -187,19 +267,19 @@ inline std::vector<std::string> common_rejections(const EvaluationInput& row) {
     return reasons;
 }
 
-inline std::optional<std::pair<int, int>> directional_window(const std::string& timeframe) {
-    static const std::map<std::string, std::pair<int, int>> windows = {
-        {"5m", {15, 90}}, {"15m", {20, 180}}, {"1h", {30, 300}}, {"4h", {60, 600}},
-    };
-    const auto found = windows.find(timeframe);
-    return found == windows.end() ? std::nullopt : std::optional(found->second);
+inline std::optional<std::pair<int, int>> directional_window(
+        const std::string& timeframe, const Config& config = {}) {
+    const auto found = config.directional_windows.find(timeframe);
+    return found == config.directional_windows.end() ? std::nullopt : std::optional(found->second);
 }
 
 inline Decision evaluate_directional(const EvaluationInput& row, const Config& config = {}) {
     auto reasons = common_rejections(row);
-    const auto window = directional_window(row.timeframe);
+    const auto window = directional_window(row.timeframe, config);
     if (!window || row.seconds_to_close < window->first || row.seconds_to_close > window->second)
         append_reason(reasons, "outside_time_window");
+    if (row.estimated_probability && *row.estimated_probability < config.directional_min_probability)
+        append_reason(reasons, "model_confidence_below_threshold");
     std::optional<double> gross;
     std::optional<double> net;
     if (row.estimated_probability) {

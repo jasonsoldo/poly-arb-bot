@@ -11,8 +11,8 @@ def reference(ready=True, sources=None):
 def base(**overrides):
     data = dict(strategy="late_window_directional_ev", market_id="m1", condition_id="c1",
                 asset="BTC", timeframe="5m", outcome="Up",
-                market_price=.55, expected_fill_price=.56, estimated_probability=.65,
-                seconds_to_close=45, price_to_beat=99, reference=reference(), fee_per_share=.01,
+                market_price=.55, expected_fill_price=.56, estimated_probability=.95,
+                seconds_to_close=10, price_to_beat=99, reference=reference(), fee_per_share=.01,
                 slippage_per_share=.002, latency_risk_buffer=.003, settlement_risk_buffer=.002,
                 model_uncertainty_buffer=.01, execution_risk_buffer=.005, liquidity=100,
                 book_age_ms=50, reference_age_ms=50, clock_skew_ms=10,
@@ -28,7 +28,7 @@ def base(**overrides):
 def test_late_window_directional_accepts_positive_net_ev():
     result = evaluate_directional(base())
     assert result.decision == "ACCEPT"
-    assert round(result.net_ev, 3) == .073
+    assert round(result.net_ev, 3) == .373
     assert result.strategy == "late_window_directional_ev"
 
 

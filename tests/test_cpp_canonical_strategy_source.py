@@ -29,6 +29,9 @@ def test_cpp_engine_emits_four_independent_strategy_evaluations():
     assert "strategy::evaluate_lottery" in ENGINE
     assert '"late_window_directional_ev"' in ENGINE
     assert '"low_price_lottery_ev"' in ENGINE
+    assert "shadow_hedged_opportunity" in ENGINE
+    assert "expected_portfolio_pnl" in ENGINE
+    assert "reversal_pnl" in ENGINE
     assert "for (const std::string outcome : {\"Up\", \"Down\"})" in ENGINE
     assert "strategy_audit_" in ENGINE
 
@@ -41,7 +44,7 @@ def test_cpp_strategy_audit_is_shadow_only_and_suppressed():
     assert '\\\"real_orders\\\":0' in ENGINE
     assert '\\\"real_fills\\\":0' in ENGINE
     assert "config_hash" in ENGINE
-    assert "shadow-buy-rules-v6" in ENGINE
+    assert "shadow-buy-rules-v7" in ENGINE
     assert "--strategy-config-hash" in ENGINE
 
 

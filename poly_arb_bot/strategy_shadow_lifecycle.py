@@ -80,7 +80,7 @@ class StrategyShadowLifecycle:
             ))
             for timeframe, default in DEFAULT_CALIBRATION_HORIZONS.items()
         }
-        self.config_version = "shadow-portfolio-v5"
+        self.config_version = "shadow-portfolio-v6"
         self.strategy_config_hash = strategy_config()[1]
         self.strategy_config_hashes = {
             strategy: strategy_config(strategy)[1]
@@ -303,7 +303,8 @@ class StrategyShadowLifecycle:
 
     @staticmethod
     def _key(row):
-        return ":".join((row["strategy"], row["market_id"], row.get("outcome", "Both")))
+        outcome = row.get("main_outcome", row.get("outcome", "Both"))
+        return ":".join((row["strategy"], row["market_id"], outcome))
 
     @staticmethod
     def _prediction_id(row, horizon):
@@ -467,6 +468,13 @@ class StrategyShadowLifecycle:
         strategy = row.get("strategy")
         if strategy not in {"late_window_directional_ev", "low_price_lottery_ev", "paired_lock"}:
             return False
+        hedged = row.get("event_type") == "shadow_hedged_opportunity"
+        if (
+            row.get("event_type") == "shadow_eval"
+            and row.get("config_version") == "shadow-buy-rules-v7"
+            and strategy in {"late_window_directional_ev", "low_price_lottery_ev"}
+        ):
+            return False
         accepted = row.get("decision") == "ACCEPT" or (
             strategy == "paired_lock" and row.get("event_type") == "shadow_opportunity"
         )
@@ -475,12 +483,16 @@ class StrategyShadowLifecycle:
         key = self._key(row)
         if key in self.data["positions"]:
             return False
-        size = float(row.get("target_size", 10))
+        size = float(row.get("main_size", row.get("target_size", 10)))
         market = markets[row["market_id"]]
         paired = strategy == "paired_lock"
-        fill = None if paired else float(row["expected_fill_price"])
-        fees = 0.0 if paired else float(row.get("fees", 0))
-        entry_cost = float(row["net_cost"]) if paired else size * (fill + fees)
+        fill = None if paired else float(row.get("main_expected_fill_price", row["expected_fill_price"] if "expected_fill_price" in row else 0))
+        fees = 0.0 if paired else float(row.get("fees", row.get("total_fees", 0)))
+        entry_cost = (
+            float(row["net_cost"]) if paired
+            else float(row["total_cost"]) if hedged
+            else size * (fill + fees)
+        )
         block_reason = self._portfolio_block_reason(row, market, entry_cost)
         if block_reason and not self.calibration_mode:
             return self._reject(row, block_reason)
@@ -494,9 +506,22 @@ class StrategyShadowLifecycle:
             "lifecycle_state": "ACTIVE",
             "market_id": row["market_id"], "asset": row.get("asset", market.get("asset")),
             "timeframe": market.get("interval", row.get("timeframe")),
-            "outcome": row.get("outcome", "Both"),
+            "outcome": row.get("main_outcome", row.get("outcome", "Both")),
+            "hedge_outcome": row.get("hedge_outcome"),
             "entry_ts": row.get("ts"), "expected_fill_price": fill,
             "fees_per_share": fees, "target_size": size,
+            "main_size": float(row.get("main_size", size)),
+            "hedge_size": float(row.get("hedge_size", 0)),
+            "main_expected_fill_price": row.get("main_expected_fill_price"),
+            "hedge_expected_fill_price": row.get("hedge_expected_fill_price"),
+            "main_cost": row.get("main_cost"), "hedge_cost": row.get("hedge_cost"),
+            "total_cost": row.get("total_cost"),
+            "main_win_pnl": row.get("main_win_pnl"),
+            "reversal_pnl": row.get("reversal_pnl"),
+            "expected_portfolio_pnl": row.get("expected_portfolio_pnl"),
+            "worst_case_pnl": row.get("worst_case_pnl"),
+            "hedge_strategy": row.get("hedge_strategy"),
+            "terminal_hedged": hedged,
             "entry_cost": round(entry_cost, 12),
             "price_to_beat": row.get("price_to_beat"),
             "condition_id": row.get("condition_id"), "window": row.get("window"),
@@ -622,6 +647,12 @@ class StrategyShadowLifecycle:
             )
             if paired:
                 payout = position["target_size"]
+            elif position.get("terminal_hedged"):
+                payout = (
+                    position["main_size"]
+                    if position["outcome"] == winning_outcome
+                    else position["hedge_size"]
+                )
             else:
                 payout = (
                     position["target_size"]
