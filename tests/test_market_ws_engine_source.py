@@ -173,3 +173,23 @@ def test_maker_shadow_observes_official_trade_through_without_claiming_fill():
     assert "price_reached_quote_not_queue_fill" in SOURCE
     assert '\\"simulated_fill\\":false' in SOURCE
     assert "maker_quote_observations_.clear()" in SOURCE
+
+
+def test_split_sell_lock_uses_bid_vwap_fees_buffer_and_independent_audit():
+    assert "sell_vwap" in SOURCE
+    assert "complete_set::evaluate_split_sell" in SOURCE
+    assert '\\"strategy\\":\\"split_sell_lock\\"' in SOURCE
+    assert "SPLIT_AND_SELL_BOTH" in SOURCE
+    assert "shadow_split_sell_eval" in SOURCE
+    assert "shadow_split_sell_opportunity" in SOURCE
+    assert "up_sell_vwap" in SOURCE
+    assert "down_sell_vwap" in SOURCE
+    assert "gross_proceeds" in SOURCE
+    assert "split_collateral_cost" in SOURCE
+    assert "net_proceeds" in SOURCE
+    assert "split_sell_buffer_per_share_" in SOURCE
+    assert "pre_split_complete_set_available" in SOURCE
+    assert '\\"split_sell_config_hash\\":' in SOURCE
+    assert "split_sell_new_book_state" in SOURCE
+    assert "last_split_sell_up_version" in SOURCE
+    assert "last_split_sell_down_version" in SOURCE

@@ -469,6 +469,8 @@ class StrategyShadowLifecycle:
 
     def consume(self, row, markets):
         strategy = row.get("strategy")
+        if strategy == "split_sell_lock":
+            return self._consume_split_sell(row)
         if strategy == "inventory_rebalancing_arb":
             return self._consume_inventory_rebalancing(row)
         if strategy == "maker_complete_set_arb":
@@ -574,6 +576,51 @@ class StrategyShadowLifecycle:
         }
         self._mark_dirty()
         self._save()
+        return True
+
+    def _consume_split_sell(self, row):
+        if row.get("event_type") != "shadow_split_sell_opportunity":
+            return False
+        event_id = row.get("event_id")
+        if not event_id or event_id in self.data["processed_complete_set_events"]:
+            return False
+        self.data["processed_complete_set_events"] = (
+            self.data["processed_complete_set_events"] + [event_id]
+        )[-20000:]
+        locked_profit = float(row.get("locked_profit") or 0)
+        collateral_cost = float(row.get("split_collateral_cost") or 0)
+        net_proceeds = float(row.get("net_proceeds") or 0)
+        complete_id = f"{event_id}:complete"
+        complete = {
+            **row,
+            "event_id": complete_id,
+            "entry_event_id": event_id,
+            "event_type": "shadow_complete",
+            "lifecycle_state": "COMPLETE",
+            "outcome": "Both",
+            "entry_cost": collateral_cost,
+            "payout": net_proceeds,
+            "realized_simulated_pnl": locked_profit,
+            "strategy_config_version": row.get("config_version"),
+            "strategy_config_hash": row.get("config_hash"),
+            "real_order_submissions": 0,
+            "real_orders": 0,
+            "real_fills": 0,
+        }
+        self.logger.write("shadow_complete", complete)
+        self.data["completed"] = (self.data["completed"] + [complete_id])[-20000:]
+        self.data["completed_trades"] = (
+            self.data["completed_trades"] + [{
+                "event_id": complete_id,
+                "strategy": "split_sell_lock",
+                "market_id": row.get("market_id"),
+                "ts": row.get("ts"),
+                "pnl": locked_profit,
+                "strategy_config_hash": row.get("config_hash"),
+            }]
+        )[-20000:]
+        self._mark_dirty()
+        self._save(force=True)
         return True
 
     def _consume_inventory_rebalancing(self, row):

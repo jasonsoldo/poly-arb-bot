@@ -197,6 +197,62 @@ struct MakerInput {
     double orphan_loss = 0;
 };
 
+struct SplitSellInput {
+    double target_size = 0;
+    double up_fill = 0;
+    double down_fill = 0;
+    double up_vwap = 0;
+    double down_vwap = 0;
+    double up_fee = 0;
+    double down_fee = 0;
+    double execution_buffer = 0;
+    double minimum_locked_profit = .01;
+    double minimum_expected_value = .01;
+    double leg_1_fill_probability = 0;
+    double leg_2_fill_probability = 0;
+    double orphan_leg_loss = 0;
+};
+
+struct SplitSellDecision {
+    std::string decision = "REJECT";
+    std::string reason = "sell_depth";
+    double gross_proceeds = 0;
+    double total_fees = 0;
+    double net_proceeds = 0;
+    double collateral_cost = 0;
+    double locked_profit = 0;
+    double locked_roi = 0;
+    double expected_execution_value = 0;
+};
+
+inline SplitSellDecision evaluate_split_sell(const SplitSellInput& row) {
+    SplitSellDecision result;
+    result.gross_proceeds = row.target_size * (row.up_vwap + row.down_vwap);
+    result.total_fees = row.up_fee + row.down_fee;
+    result.net_proceeds = result.gross_proceeds - result.total_fees -
+        row.execution_buffer;
+    result.collateral_cost = row.target_size;
+    result.locked_profit = result.net_proceeds - result.collateral_cost;
+    result.locked_roi = result.collateral_cost > 0
+        ? result.locked_profit / result.collateral_cost : 0;
+    const double both_fill_probability = row.leg_1_fill_probability *
+        row.leg_2_fill_probability;
+    result.expected_execution_value = both_fill_probability * result.locked_profit -
+        row.leg_1_fill_probability * (1 - row.leg_2_fill_probability) *
+        row.orphan_leg_loss;
+    if (row.up_fill < row.target_size) result.reason = "up_bid_depth";
+    else if (row.down_fill < row.target_size) result.reason = "down_bid_depth";
+    else if (result.locked_profit < row.minimum_locked_profit)
+        result.reason = "split_sell_profit_below_threshold";
+    else if (result.expected_execution_value < row.minimum_expected_value)
+        result.reason = "split_sell_execution_value_below_threshold";
+    else {
+        result.decision = "ACCEPT";
+        result.reason = "split_sell_opportunity";
+    }
+    return result;
+}
+
 struct MakerDecision {
     std::string decision = "REJECT";
     std::string reason = "maker_pair_edge_below_threshold";

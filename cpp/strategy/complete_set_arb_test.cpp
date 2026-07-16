@@ -6,6 +6,46 @@
 
 int main() {
     {
+        complete_set::SplitSellInput row;
+        row.target_size = 10;
+        row.up_fill = row.down_fill = 10;
+        row.up_vwap = .54;
+        row.down_vwap = .49;
+        row.up_fee = .03;
+        row.down_fee = .03;
+        row.execution_buffer = .02;
+        row.leg_1_fill_probability = 1;
+        row.leg_2_fill_probability = .95;
+        row.orphan_leg_loss = .10;
+        const auto result = complete_set::evaluate_split_sell(row);
+        assert(result.decision == "ACCEPT");
+        assert(result.reason == "split_sell_opportunity");
+        assert(std::abs(result.gross_proceeds - 10.3) < 1e-12);
+        assert(std::abs(result.locked_profit - .22) < 1e-12);
+        assert(result.expected_execution_value > 0);
+    }
+    {
+        complete_set::SplitSellInput row;
+        row.target_size = 10;
+        row.up_fill = row.down_fill = 10;
+        row.up_vwap = .51;
+        row.down_vwap = .49;
+        row.execution_buffer = .02;
+        row.leg_1_fill_probability = row.leg_2_fill_probability = 1;
+        const auto result = complete_set::evaluate_split_sell(row);
+        assert(result.decision == "REJECT");
+        assert(result.reason == "split_sell_profit_below_threshold");
+    }
+    {
+        complete_set::SplitSellInput row;
+        row.target_size = 10;
+        row.up_fill = 9;
+        row.down_fill = 10;
+        const auto result = complete_set::evaluate_split_sell(row);
+        assert(result.decision == "REJECT");
+        assert(result.reason == "up_bid_depth");
+    }
+    {
         complete_set::RebalanceInput row;
         row.inventory = {10, 0, 4.2, 0};
         row.target_size = 10;

@@ -221,6 +221,40 @@ def test_maker_trade_through_observation_never_opens_position(tmp_path):
     assert lifecycle.data["completed"] == []
 
 
+def test_split_sell_lock_completes_immediately_with_locked_profit(tmp_path):
+    log_path = tmp_path / "execution.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log_path)
+    row = {
+        "ts": 1000,
+        "event_id": "split-sell-1",
+        "event_type": "shadow_split_sell_opportunity",
+        "strategy": "split_sell_lock",
+        "arb_method": "SPLIT_AND_SELL_BOTH",
+        "market_id": "m1",
+        "asset": "BTC",
+        "timeframe": "5m",
+        "split_collateral_cost": 10,
+        "net_proceeds": 10.22,
+        "locked_profit": .22,
+        "config_version": "split-sell-shadow-v1",
+        "config_hash": "split-hash",
+        "decision": "ACCEPT",
+    }
+
+    assert lifecycle.consume(row, {}) is True
+    assert lifecycle.consume(row, {}) is False
+    assert lifecycle.data["positions"] == {}
+    assert len(lifecycle.data["completed"]) == 1
+    completed = [
+        json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("event_type") == "shadow_complete"
+    ][0]
+    assert completed["strategy"] == "split_sell_lock"
+    assert completed["entry_cost"] == 10
+    assert completed["payout"] == 10.22
+    assert completed["realized_simulated_pnl"] == .22
+
+
 def test_unmatched_complete_set_inventory_is_settled_and_loss_is_recorded(tmp_path):
     log = tmp_path / "events.jsonl"
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)

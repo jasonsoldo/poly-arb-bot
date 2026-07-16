@@ -83,6 +83,36 @@ def test_process_audit_once_persists_offset_and_does_not_repeat(tmp_path):
     assert machine.data["audit_offset"] == audit_path.stat().st_size
 
 
+def test_process_audit_once_completes_split_sell_without_leg_state_machine(tmp_path):
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.write_text(json.dumps({
+        "event_id": "split-1",
+        "event_type": "shadow_split_sell_opportunity",
+        "strategy": "split_sell_lock",
+        "market_id": "m1",
+        "split_collateral_cost": 10,
+        "net_proceeds": 10.15,
+        "locked_profit": .15,
+        "config_hash": "split-hash",
+        "ts": 123,
+    }) + "\n", encoding="utf-8")
+    machine = ShadowExecutionStateMachine(
+        tmp_path / "execution-state.json", tmp_path / "execution.jsonl"
+    )
+    lifecycle_log = tmp_path / "complete.jsonl"
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "lifecycle-state.json", lifecycle_log
+    )
+
+    assert process_audit_once(audit_path, machine, lifecycle, {}) == 1
+    rows = [
+        json.loads(line) for line in lifecycle_log.read_text().splitlines()
+    ]
+    assert rows[-1]["event_type"] == "shadow_complete"
+    assert rows[-1]["strategy"] == "split_sell_lock"
+    assert rows[-1]["realized_simulated_pnl"] == .15
+
+
 def test_rejected_second_leg_does_not_open_paired_lifecycle_position(tmp_path, monkeypatch):
     audit_path = tmp_path / "audit.jsonl"
     audit_path.write_text(json.dumps({

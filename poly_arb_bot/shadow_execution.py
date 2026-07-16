@@ -115,6 +115,12 @@ def process_audit_once(audit_path, machine, lifecycle=None, markets=None):
                 processed += handled
                 if (handled and lifecycle and machine.data.get("last_completed_event_id") == row.get("event_id")):
                     lifecycle.consume(row, markets or {})
+            elif (
+                row.get("event_type") == "shadow_split_sell_opportunity"
+                and row.get("strategy") == "split_sell_lock"
+                and lifecycle
+            ):
+                processed += bool(lifecycle.consume(row, markets or {}))
         offset = handle.tell()
         if offset != machine.data.get("audit_offset"):
             machine.data["audit_offset"] = offset

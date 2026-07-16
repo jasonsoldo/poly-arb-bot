@@ -52,6 +52,8 @@ def test_cpp_engine_evaluates_polymarket_only_complete_set_strategies():
     assert "observe_maker_trade" in ENGINE
     assert "price_reached_quote_not_queue_fill" in ENGINE
     assert '\\"realized_locked_profit\\"' in ENGINE
+    assert "complete_set::evaluate_split_sell" in ENGINE
+    assert '\\"strategy\\":\\"split_sell_lock\\"' in ENGINE
 
 
 def test_cpp_strategy_audit_is_shadow_only_and_suppressed():

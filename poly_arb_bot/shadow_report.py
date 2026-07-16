@@ -31,6 +31,7 @@ STRATEGIES = (
     "late_window_directional_ev",
     "low_price_lottery_ev",
     "paired_lock",
+    "split_sell_lock",
     "inventory_rebalancing_arb",
     "maker_complete_set_arb",
 )
@@ -83,7 +84,8 @@ def _performance_from_rows(rows, current_complete_set_hashes=None):
         for strategy in ("late_window_directional_ev", "low_price_lottery_ev")
     }
     hash_selected_strategies = {
-        "paired_lock", "inventory_rebalancing_arb", "maker_complete_set_arb",
+        "paired_lock", "split_sell_lock", "inventory_rebalancing_arb",
+        "maker_complete_set_arb",
     }
     if current_complete_set_hashes is None:
         current_complete_set_hashes = {}

@@ -20,6 +20,10 @@ def valid_status():
                                             "terminal_hedge_evaluations": 20, "terminal_hedge_accepts": 1,
                                             "terminal_hedge_rejections": 19},
             "low_price_lottery_ev": {"evaluations": 20, "accepts": 0, "rejections": 20, "model_evaluations": 20, "latest_model_evaluated": True},
+            "split_sell_lock": {
+                "evaluations": 20, "accepts": 1, "rejections": 19,
+                "model_evaluations": 0, "latest_model_evaluated": False,
+            },
             "inventory_rebalancing_arb": {
                 "evaluations": 20, "accepts": 1, "rejections": 19,
                 "model_evaluations": 20, "latest_model_evaluated": True,
@@ -39,6 +43,7 @@ def valid_status():
             "late_window_directional_ev": {"completed": 0},
             "low_price_lottery_ev": {"completed": 0},
             "paired_lock": {"completed": 0},
+            "split_sell_lock": {"completed": 0},
             "inventory_rebalancing_arb": {"completed": 0},
             "maker_complete_set_arb": {"completed": 0},
         },

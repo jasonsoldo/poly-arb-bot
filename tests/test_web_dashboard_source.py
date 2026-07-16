@@ -68,10 +68,11 @@ def test_dashboard_renders_three_strategies_without_combining_acceptance():
 def test_dashboard_separates_complete_set_arbitrage_strategies():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for strategy in (
-        "INSTANT COMPLETE SET", "INVENTORY REBALANCE", "MAKER COMPLETE SET",
+        "BUY BOTH + MERGE", "SPLIT + SELL BOTH",
+        "INVENTORY REBALANCE", "MAKER COMPLETE SET",
     ):
         assert strategy in source
-    for element_id in ("inventoryCard", "makerCard"):
+    for element_id in ("splitSellCard", "inventoryCard", "makerCard"):
         assert f'id="{element_id}"' in source
     assert "NO FILLS INFERRED" in source
     assert "GEOMETRY" in source
@@ -80,14 +81,15 @@ def test_dashboard_separates_complete_set_arbitrage_strategies():
 def test_dashboard_header_uses_unambiguous_complete_set_metrics():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for label in (
-        "PAIRED EVALS", "INVENTORY ACTIONS", "MAKER GEOMETRY",
-        "LOCKED COMPLETE", "REAL ORDERS",
+        "BUY+MERGE EVALS", "SPLIT+SELL ACCEPT", "INVENTORY ACTIONS",
+        "MAKER GEOMETRY", "LOCKED COMPLETE", "REAL ORDERS",
     ):
         assert label in source
     assert "SIM OPENED" not in source
     assert "engine_session" in source
     assert "session_strategy_counts" in source
     assert "session.strategy_counts?.paired_lock?.evaluations" in source
+    assert "session.strategy_counts?.split_sell_lock?.accepts" in source
     assert "session.strategy_counts?.inventory_rebalancing_arb?.accepts" in source
     assert "maker_quote_geometry_candidates" in source
     assert "locked_complete" in source

@@ -14,7 +14,7 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
     strategy_counts = status.get("strategy_counts", {})
     strategy_names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
     complete_set_strategy_names = (
-        "inventory_rebalancing_arb", "maker_complete_set_arb",
+        "split_sell_lock", "inventory_rebalancing_arb", "maker_complete_set_arb",
     )
     strategy_rows = [strategy_counts.get(name, {}) for name in strategy_names]
     probability_rows = [strategy_counts.get(name, {}) for name in strategy_names[:2]]

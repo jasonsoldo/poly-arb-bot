@@ -31,6 +31,7 @@ STRATEGIES = (
     "late_window_directional_ev",
     "low_price_lottery_ev",
     "paired_lock",
+    "split_sell_lock",
     "inventory_rebalancing_arb",
     "maker_complete_set_arb",
 )
@@ -120,7 +121,8 @@ def build_report_empty():
             strategy: dict(empty_performance)
             for strategy in (
                 "late_window_directional_ev", "low_price_lottery_ev", "paired_lock",
-                "inventory_rebalancing_arb", "maker_complete_set_arb",
+                "split_sell_lock", "inventory_rebalancing_arb",
+                "maker_complete_set_arb",
             )
         },
         "equity_curve": [], "trade_ledger": [], "asset_latest_pnl": {},
@@ -317,7 +319,7 @@ def _strategy_counts(paths):
                             if strategy not in state["counts"] or event_type not in {
                                 "shadow_eval", "shadow_hedge_eval", "shadow_hedged_opportunity",
                                 "shadow_inventory_eval", "shadow_inventory_action",
-                                "shadow_maker_quote_eval",
+                                "shadow_maker_quote_eval", "shadow_split_sell_eval",
                             }:
                                 continue
                             event_id = row.get("event_id")
@@ -493,6 +495,7 @@ def build_status(data_dir, log_file, state_file):
     shadow_health = _json(data_dir / "shadow-health.json", {})
     current_complete_set_hashes = {
         "paired_lock": shadow_health.get("paired_config_hash"),
+        "split_sell_lock": shadow_health.get("split_sell_config_hash"),
         "inventory_rebalancing_arb": shadow_health.get("inventory_config_hash"),
         "maker_complete_set_arb": shadow_health.get("maker_config_hash"),
     }
@@ -505,6 +508,7 @@ def build_status(data_dir, log_file, state_file):
         "shadow_eval", "shadow_opportunity", "shadow_hedge_eval",
         "shadow_hedged_opportunity", "shadow_inventory_eval",
         "shadow_inventory_action", "shadow_maker_quote_eval",
+        "shadow_split_sell_eval", "shadow_split_sell_opportunity",
     }]
     paired_events = [item for item in shadow_events if item.get("strategy", "paired_lock") == "paired_lock"]
     latest_shadow = {}
@@ -655,18 +659,22 @@ def build_status(data_dir, log_file, state_file):
         for name in ("late_window_directional_ev", "low_price_lottery_ev")
     )
     paired_evaluations = strategy_counts["paired_lock"]["evaluations"]
+    split_sell_evaluations = strategy_counts["split_sell_lock"]["evaluations"]
+    split_sell_accepts = strategy_counts["split_sell_lock"]["accepts"]
     inventory_evaluations = strategy_counts["inventory_rebalancing_arb"]["evaluations"]
     inventory_actions = strategy_counts["inventory_rebalancing_arb"]["accepts"]
     maker_evaluations = strategy_counts["maker_complete_set_arb"]["evaluations"]
     maker_quote_candidates = strategy_counts["maker_complete_set_arb"]["accepts"]
     complete_set_evaluations = (
-        paired_evaluations + inventory_evaluations + maker_evaluations
+        paired_evaluations + split_sell_evaluations +
+        inventory_evaluations + maker_evaluations
     )
     strategy_latest = {}
     for item in shadow_events:
         if item.get("event_type") not in {
             "shadow_eval", "shadow_inventory_eval", "shadow_inventory_action",
-            "shadow_maker_quote_eval",
+            "shadow_maker_quote_eval", "shadow_split_sell_eval",
+            "shadow_split_sell_opportunity",
         }:
             continue
         strategy = item.get("strategy", "paired_lock")
@@ -696,6 +704,23 @@ def build_status(data_dir, log_file, state_file):
                    "buffer", "net_cost", "guaranteed_payout", "locked_profit",
                    "expected_execution_value", "decision", "reason")
     current_pair = {key: latest_event.get(key) for key in pair_fields} if latest_event else {}
+    latest_split_sell = next(
+        (
+            item for item in shadow_events
+            if item.get("strategy") == "split_sell_lock"
+            and item.get("market_id") in market_ids
+        ),
+        None,
+    )
+    split_sell_fields = (
+        "market_id", "up_sell_vwap", "down_sell_vwap", "gross_proceeds",
+        "up_fee", "down_fee", "total_fees", "execution_buffer",
+        "net_proceeds", "split_collateral_cost", "locked_profit", "locked_roi",
+        "expected_execution_value", "decision", "reason",
+    )
+    current_split_sell = {
+        key: latest_split_sell.get(key) for key in split_sell_fields
+    } if latest_split_sell else {}
     latest_terminal_hedge = terminal_hedge_summary.get("latest") or next(
         (item for item in shadow_events if item.get("event_type") in {
             "shadow_hedge_eval", "shadow_hedged_opportunity",
@@ -725,7 +750,7 @@ def build_status(data_dir, log_file, state_file):
     simulated_complete = report["performance"]["completed"]
     locked_complete = sum(
         report["performance_by_strategy"][name]["completed"]
-        for name in ("paired_lock", "inventory_rebalancing_arb")
+        for name in ("paired_lock", "split_sell_lock", "inventory_rebalancing_arb")
     )
     current_inventory_hash = shadow_health.get("inventory_config_hash")
     complete_set_inventory = []
@@ -809,6 +834,8 @@ def build_status(data_dir, log_file, state_file):
             "total_strategy_evaluations": strategy_evaluations,
             "probability_strategy_evaluations": probability_strategy_evaluations,
             "paired_evaluations": paired_evaluations,
+            "split_sell_evaluations": split_sell_evaluations,
+            "split_sell_accepts": split_sell_accepts,
             "inventory_evaluations": inventory_evaluations,
             "inventory_actions": inventory_actions,
             "maker_evaluations": maker_evaluations,
@@ -844,6 +871,12 @@ def build_status(data_dir, log_file, state_file):
             "locked_complete": locked_complete,
             "session_strategy_evaluations": session_strategy_evaluations,
             "session_paired_evaluations": session_strategy_counts["paired_lock"]["evaluations"],
+            "session_split_sell_evaluations": session_strategy_counts[
+                "split_sell_lock"
+            ]["evaluations"],
+            "session_split_sell_accepts": session_strategy_counts[
+                "split_sell_lock"
+            ]["accepts"],
             "session_inventory_actions": session_strategy_counts[
                 "inventory_rebalancing_arb"
             ]["accepts"],
@@ -923,6 +956,7 @@ def build_status(data_dir, log_file, state_file):
         "pnl_meter": {"simulated_pnl": report["performance"]["simulated_pnl"], "realized_pnl": 0.0},
         "strategy_score": strategy_score,
         "current_pair": current_pair,
+        "current_split_sell": current_split_sell,
         "current_terminal_hedge": latest_terminal_hedge or {},
         "terminal_hedge": terminal_hedge_summary,
         "clob_readiness": clob_readiness,

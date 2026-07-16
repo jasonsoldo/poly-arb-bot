@@ -663,6 +663,64 @@ def test_web_status_exposes_unambiguous_complete_set_counts(tmp_path):
     assert counts["locked_complete"] == 2
 
 
+def test_web_status_exposes_split_sell_as_independent_locked_method(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir()
+    logs.mkdir()
+    now = time.time()
+    (data / "live_markets.json").write_text(json.dumps({
+        "markets": [{
+            "market_id": "m1", "asset": "BTC", "interval": "5m",
+            "close_ts": now + 100,
+        }],
+    }), encoding="utf-8")
+    (logs / "shadow-audit.jsonl").write_text(json.dumps({
+        "ts": now,
+        "event_id": "split-eval",
+        "event_type": "shadow_split_sell_eval",
+        "strategy": "split_sell_lock",
+        "market_id": "m1",
+        "up_sell_vwap": .54,
+        "down_sell_vwap": .49,
+        "net_proceeds": 10.22,
+        "split_collateral_cost": 10,
+        "locked_profit": .22,
+        "decision": "ACCEPT",
+        "reason": "split_sell_opportunity",
+    }) + "\n", encoding="utf-8")
+    (logs / "strategy-audit.jsonl").write_text("", encoding="utf-8")
+    (logs / "shadow-execution.jsonl").write_text(json.dumps({
+        "ts": now,
+        "event_id": "split-complete",
+        "event_type": "shadow_complete",
+        "strategy": "split_sell_lock",
+        "market_id": "m1",
+        "strategy_config_hash": "split-current",
+        "realized_simulated_pnl": .22,
+    }) + "\n", encoding="utf-8")
+    (data / "shadow-health.json").write_text(json.dumps({
+        "split_sell_config_hash": "split-current",
+        "session_strategy_counts": {
+            "split_sell_lock": {
+                "evaluations": 3, "accepts": 1, "rejections": 2,
+            },
+        },
+    }), encoding="utf-8")
+
+    status = build_status(
+        data, logs / "shadow-audit.jsonl", tmp_path / "orders.json"
+    )
+
+    assert status["counts"]["split_sell_evaluations"] == 1
+    assert status["counts"]["split_sell_accepts"] == 1
+    assert status["counts"]["session_split_sell_evaluations"] == 3
+    assert status["counts"]["session_split_sell_accepts"] == 1
+    assert status["current_split_sell"]["locked_profit"] == .22
+    assert status["performance_by_strategy"]["split_sell_lock"]["completed"] == 1
+    assert status["performance_by_strategy"]["split_sell_lock"]["simulated_pnl"] == .22
+
+
 def test_web_status_separates_engine_session_counts_and_legacy_inventory(tmp_path):
     data = tmp_path / "data"
     state = tmp_path / "state"
