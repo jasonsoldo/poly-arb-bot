@@ -178,6 +178,8 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"inventory_max_initial_price", environment_value("INVENTORY_MAX_INITIAL_PRICE", "0.20")},
         {"inventory_max_total_unmatched_notional", environment_value("INVENTORY_MAX_TOTAL_UNMATCHED_NOTIONAL", "3.0")},
         {"inventory_max_unmatched_notional", environment_value("INVENTORY_MAX_UNMATCHED_NOTIONAL", "0.50")},
+        {"inventory_legacy_max_guaranteed_loss", environment_value("INVENTORY_LEGACY_MAX_GUARANTEED_LOSS", "0.50")},
+        {"inventory_legacy_min_loss_reduction_ratio", environment_value("INVENTORY_LEGACY_MIN_LOSS_REDUCTION_RATIO", "0.75")},
         {"inventory_min_entry_edge", environment_value("INVENTORY_MIN_ENTRY_EDGE", "0.05")},
         {"inventory_min_entry_ev_roi", environment_value("INVENTORY_MIN_ENTRY_EV_ROI", "0.25")},
         {"inventory_min_locked_roi", environment_value("INVENTORY_MIN_LOCKED_ROI", "0.02")},
@@ -951,6 +953,13 @@ private:
             0.0, inventory_max_total_unmatched_notional_ - other_inventory_notional);
         const double available_market_notional = std::min(
             inventory_max_unmatched_notional_, available_global_notional);
+        const std::string inventory_origin_hash =
+            inventory_origin_config_hashes_.count(market_id)
+                ? inventory_origin_config_hashes_.at(market_id)
+                : inventory_strategy_config_hash_;
+        const bool legacy_inventory =
+            (inventory.up_quantity > 1e-12 || inventory.down_quantity > 1e-12)
+            && inventory_origin_hash != inventory_strategy_config_hash_;
 
         complete_set::RebalanceDecision rebalance;
         if (!up_probability) {
@@ -978,6 +987,8 @@ private:
                 inventory_min_entry_edge_, inventory_min_entry_ev_roi_,
                 inventory_max_initial_price_, inventory_max_complement_gap_,
                 min_profit_, inventory_min_locked_roi_, available_market_notional,
+                legacy_inventory, inventory_legacy_max_guaranteed_loss_,
+                inventory_legacy_min_loss_reduction_ratio_,
             });
         }
 
@@ -987,7 +998,7 @@ private:
         if (rebalance.decision == "ACCEPT") {
             if (inventory_was_empty)
                 inventory_origin_config_hashes_[market_id] = inventory_strategy_config_hash_;
-            if (rebalance.action == "BUY_UP" || rebalance.action == "BUY_UP_AND_LOCK") {
+            if (rebalance.action.rfind("BUY_UP", 0) == 0) {
                 inventory.up_quantity += rebalance.quantity;
                 inventory.up_cost += rebalance.quantity * rebalance.unit_cost;
             } else {
@@ -1055,6 +1066,8 @@ private:
                 << ",\"projected_locked_quantity\":" << rebalance.projected_locked_quantity
                 << ",\"projected_locked_profit\":" << rebalance.projected_locked_profit
                 << ",\"projected_locked_roi\":" << rebalance.projected_locked_roi
+                << ",\"guaranteed_loss\":" << rebalance.guaranteed_loss
+                << ",\"loss_reduction_ratio\":" << rebalance.loss_reduction_ratio
                 << ",\"realized_locked_profit\":" << locked_profit
                 << ",\"residual_up_quantity\":" << inventory.up_quantity
                 << ",\"residual_down_quantity\":" << inventory.down_quantity
@@ -1063,11 +1076,9 @@ private:
                 << ",\"total_unmatched_notional\":" << total_unmatched_notional
                 << ",\"available_global_unmatched_notional\":" << available_global_notional
                 << ",\"inventory_origin_config_hash\":\""
-                << reference_ipc::escaped(
-                    inventory_origin_config_hashes_.count(market_id)
-                        ? inventory_origin_config_hashes_.at(market_id)
-                        : inventory_strategy_config_hash_)
-                << "\",\"decision\":\"" << rebalance.decision << "\",\"reason\":\""
+                << reference_ipc::escaped(inventory_origin_hash)
+                << "\",\"legacy_inventory\":" << (legacy_inventory ? "true" : "false")
+                << ",\"decision\":\"" << rebalance.decision << "\",\"reason\":\""
                 << rebalance.reason << "\",\"config_version\":\"inventory-rebalancing-v1\""
                 << ",\"config_hash\":\"" << inventory_strategy_config_hash_ << "\""
                 << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
@@ -1809,6 +1820,10 @@ private:
         "INVENTORY_MAX_UNMATCHED_NOTIONAL", "0.50");
     double inventory_max_total_unmatched_notional_ = environment_double(
         "INVENTORY_MAX_TOTAL_UNMATCHED_NOTIONAL", "3.0");
+    double inventory_legacy_max_guaranteed_loss_ = environment_double(
+        "INVENTORY_LEGACY_MAX_GUARANTEED_LOSS", "0.50");
+    double inventory_legacy_min_loss_reduction_ratio_ = environment_double(
+        "INVENTORY_LEGACY_MIN_LOSS_REDUCTION_RATIO", "0.75");
     double maker_tick_size_ = environment_double("MAKER_TICK_SIZE", "0.01");
     double maker_quote_half_spread_ = environment_double("MAKER_QUOTE_HALF_SPREAD", "0.02");
     double maker_inventory_skew_per_unit_ = environment_double(

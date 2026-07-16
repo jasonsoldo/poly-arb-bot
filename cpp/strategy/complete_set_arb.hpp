@@ -28,6 +28,9 @@ struct RebalanceInput {
     double minimum_locked_profit = .01;
     double minimum_locked_roi = .02;
     double maximum_unmatched_notional = .50;
+    bool allow_loss_cap = false;
+    double maximum_loss_cap = .50;
+    double minimum_loss_reduction_ratio = .75;
 };
 
 struct RebalanceDecision {
@@ -46,6 +49,8 @@ struct RebalanceDecision {
     double projected_locked_quantity = 0;
     double projected_locked_profit = 0;
     double projected_locked_roi = 0;
+    double guaranteed_loss = 0;
+    double loss_reduction_ratio = 0;
     double projected_residual_quantity = 0;
 };
 
@@ -66,16 +71,31 @@ inline RebalanceDecision evaluate_rebalance(const RebalanceInput& row) {
         const double pair_cost = quantity * (average_up_cost + row.down_unit_cost);
         result.projected_locked_roi = pair_cost > 0
             ? result.projected_locked_profit / pair_cost : 0;
+        const double held_cost = quantity * average_up_cost;
+        result.guaranteed_loss = std::max(0.0, -result.projected_locked_profit);
+        result.loss_reduction_ratio = held_cost > 0
+            ? 1 - result.guaranteed_loss / held_cost : 0;
         result.projected_residual_quantity = unmatched_up - quantity;
         if (quantity <= 0) result.reason = "down_depth";
-        else if (result.projected_locked_profit < row.minimum_locked_profit)
-            result.reason = "complement_cost_above_lock_threshold";
-        else if (result.projected_locked_roi < row.minimum_locked_roi)
-            result.reason = "locked_roi_below_threshold";
-        else {
+        else if (
+            result.projected_locked_profit >= row.minimum_locked_profit
+            && result.projected_locked_roi >= row.minimum_locked_roi
+        ) {
             result.decision = "ACCEPT";
             result.reason = "inventory_lock";
             result.action = "BUY_DOWN_AND_LOCK";
+        } else if (
+            row.allow_loss_cap
+            && result.guaranteed_loss <= row.maximum_loss_cap
+            && result.loss_reduction_ratio >= row.minimum_loss_reduction_ratio
+        ) {
+            result.decision = "ACCEPT";
+            result.reason = "legacy_inventory_loss_cap";
+            result.action = "BUY_DOWN_AND_CAP_LOSS";
+        } else if (result.projected_locked_profit < row.minimum_locked_profit) {
+            result.reason = "complement_cost_above_lock_threshold";
+        } else {
+            result.reason = "locked_roi_below_threshold";
         }
         return result;
     }
@@ -92,16 +112,31 @@ inline RebalanceDecision evaluate_rebalance(const RebalanceInput& row) {
         const double pair_cost = quantity * (average_down_cost + row.up_unit_cost);
         result.projected_locked_roi = pair_cost > 0
             ? result.projected_locked_profit / pair_cost : 0;
+        const double held_cost = quantity * average_down_cost;
+        result.guaranteed_loss = std::max(0.0, -result.projected_locked_profit);
+        result.loss_reduction_ratio = held_cost > 0
+            ? 1 - result.guaranteed_loss / held_cost : 0;
         result.projected_residual_quantity = unmatched_down - quantity;
         if (quantity <= 0) result.reason = "up_depth";
-        else if (result.projected_locked_profit < row.minimum_locked_profit)
-            result.reason = "complement_cost_above_lock_threshold";
-        else if (result.projected_locked_roi < row.minimum_locked_roi)
-            result.reason = "locked_roi_below_threshold";
-        else {
+        else if (
+            result.projected_locked_profit >= row.minimum_locked_profit
+            && result.projected_locked_roi >= row.minimum_locked_roi
+        ) {
             result.decision = "ACCEPT";
             result.reason = "inventory_lock";
             result.action = "BUY_UP_AND_LOCK";
+        } else if (
+            row.allow_loss_cap
+            && result.guaranteed_loss <= row.maximum_loss_cap
+            && result.loss_reduction_ratio >= row.minimum_loss_reduction_ratio
+        ) {
+            result.decision = "ACCEPT";
+            result.reason = "legacy_inventory_loss_cap";
+            result.action = "BUY_UP_AND_CAP_LOSS";
+        } else if (result.projected_locked_profit < row.minimum_locked_profit) {
+            result.reason = "complement_cost_above_lock_threshold";
+        } else {
+            result.reason = "locked_roi_below_threshold";
         }
         return result;
     }

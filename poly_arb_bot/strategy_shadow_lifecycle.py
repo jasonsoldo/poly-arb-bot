@@ -607,13 +607,17 @@ class StrategyShadowLifecycle:
             "maximum_loss": row.get("maximum_loss"),
             "complement_gap": row.get("complement_gap"),
             "projected_locked_roi": row.get("projected_locked_roi"),
+            "guaranteed_loss": row.get("guaranteed_loss"),
+            "loss_reduction_ratio": row.get("loss_reduction_ratio"),
+            "legacy_inventory": row.get("legacy_inventory", False),
             "updated_at": row.get("ts"),
         }
         self.data["processed_complete_set_events"] = (
             self.data["processed_complete_set_events"] + [event_id]
         )[-20000:]
         locked_profit = float(row.get("realized_locked_profit") or 0)
-        if row.get("decision") == "ACCEPT" and locked_profit > 0:
+        locked_quantity = float(row.get("projected_locked_quantity") or 0)
+        if row.get("decision") == "ACCEPT" and locked_quantity > 0:
             complete_id = f"{event_id}:complete"
             complete = {
                 **row,
@@ -644,7 +648,9 @@ class StrategyShadowLifecycle:
                     "market_id": market_id,
                     "ts": row.get("ts"),
                     "pnl": locked_profit,
-                    "strategy_config_hash": row.get("config_hash"),
+                    "strategy_config_hash": row.get(
+                        "inventory_origin_config_hash", row.get("config_hash")
+                    ),
                 }]
             )[-20000:]
         if (
@@ -653,7 +659,7 @@ class StrategyShadowLifecycle:
         ):
             self.data["complete_set_inventory"].pop(market_id, None)
         self._mark_dirty()
-        self._save(force=locked_profit > 0)
+        self._save(force=locked_quantity > 0)
         return row.get("event_type") == "shadow_inventory_action"
 
     def _consume_maker_quote(self, row):

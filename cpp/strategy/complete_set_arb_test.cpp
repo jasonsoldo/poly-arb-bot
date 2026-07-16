@@ -84,6 +84,38 @@ int main() {
         assert(result.reason == "locked_roi_below_threshold");
     }
     {
+        complete_set::RebalanceInput row;
+        row.inventory = {10, 0, 8.6, 0};
+        row.target_size = 10;
+        row.up_probability = .9;
+        row.up_unit_cost = .87;
+        row.down_unit_cost = .18;
+        row.up_depth = row.down_depth = 20;
+        row.allow_loss_cap = true;
+        row.maximum_loss_cap = .50;
+        row.minimum_loss_reduction_ratio = .75;
+        const auto result = complete_set::evaluate_rebalance(row);
+        assert(result.decision == "ACCEPT");
+        assert(result.action == "BUY_DOWN_AND_CAP_LOSS");
+        assert(result.reason == "legacy_inventory_loss_cap");
+        assert(std::abs(result.guaranteed_loss - .4) < 1e-12);
+        assert(result.loss_reduction_ratio > .9);
+    }
+    {
+        complete_set::RebalanceInput row;
+        row.inventory = {10, 0, 8.6, 0};
+        row.target_size = 10;
+        row.up_probability = .9;
+        row.up_unit_cost = .87;
+        row.down_unit_cost = .30;
+        row.up_depth = row.down_depth = 20;
+        row.allow_loss_cap = true;
+        row.maximum_loss_cap = .50;
+        const auto result = complete_set::evaluate_rebalance(row);
+        assert(result.decision == "REJECT");
+        assert(result.reason == "complement_cost_above_lock_threshold");
+    }
+    {
         complete_set::MakerInput row;
         row.up_probability = .55;
         row.up_best_ask = .56;

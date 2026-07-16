@@ -138,6 +138,43 @@ def test_inventory_lock_is_completed_immediately_without_fake_market_settlement(
     assert complete["real_orders"] == 0
 
 
+def test_legacy_inventory_loss_cap_is_completed_with_bounded_loss(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    row = {
+        "event_id": "legacy-loss-cap",
+        "event_type": "shadow_inventory_action",
+        "strategy": "inventory_rebalancing_arb",
+        "market_id": "m1",
+        "asset": "BTC",
+        "timeframe": "5m",
+        "decision": "ACCEPT",
+        "reason": "legacy_inventory_loss_cap",
+        "action": "BUY_DOWN_AND_CAP_LOSS",
+        "projected_locked_quantity": 10,
+        "projected_locked_profit": -.4,
+        "realized_locked_profit": -.4,
+        "guaranteed_loss": .4,
+        "loss_reduction_ratio": .95,
+        "residual_up_quantity": 0,
+        "residual_down_quantity": 0,
+        "residual_up_cost": 0,
+        "residual_down_cost": 0,
+        "config_version": "inventory-rebalancing-v1",
+        "config_hash": "new-config",
+        "inventory_origin_config_hash": "old-config",
+        "ts": 1000,
+    }
+
+    assert lifecycle.consume(row, {"m1": market()}) is True
+
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["event_type"] == "shadow_complete"
+    assert complete["realized_simulated_pnl"] == -.4
+    assert complete["strategy_config_hash"] == "old-config"
+    assert lifecycle.data["complete_set_inventory"] == {}
+
+
 def test_maker_quote_is_observation_only_and_never_counts_as_fill(tmp_path):
     lifecycle = StrategyShadowLifecycle(
         tmp_path / "state.json", tmp_path / "events.jsonl"
