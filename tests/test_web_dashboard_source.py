@@ -76,6 +76,21 @@ def test_dashboard_separates_complete_set_arbitrage_strategies():
     assert "NO FILLS SIMULATED" in source
 
 
+def test_dashboard_header_uses_unambiguous_complete_set_metrics():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    for label in (
+        "PAIRED EVALS", "INVENTORY ACTIONS", "MAKER QUOTES",
+        "LOCKED COMPLETE", "REAL ORDERS",
+    ):
+        assert label in source
+    assert "SIM OPENED" not in source
+    assert "total_strategy_evaluations" in source
+    assert "paired_evaluations" in source
+    assert "inventory_actions" in source
+    assert "maker_quote_candidates" in source
+    assert "locked_complete" in source
+
+
 def test_dashboard_renders_latest_asset_pnl_from_completed_shadow_data():
     source = Path("web/index.html").read_text(encoding="utf-8")
     assert "LATEST SIM PNL" in source

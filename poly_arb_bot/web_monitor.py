@@ -639,6 +639,18 @@ def build_status(data_dir, log_file, state_file):
     strategy_accepts = sum(row["accepts"] for row in strategy_counts.values())
     unique_opportunities = sum(row["unique_opportunities"] for row in strategy_counts.values())
     active_opportunities = sum(row["active_opportunities"] for row in strategy_counts.values())
+    probability_strategy_evaluations = sum(
+        strategy_counts[name]["evaluations"]
+        for name in ("late_window_directional_ev", "low_price_lottery_ev")
+    )
+    paired_evaluations = strategy_counts["paired_lock"]["evaluations"]
+    inventory_evaluations = strategy_counts["inventory_rebalancing_arb"]["evaluations"]
+    inventory_actions = strategy_counts["inventory_rebalancing_arb"]["accepts"]
+    maker_evaluations = strategy_counts["maker_complete_set_arb"]["evaluations"]
+    maker_quote_candidates = strategy_counts["maker_complete_set_arb"]["accepts"]
+    complete_set_evaluations = (
+        paired_evaluations + inventory_evaluations + maker_evaluations
+    )
     strategy_latest = {}
     for item in shadow_events:
         if item.get("event_type") not in {
@@ -700,6 +712,10 @@ def build_status(data_dir, log_file, state_file):
     ]
     active_shadow_positions = len(current_positions)
     simulated_complete = report["performance"]["completed"]
+    locked_complete = sum(
+        report["performance_by_strategy"][name]["completed"]
+        for name in ("paired_lock", "inventory_rebalancing_arb")
+    )
     engine_latency = reference_prices.get("engine_latency_us")
     def age_snapshot(source):
         values = []
@@ -740,6 +756,14 @@ def build_status(data_dir, log_file, state_file):
             "risk_decisions": len(decisions),
             "shadow_attempts": sum(item.get("status") == "dry_run" for item in decision_records),
             "shadow_evaluations": strategy_evaluations,
+            "total_strategy_evaluations": strategy_evaluations,
+            "probability_strategy_evaluations": probability_strategy_evaluations,
+            "paired_evaluations": paired_evaluations,
+            "inventory_evaluations": inventory_evaluations,
+            "inventory_actions": inventory_actions,
+            "maker_evaluations": maker_evaluations,
+            "maker_quote_candidates": maker_quote_candidates,
+            "complete_set_evaluations": complete_set_evaluations,
             "fok_passed": report["fok_passed"],
             "shadow_accepts": max(strategy_accepts, report["accepts"]),
             "model_accepts": (
@@ -757,6 +781,7 @@ def build_status(data_dir, log_file, state_file):
                 "terminal_hedge_accepts", 0
             ),
             "simulated_complete": simulated_complete,
+            "locked_complete": locked_complete,
         },
         "shadow_markets": list(latest_shadow.values()),
         "strategy_counts": strategy_counts,

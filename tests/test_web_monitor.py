@@ -579,6 +579,82 @@ def test_web_status_keeps_three_strategy_statistics_separate(tmp_path):
     assert status["current_pair"]["reason"] == "net_cost_above_threshold"
 
 
+def test_web_status_exposes_unambiguous_complete_set_counts(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (data / "live_markets.json").write_text(
+        json.dumps({"markets": [{"market_id": "m1"}]}), encoding="utf-8"
+    )
+    (logs / "shadow-audit.jsonl").write_text("\n".join([
+        json.dumps({
+            "ts": time.time(), "event_id": "paired-1", "event_type": "shadow_eval",
+            "strategy": "paired_lock", "market_id": "m1", "decision": "REJECT",
+        }),
+        json.dumps({
+            "ts": time.time(), "event_id": "paired-2", "event_type": "shadow_eval",
+            "strategy": "paired_lock", "market_id": "m1", "decision": "ACCEPT",
+        }),
+    ]) + "\n", encoding="utf-8")
+    (logs / "strategy-audit.jsonl").write_text("\n".join([
+        json.dumps({
+            "ts": time.time(), "event_id": "directional", "event_type": "shadow_eval",
+            "strategy": "late_window_directional_ev", "market_id": "m1",
+            "decision": "REJECT",
+        }),
+        json.dumps({
+            "ts": time.time(), "event_id": "inventory-reject",
+            "event_type": "shadow_inventory_eval",
+            "strategy": "inventory_rebalancing_arb", "market_id": "m1",
+            "decision": "REJECT",
+        }),
+        json.dumps({
+            "ts": time.time(), "event_id": "inventory-action",
+            "event_type": "shadow_inventory_action",
+            "strategy": "inventory_rebalancing_arb", "market_id": "m1",
+            "decision": "ACCEPT",
+        }),
+        json.dumps({
+            "ts": time.time(), "event_id": "maker-quote",
+            "event_type": "shadow_maker_quote_eval",
+            "strategy": "maker_complete_set_arb", "market_id": "m1",
+            "decision": "ACCEPT",
+        }),
+    ]) + "\n", encoding="utf-8")
+    (logs / "shadow-execution.jsonl").write_text("\n".join([
+        json.dumps({
+            "ts": time.time(), "event_id": "paired-complete",
+            "event_type": "shadow_complete", "strategy": "paired_lock",
+            "market_id": "m1", "strategy_config_hash": "paired-current",
+            "realized_simulated_pnl": .1,
+        }),
+        json.dumps({
+            "ts": time.time(), "event_id": "inventory-complete",
+            "event_type": "shadow_complete", "strategy": "inventory_rebalancing_arb",
+            "market_id": "m1", "strategy_config_hash": "inventory-current",
+            "realized_simulated_pnl": .2,
+        }),
+    ]) + "\n", encoding="utf-8")
+    (data / "shadow-health.json").write_text(json.dumps({
+        "paired_config_hash": "paired-current",
+        "inventory_config_hash": "inventory-current",
+        "maker_config_hash": "maker-current",
+    }), encoding="utf-8")
+
+    status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
+    counts = status["counts"]
+
+    assert counts["total_strategy_evaluations"] == 6
+    assert counts["probability_strategy_evaluations"] == 1
+    assert counts["paired_evaluations"] == 2
+    assert counts["inventory_evaluations"] == 2
+    assert counts["inventory_actions"] == 1
+    assert counts["maker_evaluations"] == 1
+    assert counts["maker_quote_candidates"] == 1
+    assert counts["complete_set_evaluations"] == 5
+    assert counts["locked_complete"] == 2
+
+
 def test_web_status_ages_each_normalized_reference_source(tmp_path):
     now_ms = time.time() * 1000
     (tmp_path / "venue-status.json").write_text(json.dumps({
