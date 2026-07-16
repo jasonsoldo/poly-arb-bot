@@ -183,6 +183,12 @@ struct TerminalHedgeOutput {
     bool accepted = false;
     std::string reason = "directional_not_accepted";
     double hedge_size = 0;
+    double main_probability = 0;
+    double hedge_probability = 0;
+    double main_unit_cost = 0;
+    double hedge_unit_cost = 0;
+    double main_net_ev_per_share = 0;
+    double hedge_net_ev_per_share = 0;
     double main_cost = 0;
     double hedge_cost = 0;
     double total_cost = 0;
@@ -194,35 +200,49 @@ struct TerminalHedgeOutput {
 inline TerminalHedgeOutput evaluate_terminal_hedge(
         const TerminalHedgeInput& row, const Config& config = {}) {
     TerminalHedgeOutput result;
-    const double main_unit_cost = row.main_expected_fill_price + row.main_fee_per_share +
+    result.main_probability = std::clamp(row.main_probability, 0.0, 1.0);
+    result.hedge_probability = 1 - result.main_probability;
+    result.main_unit_cost = row.main_expected_fill_price + row.main_fee_per_share +
         row.main_slippage_per_share + config.directional_latency_buffer +
         config.directional_settlement_buffer;
-    const double hedge_unit_cost = row.hedge_expected_fill_price + row.hedge_fee_per_share +
+    result.hedge_unit_cost = row.hedge_expected_fill_price + row.hedge_fee_per_share +
         row.hedge_slippage_per_share + config.lottery_model_buffer +
         config.lottery_execution_buffer;
-    result.main_cost = row.main_size * main_unit_cost;
+    result.main_net_ev_per_share = result.main_probability - result.main_unit_cost;
+    result.hedge_net_ev_per_share = result.hedge_probability - result.hedge_unit_cost;
+    result.main_cost = row.main_size * result.main_unit_cost;
     if (row.hedge_expected_fill_price > config.lottery_max_price)
         result.reason = "hedge_price_above_limit";
     else if (!row.hedge_target_depth_ok || row.hedge_liquidity < row.hedge_minimum_liquidity)
         result.reason = "hedge_depth_insufficient";
     else if (row.hedge_slippage_per_share > row.hedge_maximum_slippage)
         result.reason = "hedge_slippage_exceeded";
-    else if (hedge_unit_cost >= 1)
+    else if (result.hedge_unit_cost >= 1)
         result.reason = "hedge_unit_cost_invalid";
     else {
-        result.hedge_size = std::max(
+        const double minimum_hedge_size = std::max(
             0.0, (result.main_cost - config.terminal_hedge_max_reversal_loss) /
-                (1 - hedge_unit_cost));
-        if (result.hedge_size <= 0) result.reason = "hedge_not_required";
-        else if (result.hedge_size > row.main_size * config.terminal_hedge_max_size_ratio)
-            result.reason = "hedge_size_above_limit";
+                (1 - result.hedge_unit_cost));
+        const double maximum_hedge_size = std::min({
+            row.main_size * config.terminal_hedge_max_size_ratio,
+            row.hedge_liquidity,
+            result.hedge_unit_cost > 0
+                ? std::max(0.0, (row.main_size - result.main_cost) / result.hedge_unit_cost)
+                : row.main_size * config.terminal_hedge_max_size_ratio,
+        });
+        if (minimum_hedge_size <= 0 && result.hedge_net_ev_per_share <= 0)
+            result.reason = "hedge_not_required";
+        else if (minimum_hedge_size > maximum_hedge_size + 1e-12)
+            result.reason = "hedge_constraints_infeasible";
         else {
-            result.hedge_cost = result.hedge_size * hedge_unit_cost;
+            result.hedge_size = result.hedge_net_ev_per_share > 0
+                ? maximum_hedge_size : minimum_hedge_size;
+            result.hedge_cost = result.hedge_size * result.hedge_unit_cost;
             result.total_cost = result.main_cost + result.hedge_cost;
             result.main_win_pnl = row.main_size - result.total_cost;
             result.reversal_pnl = result.hedge_size - result.total_cost;
-            result.expected_pnl = row.main_probability * result.main_win_pnl +
-                (1 - row.main_probability) * result.reversal_pnl;
+            result.expected_pnl = result.main_probability * result.main_win_pnl +
+                result.hedge_probability * result.reversal_pnl;
             if (result.main_win_pnl <= 0) result.reason = "main_win_pnl_not_positive";
             else if (result.reversal_pnl < -config.terminal_hedge_max_reversal_loss - 1e-9)
                 result.reason = "reversal_loss_above_limit";

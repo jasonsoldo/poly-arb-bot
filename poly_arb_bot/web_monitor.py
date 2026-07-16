@@ -1,4 +1,5 @@
 import json
+import inspect
 import mimetypes
 import os
 import threading
@@ -26,6 +27,13 @@ _STRATEGY_JOB_LOCK = threading.Lock()
 STRATEGY_ASYNC_THRESHOLD_BYTES = 10 * 1024 * 1024
 ASSETS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE")
 INTERVALS = ("5m", "15m", "1h", "4h")
+STRATEGIES = (
+    "late_window_directional_ev",
+    "low_price_lottery_ev",
+    "paired_lock",
+    "inventory_rebalancing_arb",
+    "maker_complete_set_arb",
+)
 
 
 def _report_cache_key(path, execution_path=None):
@@ -41,7 +49,7 @@ def _analytics_state_path(path, prefix):
     return root / "state" / f"{prefix}-{path.name}.json"
 
 
-def _cached_report(path, execution_path=None):
+def _cached_report(path, execution_path=None, current_complete_set_hashes=None):
     if not path.exists():
         return build_report_empty()
     with _REPORT_LOCK:
@@ -51,21 +59,25 @@ def _cached_report(path, execution_path=None):
                 path, execution_path, _analytics_state_path(path, "web-shadow-report"),
             )
             _REPORT_ANALYTICS[str(path)] = analytics
-        report = analytics.refresh()
+        refresh_parameters = inspect.signature(analytics.refresh).parameters
+        report = (
+            analytics.refresh(current_complete_set_hashes)
+            if refresh_parameters else analytics.refresh()
+        )
         key = _report_cache_key(path, execution_path)
         _REPORT_CACHE[str(path)] = (key, report, time.monotonic())
         return report
 
 
-def _report_worker(job_key, path, execution_path):
+def _report_worker(job_key, path, execution_path, current_complete_set_hashes):
     try:
-        _cached_report(path, execution_path)
+        _cached_report(path, execution_path, current_complete_set_hashes)
     finally:
         with _REPORT_JOB_LOCK:
             _REPORT_JOBS.pop(job_key, None)
 
 
-def _report_for_status(path, execution_path=None):
+def _report_for_status(path, execution_path=None, current_complete_set_hashes=None):
     if not path.exists():
         return build_report_empty(), False
     job_key = (str(path.resolve()), str(execution_path.resolve()) if execution_path else "")
@@ -82,12 +94,14 @@ def _report_for_status(path, execution_path=None):
         persisted = _analytics_state_path(path, "web-shadow-report").exists()
         if not cache_fresh and not persisted and total_size >= REPORT_ASYNC_THRESHOLD_BYTES:
             job = threading.Thread(
-                target=_report_worker, args=(job_key, path, execution_path), daemon=True
+                target=_report_worker,
+                args=(job_key, path, execution_path, current_complete_set_hashes),
+                daemon=True,
             )
             _REPORT_JOBS[job_key] = job
             job.start()
             return cached[1] if cached else build_report_empty(), True
-    return _cached_report(path, execution_path), False
+    return _cached_report(path, execution_path, current_complete_set_hashes), False
 
 
 def build_report_empty():
@@ -104,7 +118,10 @@ def build_report_empty():
         "performance": dict(empty_performance),
         "performance_by_strategy": {
             strategy: dict(empty_performance)
-            for strategy in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+            for strategy in (
+                "late_window_directional_ev", "low_price_lottery_ev", "paired_lock",
+                "inventory_rebalancing_arb", "maker_complete_set_arb",
+            )
         },
         "equity_curve": [], "trade_ledger": [], "asset_latest_pnl": {},
     }
@@ -150,7 +167,7 @@ def _empty_strategy_counts():
         name: {"evaluations": 0, "accepts": 0, "rejections": 0,
                "model_evaluations": 0, "latest_model_evaluated": False,
                "unique_opportunities": 0, "active_opportunities": 0}
-        for name in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+        for name in STRATEGIES
     }
     counts["late_window_directional_ev"].update({
         "terminal_hedge_evaluations": 0,
@@ -254,7 +271,7 @@ def _save_strategy_state(path, state):
 
 
 def _strategy_counts(paths):
-    names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+    names = STRATEGIES
     total = _empty_strategy_counts()
     terminal_summary = {"latest": None, "rejection_reasons": {}}
     with _STRATEGY_COUNT_LOCK:
@@ -299,6 +316,8 @@ def _strategy_counts(paths):
                             event_type = row.get("event_type")
                             if strategy not in state["counts"] or event_type not in {
                                 "shadow_eval", "shadow_hedge_eval", "shadow_hedged_opportunity",
+                                "shadow_inventory_eval", "shadow_inventory_action",
+                                "shadow_maker_quote_eval",
                             }:
                                 continue
                             event_id = row.get("event_id")
@@ -471,10 +490,21 @@ def build_status(data_dir, log_file, state_file):
     events.sort(key=lambda item: float(item.get("ts", 0)), reverse=True)
     events = [item for item in events if float(item.get("ts", 0)) <= time.time() + 300]
     execution_log = data_dir.parent / "logs" / "shadow-execution.jsonl"
-    report, report_refreshing = _report_for_status(selected_log, execution_log)
+    shadow_health = _json(data_dir / "shadow-health.json", {})
+    current_complete_set_hashes = {
+        "paired_lock": shadow_health.get("paired_config_hash"),
+        "inventory_rebalancing_arb": shadow_health.get("inventory_config_hash"),
+        "maker_complete_set_arb": shadow_health.get("maker_config_hash"),
+    }
+    if not any(current_complete_set_hashes.values()):
+        current_complete_set_hashes = None
+    report, report_refreshing = _report_for_status(
+        selected_log, execution_log, current_complete_set_hashes,
+    )
     shadow_events = [item for item in events if item.get("event_type") in {
         "shadow_eval", "shadow_opportunity", "shadow_hedge_eval",
-        "shadow_hedged_opportunity",
+        "shadow_hedged_opportunity", "shadow_inventory_eval",
+        "shadow_inventory_action", "shadow_maker_quote_eval",
     }]
     paired_events = [item for item in shadow_events if item.get("strategy", "paired_lock") == "paired_lock"]
     latest_shadow = {}
@@ -528,7 +558,6 @@ def build_status(data_dir, log_file, state_file):
     if reference_prices["stale"]:
         for key in ("binance_btcusdt", "chainlink_btcusd", "divergence_usd", "divergence_bps"):
             reference_prices[key] = None
-    shadow_health = _json(data_dir / "shadow-health.json", {})
     shadow_health_age = time.time() - shadow_health.get("updated_at", 0)
     shadow_health["stale"] = shadow_health_age > 5
     shadow_health["resyncs"] = int(shadow_health.get("full_resyncs", 0))
@@ -600,9 +629,10 @@ def build_status(data_dir, log_file, state_file):
     terminal_hedge_summary = strategy_count_result.get(
         "_terminal_hedge", {"latest": None, "rejection_reasons": {}}
     )
+    empty_counts = _empty_strategy_counts()
     strategy_counts = {
-        name: strategy_count_result[name]
-        for name in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+        name: strategy_count_result.get(name, empty_counts[name])
+        for name in STRATEGIES
     }
     analytics_refreshing = report_refreshing or strategy_refreshing
     strategy_evaluations = sum(row["evaluations"] for row in strategy_counts.values())
@@ -611,12 +641,15 @@ def build_status(data_dir, log_file, state_file):
     active_opportunities = sum(row["active_opportunities"] for row in strategy_counts.values())
     strategy_latest = {}
     for item in shadow_events:
-        if item.get("event_type") != "shadow_eval":
+        if item.get("event_type") not in {
+            "shadow_eval", "shadow_inventory_eval", "shadow_inventory_action",
+            "shadow_maker_quote_eval",
+        }:
             continue
         strategy = item.get("strategy", "paired_lock")
         strategy_latest.setdefault(strategy, item)
     strategy_recent = {}
-    for strategy in ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock"):
+    for strategy in STRATEGIES:
         recent = [item for item in shadow_events if item.get("strategy", "paired_lock") == strategy]
         strategy_recent[strategy] = {
             "by_asset": dict(Counter(item.get("asset", "UNKNOWN") for item in recent)),
@@ -646,7 +679,26 @@ def build_status(data_dir, log_file, state_file):
         }),
         None,
     )
-    active_shadow_positions = len(lifecycle_state.get("positions", {}))
+    current_hash = report.get("current_strategy_config_hash")
+    current_hashes = report.get("current_strategy_config_hashes", {})
+    current_paired_hash = report.get("current_paired_config_hash")
+    current_positions = [
+        position for position in lifecycle_state.get("positions", {}).values()
+        if (
+            position.get("strategy") == "paired_lock"
+            and position.get("strategy_config_hash")
+            and (
+                current_paired_hash is None
+                or position.get("strategy_config_hash") == current_paired_hash
+            )
+        ) or (
+            position.get("strategy") != "paired_lock"
+            and position.get("strategy_config_hash") in {
+                current_hash, current_hashes.get(position.get("strategy")),
+            }
+        )
+    ]
+    active_shadow_positions = len(current_positions)
     simulated_complete = report["performance"]["completed"]
     engine_latency = reference_prices.get("engine_latency_us")
     def age_snapshot(source):
@@ -714,18 +766,26 @@ def build_status(data_dir, log_file, state_file):
         "shadow_health": shadow_health,
         "shadow_execution": shadow_execution,
         "shadow_lifecycle": {
-            "open_positions": len(lifecycle_state.get("positions", {})),
+            "open_positions": active_shadow_positions,
+            "historical_open_positions_excluded": (
+                len(lifecycle_state.get("positions", {})) - active_shadow_positions
+            ),
             "active_positions": sum(
                 position.get("lifecycle_state", "ACTIVE") == "ACTIVE"
-                for position in lifecycle_state.get("positions", {}).values()
+                for position in current_positions
             ),
             "settlement_pending": sum(
                 position.get("lifecycle_state") == "SETTLEMENT_PENDING"
-                for position in lifecycle_state.get("positions", {}).values()
+                for position in current_positions
             ),
             "orphaned_positions": len(lifecycle_state.get("orphaned_positions", [])),
-            "positions": list(lifecycle_state.get("positions", {}).values()),
-            "completed_ids": len(lifecycle_state.get("completed", [])),
+            "positions": current_positions,
+            "complete_set_inventory": list(
+                lifecycle_state.get("complete_set_inventory", {}).values()
+            ),
+            "maker_quotes": list(lifecycle_state.get("maker_quotes", {}).values()),
+            "completed_ids": simulated_complete,
+            "historical_completed_excluded": report.get("excluded_other_strategy_config", 0),
             "pending_predictions": len(lifecycle_state.get("probability_predictions", {})),
             "completed_predictions": len(lifecycle_state.get("completed_predictions", [])),
             "portfolio_rejections": dict(Counter(lifecycle_state.get("portfolio_rejections", {}).values())),

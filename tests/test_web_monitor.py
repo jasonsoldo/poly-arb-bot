@@ -349,7 +349,9 @@ def test_web_status_includes_completed_shadow_analytics(tmp_path):
     }), encoding="utf-8")
     (logs / "shadow-execution.jsonl").write_text(json.dumps({
         "ts": 101.0, "event_type": "shadow_complete", "event_id": "m1:100.0:complete",
-        "strategy": "paired_lock", "market_id": "m1", "realized_simulated_pnl": 0.25,
+        "strategy": "paired_lock", "market_id": "m1",
+        "strategy_config_hash": "paired-current",
+        "realized_simulated_pnl": 0.25,
     }), encoding="utf-8")
 
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
@@ -367,18 +369,22 @@ def test_web_status_exposes_latest_completed_pnl_per_asset(tmp_path):
     rows = [
         {"ts": 101.0, "event_type": "shadow_complete", "event_id": "btc-old",
          "strategy": "paired_lock", "market_id": "btc-5m-old", "asset": "BTC",
-         "timeframe": "5m", "realized_simulated_pnl": -0.53},
+         "timeframe": "5m", "strategy_config_hash": "paired-current",
+         "realized_simulated_pnl": -0.53},
         {"ts": 103.0, "event_type": "shadow_complete", "event_id": "eth-latest",
          "strategy": "paired_lock", "market_id": "eth-15m", "asset": "ETH",
-         "timeframe": "15m", "realized_simulated_pnl": 0.12},
+         "timeframe": "15m", "strategy_config_hash": "paired-current",
+         "realized_simulated_pnl": 0.12},
         {"ts": 102.0, "event_type": "shadow_complete", "event_id": "btc-latest",
          "strategy": "paired_lock", "market_id": "btc-5m-new", "asset": "BTC",
-         "timeframe": "5m", "realized_simulated_pnl": 0.56},
+         "timeframe": "5m", "strategy_config_hash": "paired-current",
+         "realized_simulated_pnl": 0.56},
     ]
     rows.extend(
-        {"ts": 200.0 + index, "event_type": "shadow_complete", "event_id": f"hype-{index}",
-         "strategy": "paired_lock", "market_id": f"hype-{index}", "asset": "HYPE",
-         "timeframe": "5m", "realized_simulated_pnl": -0.01}
+            {"ts": 200.0 + index, "event_type": "shadow_complete", "event_id": f"hype-{index}",
+             "strategy": "paired_lock", "market_id": f"hype-{index}", "asset": "HYPE",
+             "timeframe": "5m", "strategy_config_hash": "paired-current",
+             "realized_simulated_pnl": -0.01}
         for index in range(101)
     )
     (logs / "shadow-execution.jsonl").write_text(

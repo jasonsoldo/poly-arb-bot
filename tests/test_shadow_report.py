@@ -115,6 +115,29 @@ def test_shadow_report_excludes_other_hash_from_current_performance(tmp_path):
     assert report["excluded_other_strategy_config"] == 1
 
 
+def test_shadow_report_excludes_unversioned_historical_paired_completions(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    audit.write_text("", encoding="utf-8")
+    execution.write_text("\n".join([
+        json.dumps({
+            "ts": 1, "event_type": "shadow_complete", "event_id": "historical",
+            "strategy": "paired_lock", "realized_simulated_pnl": 4.05,
+        }),
+        json.dumps({
+            "ts": 2, "event_type": "shadow_complete", "event_id": "current",
+            "strategy": "paired_lock", "strategy_config_hash": "paired-current",
+            "realized_simulated_pnl": 0.2,
+        }),
+    ]), encoding="utf-8")
+
+    report = build_report(audit, execution)
+
+    assert report["performance"]["completed"] == 1
+    assert report["performance"]["simulated_pnl"] == 0.2
+    assert report["excluded_other_strategy_config"] == 1
+
+
 def test_shadow_report_quarantines_future_clock_records(tmp_path):
     path = tmp_path / "audit.jsonl"
     path.write_text(json.dumps({

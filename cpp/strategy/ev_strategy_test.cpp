@@ -75,7 +75,14 @@ int main() {
             const auto output = strategy::evaluate_terminal_hedge(value);
             std::cout << "{\"accepted\":" << (output.accepted ? "true" : "false")
                       << ",\"reason\":\"" << output.reason << "\",\"hedge_size\":"
-                      << output.hedge_size << ",\"main_cost\":" << output.main_cost
+                      << output.hedge_size
+                      << ",\"main_probability\":" << output.main_probability
+                      << ",\"hedge_probability\":" << output.hedge_probability
+                      << ",\"main_unit_cost\":" << output.main_unit_cost
+                      << ",\"hedge_unit_cost\":" << output.hedge_unit_cost
+                      << ",\"main_net_ev_per_share\":" << output.main_net_ev_per_share
+                      << ",\"hedge_net_ev_per_share\":" << output.hedge_net_ev_per_share
+                      << ",\"main_cost\":" << output.main_cost
                       << ",\"hedge_cost\":" << output.hedge_cost
                       << ",\"total_cost\":" << output.total_cost
                       << ",\"main_win_pnl\":" << output.main_win_pnl

@@ -41,6 +41,16 @@ def test_cpp_engine_emits_four_independent_strategy_evaluations():
     assert "strategy_audit_" in ENGINE
 
 
+def test_cpp_engine_evaluates_polymarket_only_complete_set_strategies():
+    assert '#include "../strategy/complete_set_arb.hpp"' in ENGINE
+    assert "complete_set::evaluate_rebalance" in ENGINE
+    assert "complete_set::evaluate_maker" in ENGINE
+    assert '\\"strategy\\":\\"inventory_rebalancing_arb\\"' in ENGINE
+    assert '\\"strategy\\":\\"maker_complete_set_arb\\"' in ENGINE
+    assert "maker_fill_probability_unavailable" in ENGINE
+    assert '\\"realized_locked_profit\\"' in ENGINE
+
+
 def test_cpp_strategy_audit_is_shadow_only_and_suppressed():
     assert "strategy_emission_state_" in ENGINE
     assert "strategy_accept_heartbeat_seconds_" in ENGINE

@@ -22,6 +22,10 @@ def python_result(case):
             + case["hedge_slippage_per_share"] + .01 + .005
         )
         main_cost = case["main_size"] * main_unit_cost
+        main_probability = min(1.0, max(0.0, case["main_probability"]))
+        hedge_probability = 1 - main_probability
+        main_net_ev_per_share = main_probability - main_unit_cost
+        hedge_net_ev_per_share = hedge_probability - hedge_unit_cost
         hedge_size = hedge_cost = total_cost = 0.0
         main_win_pnl = reversal_pnl = expected_pnl = 0.0
         reason = None
@@ -34,19 +38,26 @@ def python_result(case):
         elif hedge_unit_cost >= 1:
             reason = "hedge_unit_cost_invalid"
         else:
-            hedge_size = max(0.0, (main_cost - 1.0) / (1 - hedge_unit_cost))
-            if hedge_size <= 0:
+            minimum_hedge_size = max(0.0, (main_cost - 1.0) / (1 - hedge_unit_cost))
+            maximum_hedge_size = min(
+                case["main_size"],
+                case["hedge_liquidity"],
+                max(0.0, (case["main_size"] - main_cost) / hedge_unit_cost)
+                if hedge_unit_cost > 0 else case["main_size"],
+            )
+            if minimum_hedge_size <= 0 and hedge_net_ev_per_share <= 0:
                 reason = "hedge_not_required"
-            elif hedge_size > case["main_size"]:
-                reason = "hedge_size_above_limit"
+            elif minimum_hedge_size > maximum_hedge_size + 1e-12:
+                reason = "hedge_constraints_infeasible"
             else:
+                hedge_size = maximum_hedge_size if hedge_net_ev_per_share > 0 else minimum_hedge_size
                 hedge_cost = hedge_size * hedge_unit_cost
                 total_cost = main_cost + hedge_cost
                 main_win_pnl = case["main_size"] - total_cost
                 reversal_pnl = hedge_size - total_cost
                 expected_pnl = (
-                    case["main_probability"] * main_win_pnl
-                    + (1 - case["main_probability"]) * reversal_pnl
+                    main_probability * main_win_pnl
+                    + hedge_probability * reversal_pnl
                 )
                 if main_win_pnl <= 0:
                     reason = "main_win_pnl_not_positive"
@@ -59,6 +70,12 @@ def python_result(case):
         accepted = reason == "terminal_hedged_opportunity"
         return {
             "accepted": accepted, "reason": reason, "hedge_size": hedge_size,
+            "main_probability": main_probability,
+            "hedge_probability": hedge_probability,
+            "main_unit_cost": main_unit_cost,
+            "hedge_unit_cost": hedge_unit_cost,
+            "main_net_ev_per_share": main_net_ev_per_share,
+            "hedge_net_ev_per_share": hedge_net_ev_per_share,
             "main_cost": main_cost, "hedge_cost": hedge_cost, "total_cost": total_cost,
             "main_win_pnl": main_win_pnl, "reversal_pnl": reversal_pnl,
             "expected_pnl": expected_pnl,

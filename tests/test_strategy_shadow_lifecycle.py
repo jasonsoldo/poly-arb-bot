@@ -102,6 +102,106 @@ def test_terminal_hedge_opens_one_combined_position(tmp_path):
     assert position["expected_portfolio_pnl"] == 1.4
 
 
+def test_inventory_lock_is_completed_immediately_without_fake_market_settlement(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    row = {
+        "event_id": "inventory-lock-1",
+        "event_type": "shadow_inventory_action",
+        "strategy": "inventory_rebalancing_arb",
+        "market_id": "m1",
+        "asset": "BTC",
+        "timeframe": "5m",
+        "decision": "ACCEPT",
+        "reason": "inventory_lock",
+        "action": "BUY_DOWN_AND_LOCK",
+        "projected_locked_quantity": 10,
+        "projected_locked_profit": .4,
+        "realized_locked_profit": .4,
+        "residual_up_quantity": 0,
+        "residual_down_quantity": 0,
+        "residual_up_cost": 0,
+        "residual_down_cost": 0,
+        "ts": 1000,
+        "config_version": "inventory-rebalancing-v1",
+        "config_hash": "inventory-hash",
+    }
+
+    assert lifecycle.consume(row, {"m1": market()}) is True
+
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["event_type"] == "shadow_complete"
+    assert complete["strategy"] == "inventory_rebalancing_arb"
+    assert complete["payout"] == 10
+    assert complete["entry_cost"] == 9.6
+    assert complete["realized_simulated_pnl"] == .4
+    assert complete["real_orders"] == 0
+
+
+def test_maker_quote_is_observation_only_and_never_counts_as_fill(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl"
+    )
+    row = {
+        "event_id": "maker-1",
+        "event_type": "shadow_maker_quote_eval",
+        "strategy": "maker_complete_set_arb",
+        "market_id": "m1",
+        "asset": "BTC",
+        "timeframe": "5m",
+        "decision": "REJECT",
+        "reason": "maker_fill_probability_unavailable",
+        "up_bid_quote": .48,
+        "down_bid_quote": .48,
+        "pair_quote_cost": .96,
+        "locked_edge_if_both_fill": .04,
+        "expected_value": 0,
+        "ts": 1000,
+    }
+
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["completed"] == []
+    assert lifecycle.data["maker_quotes"]["m1"]["pair_quote_cost"] == .96
+
+
+def test_unmatched_complete_set_inventory_is_settled_and_loss_is_recorded(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    lifecycle.consume({
+        "event_id": "inventory-up-1",
+        "event_type": "shadow_inventory_action",
+        "strategy": "inventory_rebalancing_arb",
+        "market_id": "m1",
+        "asset": "BTC",
+        "timeframe": "5m",
+        "decision": "ACCEPT",
+        "reason": "inventory_accumulation",
+        "action": "BUY_UP",
+        "residual_up_quantity": 10,
+        "residual_down_quantity": 0,
+        "residual_up_cost": 6,
+        "residual_down_cost": 0,
+        "close_ts": 1100,
+        "settlement_source": "chainlink",
+        "price_to_beat": 100,
+        "config_version": "inventory-rebalancing-v1",
+        "config_hash": "inventory-hash",
+        "ts": 1000,
+    }, {"m1": market()})
+    venue = {"assets": {"BTC": {"chainlink_settlement_samples": [
+        {"source_timestamp_ms": 1_100_000, "price": 99},
+    ]}}}
+
+    assert lifecycle.settle({"m1": market()}, venue, now=1101) == 1
+
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["strategy"] == "inventory_rebalancing_arb"
+    assert complete["winning_outcome"] == "Down"
+    assert complete["entry_cost"] == 6
+    assert complete["payout"] == 0
+    assert complete["realized_simulated_pnl"] == -6
+
+
 def test_terminal_hedge_settlement_uses_main_or_hedge_payout(tmp_path):
     log = tmp_path / "events.jsonl"
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)

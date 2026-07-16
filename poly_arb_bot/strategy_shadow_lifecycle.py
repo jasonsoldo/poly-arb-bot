@@ -105,6 +105,9 @@ class StrategyShadowLifecycle:
         self.data.setdefault("completed_predictions", [])
         self.data.setdefault("orphaned_predictions", [])
         self.data.setdefault("probability_calibration", {})
+        self.data.setdefault("complete_set_inventory", {})
+        self.data.setdefault("maker_quotes", {})
+        self.data.setdefault("processed_complete_set_events", [])
         self.data["portfolio_limits"] = asdict(self.limits)
         self.data["calibration_mode"] = self.calibration_mode
         self.data["portfolio_limits_enforced"] = not self.calibration_mode
@@ -466,6 +469,10 @@ class StrategyShadowLifecycle:
 
     def consume(self, row, markets):
         strategy = row.get("strategy")
+        if strategy == "inventory_rebalancing_arb":
+            return self._consume_inventory_rebalancing(row)
+        if strategy == "maker_complete_set_arb":
+            return self._consume_maker_quote(row)
         if strategy not in {"late_window_directional_ev", "low_price_lottery_ev", "paired_lock"}:
             return False
         hedged = row.get("event_type") == "shadow_hedged_opportunity"
@@ -568,6 +575,97 @@ class StrategyShadowLifecycle:
         self._mark_dirty()
         self._save()
         return True
+
+    def _consume_inventory_rebalancing(self, row):
+        if row.get("event_type") not in {"shadow_inventory_eval", "shadow_inventory_action"}:
+            return False
+        event_id = row.get("event_id")
+        if not event_id or event_id in self.data["processed_complete_set_events"]:
+            return False
+        market_id = row.get("market_id")
+        self.data["complete_set_inventory"][market_id] = {
+            "market_id": market_id,
+            "asset": row.get("asset"),
+            "timeframe": row.get("timeframe"),
+            "action": row.get("action"),
+            "decision": row.get("decision"),
+            "reason": row.get("reason"),
+            "up_quantity": row.get("residual_up_quantity", 0),
+            "down_quantity": row.get("residual_down_quantity", 0),
+            "up_cost": row.get("residual_up_cost", 0),
+            "down_cost": row.get("residual_down_cost", 0),
+            "close_ts": row.get("close_ts"),
+            "settlement_source": row.get("settlement_source"),
+            "price_to_beat": row.get("price_to_beat"),
+            "config_version": row.get("config_version"),
+            "config_hash": row.get("config_hash"),
+            "updated_at": row.get("ts"),
+        }
+        self.data["processed_complete_set_events"] = (
+            self.data["processed_complete_set_events"] + [event_id]
+        )[-20000:]
+        locked_profit = float(row.get("realized_locked_profit") or 0)
+        if row.get("decision") == "ACCEPT" and locked_profit > 0:
+            complete_id = f"{event_id}:complete"
+            complete = {
+                **row,
+                "event_id": complete_id,
+                "entry_event_id": event_id,
+                "event_type": "shadow_complete",
+                "lifecycle_state": "COMPLETE",
+                "outcome": "Both",
+                "entry_cost": (
+                    float(row.get("projected_locked_quantity", 0)) - locked_profit
+                ),
+                "payout": float(row.get("projected_locked_quantity", 0)),
+                "realized_simulated_pnl": locked_profit,
+                "strategy_config_version": row.get("config_version"),
+                "strategy_config_hash": row.get("config_hash"),
+                "real_order_submissions": 0,
+                "real_orders": 0,
+                "real_fills": 0,
+            }
+            self.logger.write("shadow_complete", complete)
+            self.data["completed"] = (self.data["completed"] + [complete_id])[-20000:]
+            self.data["completed_trades"] = (
+                self.data["completed_trades"] + [{
+                    "event_id": complete_id,
+                    "strategy": "inventory_rebalancing_arb",
+                    "market_id": market_id,
+                    "ts": row.get("ts"),
+                    "pnl": locked_profit,
+                    "strategy_config_hash": row.get("config_hash"),
+                }]
+            )[-20000:]
+        if (
+            abs(float(row.get("residual_up_quantity") or 0)) < 1e-12
+            and abs(float(row.get("residual_down_quantity") or 0)) < 1e-12
+        ):
+            self.data["complete_set_inventory"].pop(market_id, None)
+        self._mark_dirty()
+        self._save(force=locked_profit > 0)
+        return row.get("event_type") == "shadow_inventory_action"
+
+    def _consume_maker_quote(self, row):
+        if row.get("event_type") != "shadow_maker_quote_eval":
+            return False
+        event_id = row.get("event_id")
+        if not event_id or event_id in self.data["processed_complete_set_events"]:
+            return False
+        self.data["maker_quotes"][row.get("market_id")] = {
+            key: row.get(key)
+            for key in (
+                "market_id", "asset", "timeframe", "up_bid_quote", "down_bid_quote",
+                "pair_quote_cost", "locked_edge_if_both_fill", "expected_value",
+                "decision", "reason", "ts",
+            )
+        }
+        self.data["processed_complete_set_events"] = (
+            self.data["processed_complete_set_events"] + [event_id]
+        )[-20000:]
+        self._mark_dirty()
+        self._save()
+        return False
 
     @staticmethod
     def _settlement_sample(position, venue):
@@ -698,6 +796,12 @@ class StrategyShadowLifecycle:
             changed = True
             durable_transition = True
 
+        inventory_completed, inventory_changed = self._settle_complete_set_inventory(
+            venue, now
+        )
+        completed += inventory_completed
+        changed = changed or inventory_changed
+        durable_transition = durable_transition or inventory_changed
         prediction_changed, prediction_durable = self._settle_predictions(venue, now)
         changed = changed or prediction_changed
         durable_transition = durable_transition or prediction_durable
@@ -707,6 +811,86 @@ class StrategyShadowLifecycle:
             self._save(force=durable_transition)
 
         return completed
+
+    def _settle_complete_set_inventory(self, venue, now):
+        completed = 0
+        changed = False
+        for market_id, inventory in list(self.data["complete_set_inventory"].items()):
+            close_ts = float(inventory.get("close_ts") or 0)
+            if close_ts <= 0 or now < close_ts:
+                continue
+            sample = self._settlement_sample(inventory, venue)
+            price_to_beat = inventory.get("price_to_beat")
+            if sample is None or price_to_beat is None:
+                if "settlement_pending_since" not in inventory:
+                    inventory["settlement_pending_since"] = now
+                    changed = True
+                if now - close_ts < self.orphan_after_seconds:
+                    continue
+                inventory["lifecycle_state"] = "ORPHANED"
+                inventory["orphan_reason"] = (
+                    "settlement_sample_unavailable"
+                    if sample is None else "opening_anchor_unavailable"
+                )
+                self.data["orphaned_positions"] = (
+                    self.data["orphaned_positions"] + [{
+                        **inventory,
+                        "market_id": market_id,
+                        "strategy": "inventory_rebalancing_arb",
+                    }]
+                )[-20000:]
+                del self.data["complete_set_inventory"][market_id]
+                changed = True
+                continue
+            winning_outcome = (
+                "Up" if float(sample["price"]) >= float(price_to_beat) else "Down"
+            )
+            up_quantity = float(inventory.get("up_quantity") or 0)
+            down_quantity = float(inventory.get("down_quantity") or 0)
+            entry_cost = float(inventory.get("up_cost") or 0) + float(
+                inventory.get("down_cost") or 0
+            )
+            payout = up_quantity if winning_outcome == "Up" else down_quantity
+            pnl = round(payout - entry_cost, 12)
+            event_id = f"inventory:{market_id}:{close_ts}:complete"
+            complete = {
+                **inventory,
+                "event_id": event_id,
+                "event_type": "shadow_complete",
+                "strategy": "inventory_rebalancing_arb",
+                "market_id": market_id,
+                "timestamp": now,
+                "ts": now,
+                "lifecycle_state": "COMPLETE",
+                "outcome": "Residual",
+                "entry_cost": entry_cost,
+                "payout": payout,
+                "winning_outcome": winning_outcome,
+                "settlement_price": float(sample["price"]),
+                "settlement_timestamp_ms": float(sample["source_timestamp_ms"]),
+                "realized_simulated_pnl": pnl,
+                "strategy_config_version": inventory.get("config_version"),
+                "strategy_config_hash": inventory.get("config_hash"),
+                "real_order_submissions": 0,
+                "real_orders": 0,
+                "real_fills": 0,
+            }
+            self.logger.write("shadow_complete", complete)
+            self.data["completed"] = (self.data["completed"] + [event_id])[-20000:]
+            self.data["completed_trades"] = (
+                self.data["completed_trades"] + [{
+                    "event_id": event_id,
+                    "strategy": "inventory_rebalancing_arb",
+                    "market_id": market_id,
+                    "ts": now,
+                    "pnl": pnl,
+                    "strategy_config_hash": inventory.get("config_hash"),
+                }]
+            )[-20000:]
+            del self.data["complete_set_inventory"][market_id]
+            completed += 1
+            changed = True
+        return completed, changed
 
 
 def process_audit_once(audit_path, lifecycle, markets, offset_key="audit_offset"):

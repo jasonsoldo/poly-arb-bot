@@ -27,7 +27,13 @@ def _rows(path):
                 yield None
 
 
-STRATEGIES = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+STRATEGIES = (
+    "late_window_directional_ev",
+    "low_price_lottery_ev",
+    "paired_lock",
+    "inventory_rebalancing_arb",
+    "maker_complete_set_arb",
+)
 SUMMARY_VERSION = 1
 MAX_RECENT_VALUES = 20_000
 MAX_SEEN_EVENTS = 50_000
@@ -51,7 +57,7 @@ def _metrics(ledger):
             "sharpe": sharpe, "sharpe_samples": len(samples)}
 
 
-def _performance_from_rows(rows):
+def _performance_from_rows(rows, current_complete_set_hashes=None):
     ledger = []
     for row in rows:
         event_id = row.get("event_id")
@@ -61,6 +67,8 @@ def _performance_from_rows(rows):
             "main_outcome", "hedge_outcome", "main_size", "hedge_size",
             "main_expected_fill_price", "hedge_expected_fill_price",
             "total_entry_cost",
+            "action", "quantity", "unit_cost", "projected_locked_quantity",
+            "projected_locked_profit", "realized_locked_profit",
         )
         item = {"ts": float(row.get("ts", 0)), "event_id": event_id,
                 "pnl": pnl, "state": "COMPLETE",
@@ -74,10 +82,34 @@ def _performance_from_rows(rows):
         strategy: strategy_config(strategy)[1]
         for strategy in ("late_window_directional_ev", "low_price_lottery_ev")
     }
-    current = [item for item in ledger if item.get("strategy") == "paired_lock" or
-               item.get("strategy_config_hash") in {
-                   current_hash, current_hashes.get(item.get("strategy")),
-               }]
+    hash_selected_strategies = {
+        "paired_lock", "inventory_rebalancing_arb", "maker_complete_set_arb",
+    }
+    if current_complete_set_hashes is None:
+        current_complete_set_hashes = {}
+        for strategy in hash_selected_strategies:
+            rows = [
+                item for item in ledger
+                if item.get("strategy") == strategy and item.get("strategy_config_hash")
+            ]
+            current_complete_set_hashes[strategy] = (
+                max(rows, key=lambda item: item["ts"]).get("strategy_config_hash")
+                if rows else None
+            )
+    current = [
+        item for item in ledger
+        if (
+            item.get("strategy") in hash_selected_strategies
+            and current_complete_set_hashes.get(item.get("strategy")) is not None
+            and item.get("strategy_config_hash") ==
+                current_complete_set_hashes.get(item.get("strategy"))
+        ) or (
+            item.get("strategy") not in hash_selected_strategies
+            and item.get("strategy_config_hash") in {
+                current_hash, current_hashes.get(item.get("strategy")),
+            }
+        )
+    ]
     asset_latest_pnl = {}
     for item in current:
         if item.get("asset"):
@@ -101,15 +133,11 @@ def _performance_from_rows(rows):
         "trade_ledger": list(reversed(current[-100:])),
         "asset_latest_pnl": asset_latest_pnl,
         "excluded_pre_rule_compliance": len(ledger) - len(current),
-        "excluded_other_strategy_config": sum(
-            item.get("strategy") != "paired_lock" and
-            item.get("strategy_config_hash") not in {
-                current_hash, current_hashes.get(item.get("strategy")),
-            }
-            for item in ledger
-        ),
+        "excluded_other_strategy_config": len(ledger) - len(current),
         "current_strategy_config_hash": current_hash,
         "current_strategy_config_hashes": current_hashes,
+        "current_complete_set_config_hashes": current_complete_set_hashes,
+        "current_paired_config_hash": current_complete_set_hashes["paired_lock"],
     }
 
 
@@ -284,7 +312,7 @@ class IncrementalReport:
         self._execution_seen.add(event_id)
         self._completed.append(row)
 
-    def refresh(self):
+    def refresh(self, current_complete_set_hashes=None):
         self.last_bytes_read = 0
         changed = self._consume_file(self.audit_path, "audit", self._consume_audit)
         changed = self._consume_file(
@@ -292,9 +320,9 @@ class IncrementalReport:
         ) or changed
         if changed:
             self._save()
-        return self.report()
+        return self.report(current_complete_set_hashes)
 
-    def report(self):
+    def report(self, current_complete_set_hashes=None):
         bucket = self.state["audit"]
         durations = self._durations
         source_ages = self._source_ages
@@ -321,7 +349,9 @@ class IncrementalReport:
                 "samples": len(source_ages),
             },
         }
-        result.update(_performance_from_rows(self._completed))
+        result.update(_performance_from_rows(
+            self._completed, current_complete_set_hashes,
+        ))
         return result
 
 

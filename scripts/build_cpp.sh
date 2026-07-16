@@ -44,6 +44,12 @@ strategy_output="$(printf '%s\n' "$strategy_smoke" | ./build/ev_strategy_test)"
 grep -Eq '"estimated_probability":[0-9]' <<< "$strategy_output"
 echo "built and tested build/ev_strategy_test"
 
+g++ -std=c++17 -O3 -Wall -Wextra \
+  cpp/strategy/complete_set_arb_test.cpp \
+  -o build/complete_set_arb_test
+./build/complete_set_arb_test
+echo "built and tested build/complete_set_arb_test"
+
 g++ -std=c++17 -O3 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
   cpp/pnl_curve_engine/pnl_curve_engine.cpp \
   -o build/pnl_curve_engine

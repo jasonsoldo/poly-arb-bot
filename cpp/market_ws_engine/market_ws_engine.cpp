@@ -8,6 +8,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include "../reference_ipc/latest_value_client.hpp"
+#include "../strategy/complete_set_arb.hpp"
 #include "../strategy/ev_strategy.hpp"
 #include <openssl/sha.h>
 #include <algorithm>
@@ -173,6 +174,8 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"directional_window_4h_max", environment_value("DIRECTIONAL_WINDOW_4H_MAX", "45")},
         {"directional_settlement_buffer", environment_value("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002")},
         {"imbalance_z", environment_value("MODEL_IMBALANCE_Z", "0.25")},
+        {"inventory_max_unmatched_notional", environment_value("INVENTORY_MAX_UNMATCHED_NOTIONAL", "10")},
+        {"inventory_min_entry_edge", environment_value("INVENTORY_MIN_ENTRY_EDGE", "0.02")},
         {"lottery_execution_buffer", environment_value("LOTTERY_EXECUTION_BUFFER", "0.005")},
         {"lottery_max_price", environment_value("LOTTERY_MAX_PRICE", "0.05")},
         {"lottery_min_net_ev", environment_value("LOTTERY_MIN_NET_EV", "0.015")},
@@ -186,6 +189,13 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"maximum_clock_skew_ms", environment_value("MAX_CLOCK_SKEW_MS", "250")},
         {"maximum_reference_age_ms", environment_value("REFERENCE_MAX_AGE_MS", "3000")},
         {"maximum_slippage", environment_value("STRATEGY_MAX_SLIPPAGE", "0.01")},
+        {"maker_both_fill_probability", environment_value("MAKER_BOTH_FILL_PROBABILITY", "0")},
+        {"maker_expected_rebate_per_pair", environment_value("MAKER_EXPECTED_REBATE_PER_PAIR", "0")},
+        {"maker_inventory_skew_per_unit", environment_value("MAKER_INVENTORY_SKEW_PER_UNIT", "0.005")},
+        {"maker_minimum_pair_edge", environment_value("MAKER_MINIMUM_PAIR_EDGE", "0.01")},
+        {"maker_orphan_loss", environment_value("MAKER_ORPHAN_LOSS", "0.02")},
+        {"maker_quote_half_spread", environment_value("MAKER_QUOTE_HALF_SPREAD", "0.02")},
+        {"maker_tick_size", environment_value("MAKER_TICK_SIZE", "0.01")},
         {"minimum_liquidity", environment_value("STRATEGY_MIN_LIQUIDITY", "20")},
         {"minimum_model_sample_span_seconds", environment_value("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60")},
         {"terminal_hedge_max_reversal_loss", environment_value("TERMINAL_HEDGE_MAX_REVERSAL_LOSS", "1.0")},
@@ -193,6 +203,9 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"terminal_hedge_max_size_ratio", environment_value("TERMINAL_HEDGE_MAX_SIZE_RATIO", "1.0")},
         {"momentum_z_per_bps", environment_value("MODEL_MOMENTUM_Z_PER_BPS", "0.002")},
         {"probability_reference", "settlement_reference"},
+        {"shadow_buffer_per_share", environment_value("SHADOW_BUFFER_PER_SHARE", "0.002")},
+        {"shadow_min_profit", environment_value("SHADOW_MIN_PROFIT", "0.01")},
+        {"shadow_size", environment_value("SHADOW_SIZE", "10")},
     };
     if (!strategy_name.empty()) {
         const auto relevant = [&](const std::string& key) {
@@ -212,6 +225,14 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
                 key == "lottery_execution_buffer" || key == "lottery_distance_weight" ||
                 key == "lottery_momentum_z_per_bps" || key == "lottery_imbalance_z" ||
                 key == "lottery_market_blend";
+            if (strategy_name == "inventory_rebalancing_arb") return common ||
+                key.rfind("inventory_", 0) == 0 || key.rfind("shadow_", 0) == 0 ||
+                key == "directional_latency_buffer" ||
+                key == "directional_settlement_buffer" ||
+                key == "momentum_z_per_bps" || key == "imbalance_z";
+            if (strategy_name == "maker_complete_set_arb") return common ||
+                key.rfind("maker_", 0) == 0 || key.rfind("shadow_", 0) == 0 ||
+                key == "momentum_z_per_bps" || key == "imbalance_z";
             return true;
         };
         for (auto item = values.begin(); item != values.end();) {
@@ -399,6 +420,7 @@ bool crossed(const Book& book) {
 }
 
 double best_ask(const Book& book) { return book.asks.empty() ? 0 : book.asks.begin()->first; }
+double best_bid(const Book& book) { return book.bids.empty() ? 0 : book.bids.rbegin()->first; }
 
 double book_imbalance(const Book& book) {
     double bids = 0, asks = 0;
@@ -506,6 +528,13 @@ public:
         paired_config_hash_ = paired_config_hash(
             size_, fallback_fee_, buffer_per_share_, min_profit_, leg_interval_us_,
             execution_half_life_us_, orphan_loss_per_share_, min_expected_value_);
+        inventory_strategy_config_hash_ = sha256_hex(
+            inventory_strategy_config_hash_ + "|" + std::to_string(size_) + "|" +
+            std::to_string(buffer_per_share_) + "|" + std::to_string(min_profit_));
+        maker_strategy_config_hash_ = sha256_hex(
+            maker_strategy_config_hash_ + "|" + std::to_string(size_) + "|" +
+            std::to_string(buffer_per_share_));
+        load_complete_set_inventory();
         strategy_accept_heartbeat_seconds_ = environment_double("STRATEGY_ACCEPT_AUDIT_HEARTBEAT_SECONDS", "5");
         strategy_reject_heartbeat_seconds_ = environment_double("STRATEGY_REJECT_AUDIT_HEARTBEAT_SECONDS", "60");
         for (auto& item : books_) item.second.generation = generation_;
@@ -729,6 +758,9 @@ private:
             emit_terminal_hedge_evaluation(
                 item.first, market, directional_inputs, directional_decisions,
                 lottery_inputs, probability_input, timestamp);
+            emit_complete_set_evaluations(
+                item.first, market, up_book, down_book, directional_inputs,
+                directional_probability.estimated_probability, opening_price, timestamp);
         }
         const auto evaluation_finished = std::chrono::steady_clock::now();
         if (evaluated_any && last_clob_mutation_at_.time_since_epoch().count()) {
@@ -847,6 +879,18 @@ private:
         available(main_fill_available, main ? main->expected_fill_price : 0);
         out << ",\"hedge_expected_fill_price\":";
         available(hedge_fill_available, hedge ? hedge->expected_fill_price : 0);
+        out << ",\"main_probability\":";
+        available(helper_evaluated, result.main_probability);
+        out << ",\"hedge_probability\":";
+        available(helper_evaluated, result.hedge_probability);
+        out << ",\"main_unit_cost\":";
+        available(helper_evaluated, result.main_unit_cost);
+        out << ",\"hedge_unit_cost\":";
+        available(helper_evaluated, result.hedge_unit_cost);
+        out << ",\"main_net_ev_per_share\":";
+        available(helper_evaluated, result.main_net_ev_per_share);
+        out << ",\"hedge_net_ev_per_share\":";
+        available(helper_evaluated, result.hedge_net_ev_per_share);
         out << ",\"main_cost\":";
         available(helper_evaluated, result.main_cost);
         out << ",\"hedge_cost\":";
@@ -879,6 +923,193 @@ private:
             << ",\"config_hash\":\"" << strategy_config_hash() << "\""
             << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
         if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
+    }
+
+    void emit_complete_set_evaluations(
+            const std::string& market_id, const Market& market,
+            const Book& up_book, const Book& down_book,
+            const std::map<std::string, strategy::EvaluationInput>& inputs,
+            const std::optional<double>& up_probability,
+            const std::optional<double>& price_to_beat, double timestamp) {
+        const auto up_found = inputs.find("Up");
+        const auto down_found = inputs.find("Down");
+        if (up_found == inputs.end() || down_found == inputs.end()) return;
+        const auto& up = up_found->second;
+        const auto& down = down_found->second;
+        auto& inventory = complete_set_inventory_[market_id];
+
+        complete_set::RebalanceDecision rebalance;
+        if (!up_probability) {
+            rebalance.reason = "probability_model_unavailable";
+        } else if (!up.market_active || !up.market_tradable) {
+            rebalance.reason = "market_not_tradable";
+        } else if (!up.reference_quorum_met) {
+            rebalance.reason = up.reference_block_reason.empty()
+                ? "insufficient_reference_sources" : up.reference_block_reason;
+        } else if (!up.settlement_source_verified) {
+            rebalance.reason = "settlement_reference_unverified";
+        } else if (!up.clock_skew_ms ||
+                   std::abs(*up.clock_skew_ms) > up.maximum_clock_skew_ms) {
+            rebalance.reason = up.clock_skew_ms
+                ? "clock_skew_exceeded" : "clock_skew_unavailable";
+        } else if (up.book_age_ms > up.maximum_book_age_ms ||
+                   down.book_age_ms > down.maximum_book_age_ms) {
+            rebalance.reason = "clob_book_stale";
+        } else {
+            rebalance = complete_set::evaluate_rebalance({
+                inventory, size_, *up_probability,
+                up.expected_fill_price + up.fee_per_share + buffer_per_share_,
+                down.expected_fill_price + down.fee_per_share + buffer_per_share_,
+                up.liquidity, down.liquidity,
+                inventory_min_entry_edge_, min_profit_, inventory_max_unmatched_notional_,
+            });
+        }
+
+        double locked_profit = 0;
+        if (rebalance.decision == "ACCEPT") {
+            if (rebalance.action == "BUY_UP" || rebalance.action == "BUY_UP_AND_LOCK") {
+                inventory.up_quantity += rebalance.quantity;
+                inventory.up_cost += rebalance.quantity * rebalance.unit_cost;
+            } else {
+                inventory.down_quantity += rebalance.quantity;
+                inventory.down_cost += rebalance.quantity * rebalance.unit_cost;
+            }
+            if (rebalance.projected_locked_quantity > 0) {
+                const double locked = std::min({
+                    rebalance.projected_locked_quantity,
+                    inventory.up_quantity,
+                    inventory.down_quantity,
+                });
+                const double up_average = inventory.up_cost /
+                    std::max(inventory.up_quantity, 1e-12);
+                const double down_average = inventory.down_cost /
+                    std::max(inventory.down_quantity, 1e-12);
+                locked_profit = locked * (1 - up_average - down_average);
+                inventory.up_quantity -= locked;
+                inventory.down_quantity -= locked;
+                inventory.up_cost = std::max(0.0, inventory.up_cost - locked * up_average);
+                inventory.down_cost = std::max(0.0, inventory.down_cost - locked * down_average);
+            }
+            save_complete_set_inventory();
+        }
+
+        strategy::Decision inventory_audit{
+            "inventory_rebalancing_arb", std::nullopt, std::nullopt,
+            rebalance.decision, rebalance.reason, {rebalance.reason},
+        };
+        const std::string inventory_key = market_id + "|inventory_rebalancing_arb";
+        if (should_emit_strategy(inventory_key, inventory_audit, timestamp)) {
+            const unsigned long long sequence = ++strategy_evaluation_sequence_;
+            std::ostringstream out;
+            out << std::setprecision(15)
+                << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
+                << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':'
+                << ws_session_id_ << ':' << market_id << ":inventory:" << sequence
+                << "\",\"event_type\":\""
+                << (rebalance.decision == "ACCEPT"
+                    ? "shadow_inventory_action" : "shadow_inventory_eval")
+                << "\",\"strategy\":\"inventory_rebalancing_arb\",\"market_id\":\""
+                << reference_ipc::escaped(market_id) << "\",\"condition_id\":\""
+                << reference_ipc::escaped(market.condition_id) << "\",\"asset\":\""
+                << reference_ipc::escaped(market.asset) << "\",\"timeframe\":\""
+                << reference_ipc::escaped(market.interval) << "\",\"window\":\""
+                << reference_ipc::escaped(market.window) << "\",\"generation\":"
+                << generation_ << ",\"session\":" << ws_session_id_
+                << ",\"close_ts\":" << market.close_ts
+                << ",\"settlement_source\":\""
+                << reference_ipc::escaped(market.settlement_source)
+                << "\",\"price_to_beat\":";
+            if (price_to_beat) out << *price_to_beat;
+            else out << "null";
+            out
+                << ",\"evaluation_sequence\":" << sequence << ",\"action\":\""
+                << rebalance.action << "\",\"outcome\":\"" << rebalance.outcome
+                << "\",\"quantity\":" << rebalance.quantity
+                << ",\"unit_cost\":" << rebalance.unit_cost
+                << ",\"estimated_probability\":" << rebalance.probability
+                << ",\"probability_edge\":" << rebalance.probability_edge
+                << ",\"projected_locked_quantity\":" << rebalance.projected_locked_quantity
+                << ",\"projected_locked_profit\":" << rebalance.projected_locked_profit
+                << ",\"realized_locked_profit\":" << locked_profit
+                << ",\"residual_up_quantity\":" << inventory.up_quantity
+                << ",\"residual_down_quantity\":" << inventory.down_quantity
+                << ",\"residual_up_cost\":" << inventory.up_cost
+                << ",\"residual_down_cost\":" << inventory.down_cost
+                << ",\"decision\":\"" << rebalance.decision << "\",\"reason\":\""
+                << rebalance.reason << "\",\"config_version\":\"inventory-rebalancing-v1\""
+                << ",\"config_hash\":\"" << inventory_strategy_config_hash_ << "\""
+                << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
+            if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
+        }
+
+        complete_set::MakerDecision maker;
+        if (!up_probability) {
+            maker.reason = "probability_model_unavailable";
+        } else if (!up.market_active || !up.market_tradable) {
+            maker.reason = "market_not_tradable";
+        } else if (!up.reference_quorum_met) {
+            maker.reason = up.reference_block_reason.empty()
+                ? "insufficient_reference_sources" : up.reference_block_reason;
+        } else if (!up.settlement_source_verified) {
+            maker.reason = "settlement_reference_unverified";
+        } else if (!up.clock_skew_ms ||
+                   std::abs(*up.clock_skew_ms) > up.maximum_clock_skew_ms) {
+            maker.reason = up.clock_skew_ms
+                ? "clock_skew_exceeded" : "clock_skew_unavailable";
+        } else if (up.book_age_ms > up.maximum_book_age_ms ||
+                   down.book_age_ms > down.maximum_book_age_ms) {
+            maker.reason = "clob_book_stale";
+        } else if (maker_both_fill_probability_ <= 0) {
+            maker.reason = "maker_fill_probability_unavailable";
+        } else {
+            const double inventory_skew = (
+                inventory.up_quantity - inventory.down_quantity
+            ) / std::max(size_, 1e-9) * maker_inventory_skew_per_unit_;
+            maker = complete_set::evaluate_maker({
+                *up_probability, best_bid(up_book), best_ask(up_book),
+                best_bid(down_book), best_ask(down_book), maker_tick_size_,
+                maker_quote_half_spread_, inventory_skew,
+                maker_expected_rebate_per_pair_, maker_minimum_pair_edge_,
+                maker_both_fill_probability_, maker_orphan_loss_,
+            });
+        }
+        strategy::Decision maker_audit{
+            "maker_complete_set_arb", std::nullopt, std::nullopt,
+            maker.decision, maker.reason, {maker.reason},
+        };
+        const std::string maker_key = market_id + "|maker_complete_set_arb";
+        if (should_emit_strategy(maker_key, maker_audit, timestamp)) {
+            const unsigned long long sequence = ++strategy_evaluation_sequence_;
+            std::ostringstream out;
+            out << std::setprecision(15)
+                << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
+                << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':'
+                << ws_session_id_ << ':' << market_id << ":maker:" << sequence
+                << "\",\"event_type\":\"shadow_maker_quote_eval\""
+                << ",\"strategy\":\"maker_complete_set_arb\",\"market_id\":\""
+                << reference_ipc::escaped(market_id) << "\",\"condition_id\":\""
+                << reference_ipc::escaped(market.condition_id) << "\",\"asset\":\""
+                << reference_ipc::escaped(market.asset) << "\",\"timeframe\":\""
+                << reference_ipc::escaped(market.interval) << "\",\"window\":\""
+                << reference_ipc::escaped(market.window) << "\",\"generation\":"
+                << generation_ << ",\"session\":" << ws_session_id_
+                << ",\"close_ts\":" << market.close_ts
+                << ",\"evaluation_sequence\":" << sequence
+                << ",\"up_bid_quote\":" << maker.up_bid
+                << ",\"down_bid_quote\":" << maker.down_bid
+                << ",\"pair_quote_cost\":" << maker.pair_cost
+                << ",\"locked_edge_if_both_fill\":" << maker.locked_edge
+                << ",\"configured_both_fill_probability\":"
+                << maker_both_fill_probability_
+                << ",\"expected_rebate_per_pair\":" << maker_expected_rebate_per_pair_
+                << ",\"expected_value\":" << maker.expected_value
+                << ",\"fill_model\":\"configured_unverified\""
+                << ",\"decision\":\"" << maker.decision << "\",\"reason\":\""
+                << maker.reason << "\",\"config_version\":\"maker-complete-set-v1\""
+                << ",\"config_hash\":\"" << maker_strategy_config_hash_ << "\""
+                << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
+            if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
+        }
     }
 
     void emit_strategy_audit(const std::string& market_id, const Market& market,
@@ -1024,6 +1255,61 @@ private:
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
             << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
         if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
+    }
+
+    void load_complete_set_inventory() {
+        try {
+            if (!std::filesystem::exists(inventory_state_path_)) return;
+            ptree root;
+            boost::property_tree::read_json(inventory_state_path_, root);
+            if (root.get<std::string>("config_hash", "") != inventory_strategy_config_hash_)
+                return;
+            if (const auto markets = root.get_child_optional("markets")) {
+                for (const auto& item : *markets) {
+                    complete_set_inventory_[item.first] = {
+                        item.second.get<double>("up_quantity", 0),
+                        item.second.get<double>("down_quantity", 0),
+                        item.second.get<double>("up_cost", 0),
+                        item.second.get<double>("down_cost", 0),
+                    };
+                }
+            }
+        } catch (const std::exception& error) {
+            std::cerr << "INVENTORY_STATE_LOAD_ERROR message=" << error.what() << "\n";
+            complete_set_inventory_.clear();
+        }
+    }
+
+    void save_complete_set_inventory() {
+        try {
+            const std::filesystem::path path(inventory_state_path_);
+            if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
+            ptree root, rows;
+            root.put("config_hash", inventory_strategy_config_hash_);
+            root.put("updated_at", now_seconds());
+            for (const auto& item : complete_set_inventory_) {
+                ptree row;
+                row.put("up_quantity", item.second.up_quantity);
+                row.put("down_quantity", item.second.down_quantity);
+                row.put("up_cost", item.second.up_cost);
+                row.put("down_cost", item.second.down_cost);
+                rows.add_child(item.first, row);
+            }
+            root.add_child("markets", rows);
+            const std::filesystem::path temporary = path.string() + ".tmp";
+            boost::property_tree::write_json(
+                temporary.string(), root, std::locale(), false);
+            std::error_code error;
+            std::filesystem::rename(temporary, path, error);
+            if (error) {
+                std::filesystem::remove(path, error);
+                error.clear();
+                std::filesystem::rename(temporary, path, error);
+            }
+            if (error) throw std::runtime_error(error.message());
+        } catch (const std::exception& error) {
+            std::cerr << "INVENTORY_STATE_SAVE_ERROR message=" << error.what() << "\n";
+        }
     }
 
     void on_resolve(beast::error_code ec, tcp::resolver::results_type results) {
@@ -1211,7 +1497,10 @@ private:
                                    << ",\"orphan_leg_loss\":" << orphan_leg_loss
                                    << ",\"expected_execution_value\":" << expected_execution_value
                                    << ",\"execution_model\":\"configured_latency_stress\""
-                                   << ",\"books_synced\":" << (books_synced ? "true" : "false") << ",\"decision\":\"" << (good ? "ACCEPT" : "REJECT") << "\"}\n" << std::flush;
+                                   << ",\"books_synced\":" << (books_synced ? "true" : "false")
+                                   << ",\"config_version\":\"paired-lock-shadow-v2\",\"config_hash\":\""
+                                   << paired_config_hash_ << "\",\"decision\":\""
+                                   << (good ? "ACCEPT" : "REJECT") << "\"}\n" << std::flush;
                 item.second.last_reason = reason;
                 item.second.last_audit = timestamp;
             }
@@ -1290,6 +1579,9 @@ private:
             << ",\"strategy_audit_queue\":" << strategy_audit_.queued()
             << ",\"strategy_audit_backpressure\":" << strategy_audit_backpressure_
             << ",\"strategy_evaluations\":" << strategy_evaluation_sequence_
+            << ",\"paired_config_hash\":\"" << paired_config_hash_ << "\""
+            << ",\"inventory_config_hash\":\"" << inventory_strategy_config_hash_ << "\""
+            << ",\"maker_config_hash\":\"" << maker_strategy_config_hash_ << "\""
             << ",\"reference_receive_age_ms\":";
         if (reference_receive_age_ms >= 0) out << reference_receive_age_ms;
         else out << "null";
@@ -1383,6 +1675,17 @@ private:
             if (!added.empty()) queue_write(subscription(added, "subscribe"));
             if (!removed.empty()) queue_write(subscription(removed, "unsubscribe"));
             for (const auto& token : removed) books_.erase(token);
+            bool inventory_changed = false;
+            for (auto item = complete_set_inventory_.begin();
+                 item != complete_set_inventory_.end();) {
+                if (!markets_.count(item->first)) {
+                    item = complete_set_inventory_.erase(item);
+                    inventory_changed = true;
+                } else {
+                    ++item;
+                }
+            }
+            if (inventory_changed) save_complete_set_inventory();
             if (!added.empty() || !removed.empty())
                 std::cerr << "MARKET_RELOAD markets=" << markets_.size() << " subscribe=" << added.size() << " unsubscribe=" << removed.size() << "\n";
         } catch (const std::exception& error) {
@@ -1451,8 +1754,26 @@ private:
     BoundedAuditWriter strategy_audit_;
     std::string markets_path_, health_path_, run_id_;
     strategy::Config strategy_config_ = strategy_config_from_environment();
+    std::map<std::string, complete_set::Inventory> complete_set_inventory_;
+    double inventory_min_entry_edge_ = environment_double("INVENTORY_MIN_ENTRY_EDGE", "0.02");
+    double inventory_max_unmatched_notional_ = environment_double(
+        "INVENTORY_MAX_UNMATCHED_NOTIONAL", "10");
+    double maker_tick_size_ = environment_double("MAKER_TICK_SIZE", "0.01");
+    double maker_quote_half_spread_ = environment_double("MAKER_QUOTE_HALF_SPREAD", "0.02");
+    double maker_inventory_skew_per_unit_ = environment_double(
+        "MAKER_INVENTORY_SKEW_PER_UNIT", "0.005");
+    double maker_expected_rebate_per_pair_ = environment_double(
+        "MAKER_EXPECTED_REBATE_PER_PAIR", "0");
+    double maker_minimum_pair_edge_ = environment_double("MAKER_MINIMUM_PAIR_EDGE", "0.01");
+    double maker_both_fill_probability_ = environment_double(
+        "MAKER_BOTH_FILL_PROBABILITY", "0");
+    double maker_orphan_loss_ = environment_double("MAKER_ORPHAN_LOSS", "0.02");
+    std::string inventory_state_path_ = environment_value(
+        "COMPLETE_SET_INVENTORY_STATE_PATH", "state/complete-set-inventory.json");
     std::string directional_strategy_config_hash_ = strategy_config_hash("late_window_directional_ev");
     std::string lottery_strategy_config_hash_ = strategy_config_hash("low_price_lottery_ev");
+    std::string inventory_strategy_config_hash_ = strategy_config_hash("inventory_rebalancing_arb");
+    std::string maker_strategy_config_hash_ = strategy_config_hash("maker_complete_set_arb");
     std::string paired_config_hash_;
     std::map<std::string, std::pair<std::string, double>> strategy_emission_state_;
     double strategy_accept_heartbeat_seconds_ = 5, strategy_reject_heartbeat_seconds_ = 60;

@@ -20,6 +20,14 @@ def valid_status():
                                             "terminal_hedge_evaluations": 20, "terminal_hedge_accepts": 1,
                                             "terminal_hedge_rejections": 19},
             "low_price_lottery_ev": {"evaluations": 20, "accepts": 0, "rejections": 20, "model_evaluations": 20, "latest_model_evaluated": True},
+            "inventory_rebalancing_arb": {
+                "evaluations": 20, "accepts": 1, "rejections": 19,
+                "model_evaluations": 20, "latest_model_evaluated": True,
+            },
+            "maker_complete_set_arb": {
+                "evaluations": 20, "accepts": 0, "rejections": 20,
+                "model_evaluations": 20, "latest_model_evaluated": True,
+            },
         },
         "strategy_latest": {
             "late_window_directional_ev": {"estimated_probability": 0.6},
@@ -31,6 +39,8 @@ def valid_status():
             "late_window_directional_ev": {"completed": 0},
             "low_price_lottery_ev": {"completed": 0},
             "paired_lock": {"completed": 0},
+            "inventory_rebalancing_arb": {"completed": 0},
+            "maker_complete_set_arb": {"completed": 0},
         },
         "shadow_health": {
             "ws_connected": True,
@@ -125,6 +135,17 @@ def test_acceptance_marks_missing_terminal_hedge_evaluations_incomplete():
 
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert failed == {"terminal_hedge_evaluated"}
+    assert report["status"] == "INCOMPLETE"
+
+
+def test_acceptance_marks_missing_complete_set_strategy_evaluations_incomplete():
+    status = valid_status()
+    status["strategy_counts"]["maker_complete_set_arb"]["evaluations"] = 0
+
+    report = evaluate_status(status)
+
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert failed == {"complete_set_strategies_evaluated"}
     assert report["status"] == "INCOMPLETE"
 
 

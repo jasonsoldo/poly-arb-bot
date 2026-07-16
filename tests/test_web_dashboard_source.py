@@ -65,6 +65,17 @@ def test_dashboard_renders_three_strategies_without_combining_acceptance():
         assert f'id="{element_id}"' in source
 
 
+def test_dashboard_separates_complete_set_arbitrage_strategies():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    for strategy in (
+        "INSTANT COMPLETE SET", "INVENTORY REBALANCE", "MAKER COMPLETE SET",
+    ):
+        assert strategy in source
+    for element_id in ("inventoryCard", "makerCard"):
+        assert f'id="{element_id}"' in source
+    assert "NO FILLS SIMULATED" in source
+
+
 def test_dashboard_renders_latest_asset_pnl_from_completed_shadow_data():
     source = Path("web/index.html").read_text(encoding="utf-8")
     assert "LATEST SIM PNL" in source

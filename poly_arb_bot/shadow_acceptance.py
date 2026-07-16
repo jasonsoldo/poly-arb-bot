@@ -13,6 +13,9 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
     reasons = shadow.get("rejection_reasons", {})
     strategy_counts = status.get("strategy_counts", {})
     strategy_names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
+    complete_set_strategy_names = (
+        "inventory_rebalancing_arb", "maker_complete_set_arb",
+    )
     strategy_rows = [strategy_counts.get(name, {}) for name in strategy_names]
     probability_rows = [strategy_counts.get(name, {}) for name in strategy_names[:2]]
     counts = status.get("counts", {})
@@ -88,11 +91,17 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
          "passed": strategy_counts.get("late_window_directional_ev", {}).get(
              "terminal_hedge_evaluations", 0
          ) > 0},
+        {"name": "complete_set_strategies_evaluated",
+         "passed": all(
+             strategy_counts.get(name, {}).get("evaluations", 0) > 0
+             for name in complete_set_strategy_names
+         )},
     ]
     passed = all(item["passed"] for item in checks)
     incomplete_checks = {"analytics_ready", "market_data_present", "audit_data_present",
                          "three_strategy_evaluations", "probability_models_evaluated",
                          "low_latency_observed", "terminal_hedge_evaluated"}
+    incomplete_checks.add("complete_set_strategies_evaluated")
     incomplete_only = all(item["passed"] or item["name"] in incomplete_checks for item in checks)
     status = "PASS" if passed else "INCOMPLETE" if incomplete_only else "FAIL"
     return {"passed": passed, "status": status, "checks": checks,
@@ -100,7 +109,7 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                         "ready": readiness.get("paired_markets_ready", 0),
                         "evaluations": shadow.get("evaluations", 0),
                         "strategy_evaluations": {name: strategy_counts.get(name, {}).get("evaluations", 0)
-                                                 for name in strategy_names},
+                                                 for name in strategy_names + complete_set_strategy_names},
                         "terminal_hedge_evaluations": strategy_counts.get(
                             "late_window_directional_ev", {}
                         ).get("terminal_hedge_evaluations", 0),
