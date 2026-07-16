@@ -21,13 +21,18 @@ def test_strategy_counts_separates_terminal_hedge_from_raw_model_accepts(tmp_pat
     ]
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
-    counts = _strategy_counts((path,))["late_window_directional_ev"]
+    result = _strategy_counts((path,))
+    counts = result["late_window_directional_ev"]
 
     assert counts["evaluations"] == 1
     assert counts["accepts"] == 1
     assert counts["terminal_hedge_evaluations"] == 2
     assert counts["terminal_hedge_accepts"] == 1
     assert counts["terminal_hedge_rejections"] == 1
+    assert result["_terminal_hedge"]["latest"]["event_id"] == "hedge-accept"
+    assert result["_terminal_hedge"]["rejection_reasons"] == {
+        "hedge_price_above_limit": 1
+    }
 
 
 def test_web_status_exposes_terminal_hedge_cost_chain(tmp_path):
@@ -55,6 +60,7 @@ def test_web_status_exposes_terminal_hedge_cost_chain(tmp_path):
 
     assert status["current_terminal_hedge"]["event_id"] == "hedged"
     assert status["current_terminal_hedge"]["reversal_pnl"] == -3.5
+    assert status["terminal_hedge"]["latest"]["event_id"] == "hedged"
     assert status["counts"]["terminal_hedge_evaluations"] == 1
     assert status["counts"]["terminal_hedge_accepts"] == 1
 
@@ -474,6 +480,8 @@ def test_web_status_exposes_open_strategy_shadow_positions(tmp_path):
     status = build_status(data, tmp_path / "missing.jsonl", tmp_path / "orders.json")
     assert status["shadow_lifecycle"]["open_positions"] == 1
     assert status["shadow_lifecycle"]["portfolio_rejections"] == {}
+    assert status["counts"]["active_shadow_positions"] == 1
+    assert status["counts"]["simulated_opened"] == 1
 
 
 def test_web_status_does_not_display_future_clock_events(tmp_path):
