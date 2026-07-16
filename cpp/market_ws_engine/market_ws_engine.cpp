@@ -174,8 +174,13 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"directional_window_4h_max", environment_value("DIRECTIONAL_WINDOW_4H_MAX", "45")},
         {"directional_settlement_buffer", environment_value("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002")},
         {"imbalance_z", environment_value("MODEL_IMBALANCE_Z", "0.25")},
-        {"inventory_max_unmatched_notional", environment_value("INVENTORY_MAX_UNMATCHED_NOTIONAL", "10")},
-        {"inventory_min_entry_edge", environment_value("INVENTORY_MIN_ENTRY_EDGE", "0.02")},
+        {"inventory_max_complement_gap", environment_value("INVENTORY_MAX_COMPLEMENT_GAP", "0.03")},
+        {"inventory_max_initial_price", environment_value("INVENTORY_MAX_INITIAL_PRICE", "0.20")},
+        {"inventory_max_total_unmatched_notional", environment_value("INVENTORY_MAX_TOTAL_UNMATCHED_NOTIONAL", "3.0")},
+        {"inventory_max_unmatched_notional", environment_value("INVENTORY_MAX_UNMATCHED_NOTIONAL", "0.50")},
+        {"inventory_min_entry_edge", environment_value("INVENTORY_MIN_ENTRY_EDGE", "0.05")},
+        {"inventory_min_entry_ev_roi", environment_value("INVENTORY_MIN_ENTRY_EV_ROI", "0.25")},
+        {"inventory_min_locked_roi", environment_value("INVENTORY_MIN_LOCKED_ROI", "0.02")},
         {"lottery_execution_buffer", environment_value("LOTTERY_EXECUTION_BUFFER", "0.005")},
         {"lottery_max_price", environment_value("LOTTERY_MAX_PRICE", "0.05")},
         {"lottery_min_net_ev", environment_value("LOTTERY_MIN_NET_EV", "0.015")},
@@ -937,6 +942,15 @@ private:
         const auto& up = up_found->second;
         const auto& down = down_found->second;
         auto& inventory = complete_set_inventory_[market_id];
+        double total_unmatched_notional = 0;
+        for (const auto& item : complete_set_inventory_)
+            total_unmatched_notional += item.second.up_cost + item.second.down_cost;
+        const double other_inventory_notional = std::max(
+            0.0, total_unmatched_notional - inventory.up_cost - inventory.down_cost);
+        const double available_global_notional = std::max(
+            0.0, inventory_max_total_unmatched_notional_ - other_inventory_notional);
+        const double available_market_notional = std::min(
+            inventory_max_unmatched_notional_, available_global_notional);
 
         complete_set::RebalanceDecision rebalance;
         if (!up_probability) {
@@ -961,12 +975,18 @@ private:
                 up.expected_fill_price + up.fee_per_share + buffer_per_share_,
                 down.expected_fill_price + down.fee_per_share + buffer_per_share_,
                 up.liquidity, down.liquidity,
-                inventory_min_entry_edge_, min_profit_, inventory_max_unmatched_notional_,
+                inventory_min_entry_edge_, inventory_min_entry_ev_roi_,
+                inventory_max_initial_price_, inventory_max_complement_gap_,
+                min_profit_, inventory_min_locked_roi_, available_market_notional,
             });
         }
 
         double locked_profit = 0;
+        const bool inventory_was_empty =
+            inventory.up_quantity <= 1e-12 && inventory.down_quantity <= 1e-12;
         if (rebalance.decision == "ACCEPT") {
+            if (inventory_was_empty)
+                inventory_origin_config_hashes_[market_id] = inventory_strategy_config_hash_;
             if (rebalance.action == "BUY_UP" || rebalance.action == "BUY_UP_AND_LOCK") {
                 inventory.up_quantity += rebalance.quantity;
                 inventory.up_cost += rebalance.quantity * rebalance.unit_cost;
@@ -1028,14 +1048,26 @@ private:
                 << ",\"unit_cost\":" << rebalance.unit_cost
                 << ",\"estimated_probability\":" << rebalance.probability
                 << ",\"probability_edge\":" << rebalance.probability_edge
+                << ",\"expected_value\":" << rebalance.expected_value
+                << ",\"expected_value_roi\":" << rebalance.expected_value_roi
+                << ",\"maximum_loss\":" << rebalance.maximum_loss
+                << ",\"complement_gap\":" << rebalance.complement_gap
                 << ",\"projected_locked_quantity\":" << rebalance.projected_locked_quantity
                 << ",\"projected_locked_profit\":" << rebalance.projected_locked_profit
+                << ",\"projected_locked_roi\":" << rebalance.projected_locked_roi
                 << ",\"realized_locked_profit\":" << locked_profit
                 << ",\"residual_up_quantity\":" << inventory.up_quantity
                 << ",\"residual_down_quantity\":" << inventory.down_quantity
                 << ",\"residual_up_cost\":" << inventory.up_cost
                 << ",\"residual_down_cost\":" << inventory.down_cost
-                << ",\"decision\":\"" << rebalance.decision << "\",\"reason\":\""
+                << ",\"total_unmatched_notional\":" << total_unmatched_notional
+                << ",\"available_global_unmatched_notional\":" << available_global_notional
+                << ",\"inventory_origin_config_hash\":\""
+                << reference_ipc::escaped(
+                    inventory_origin_config_hashes_.count(market_id)
+                        ? inventory_origin_config_hashes_.at(market_id)
+                        : inventory_strategy_config_hash_)
+                << "\",\"decision\":\"" << rebalance.decision << "\",\"reason\":\""
                 << rebalance.reason << "\",\"config_version\":\"inventory-rebalancing-v1\""
                 << ",\"config_hash\":\"" << inventory_strategy_config_hash_ << "\""
                 << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
@@ -1262,8 +1294,7 @@ private:
             if (!std::filesystem::exists(inventory_state_path_)) return;
             ptree root;
             boost::property_tree::read_json(inventory_state_path_, root);
-            if (root.get<std::string>("config_hash", "") != inventory_strategy_config_hash_)
-                return;
+            const std::string state_config_hash = root.get<std::string>("config_hash", "");
             if (const auto markets = root.get_child_optional("markets")) {
                 for (const auto& item : *markets) {
                     complete_set_inventory_[item.first] = {
@@ -1272,6 +1303,9 @@ private:
                         item.second.get<double>("up_cost", 0),
                         item.second.get<double>("down_cost", 0),
                     };
+                    inventory_origin_config_hashes_[item.first] =
+                        item.second.get<std::string>(
+                            "origin_config_hash", state_config_hash);
                 }
             }
         } catch (const std::exception& error) {
@@ -1293,6 +1327,11 @@ private:
                 row.put("down_quantity", item.second.down_quantity);
                 row.put("up_cost", item.second.up_cost);
                 row.put("down_cost", item.second.down_cost);
+                row.put(
+                    "origin_config_hash",
+                    inventory_origin_config_hashes_.count(item.first)
+                        ? inventory_origin_config_hashes_.at(item.first)
+                        : inventory_strategy_config_hash_);
                 rows.add_child(item.first, row);
             }
             root.add_child("markets", rows);
@@ -1679,6 +1718,7 @@ private:
             for (auto item = complete_set_inventory_.begin();
                  item != complete_set_inventory_.end();) {
                 if (!markets_.count(item->first)) {
+                    inventory_origin_config_hashes_.erase(item->first);
                     item = complete_set_inventory_.erase(item);
                     inventory_changed = true;
                 } else {
@@ -1755,9 +1795,20 @@ private:
     std::string markets_path_, health_path_, run_id_;
     strategy::Config strategy_config_ = strategy_config_from_environment();
     std::map<std::string, complete_set::Inventory> complete_set_inventory_;
-    double inventory_min_entry_edge_ = environment_double("INVENTORY_MIN_ENTRY_EDGE", "0.02");
+    std::map<std::string, std::string> inventory_origin_config_hashes_;
+    double inventory_min_entry_edge_ = environment_double("INVENTORY_MIN_ENTRY_EDGE", "0.05");
+    double inventory_min_entry_ev_roi_ = environment_double(
+        "INVENTORY_MIN_ENTRY_EV_ROI", "0.25");
+    double inventory_max_initial_price_ = environment_double(
+        "INVENTORY_MAX_INITIAL_PRICE", "0.20");
+    double inventory_max_complement_gap_ = environment_double(
+        "INVENTORY_MAX_COMPLEMENT_GAP", "0.03");
+    double inventory_min_locked_roi_ = environment_double(
+        "INVENTORY_MIN_LOCKED_ROI", "0.02");
     double inventory_max_unmatched_notional_ = environment_double(
-        "INVENTORY_MAX_UNMATCHED_NOTIONAL", "10");
+        "INVENTORY_MAX_UNMATCHED_NOTIONAL", "0.50");
+    double inventory_max_total_unmatched_notional_ = environment_double(
+        "INVENTORY_MAX_TOTAL_UNMATCHED_NOTIONAL", "3.0");
     double maker_tick_size_ = environment_double("MAKER_TICK_SIZE", "0.01");
     double maker_quote_half_spread_ = environment_double("MAKER_QUOTE_HALF_SPREAD", "0.02");
     double maker_inventory_skew_per_unit_ = environment_double(

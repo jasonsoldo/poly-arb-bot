@@ -21,9 +21,13 @@ struct RebalanceInput {
     double down_unit_cost = 0;
     double up_depth = 0;
     double down_depth = 0;
-    double minimum_entry_edge = .02;
+    double minimum_entry_edge = .05;
+    double minimum_entry_ev_roi = .25;
+    double maximum_initial_price = .20;
+    double maximum_complement_gap = .03;
     double minimum_locked_profit = .01;
-    double maximum_unmatched_notional = 10;
+    double minimum_locked_roi = .02;
+    double maximum_unmatched_notional = .50;
 };
 
 struct RebalanceDecision {
@@ -35,8 +39,13 @@ struct RebalanceDecision {
     double unit_cost = 0;
     double probability = 0;
     double probability_edge = 0;
+    double expected_value = 0;
+    double expected_value_roi = 0;
+    double maximum_loss = 0;
+    double complement_gap = 0;
     double projected_locked_quantity = 0;
     double projected_locked_profit = 0;
+    double projected_locked_roi = 0;
     double projected_residual_quantity = 0;
 };
 
@@ -54,10 +63,15 @@ inline RebalanceDecision evaluate_rebalance(const RebalanceInput& row) {
         result.unit_cost = row.down_unit_cost;
         result.projected_locked_quantity = quantity;
         result.projected_locked_profit = quantity * (1 - average_up_cost - row.down_unit_cost);
+        const double pair_cost = quantity * (average_up_cost + row.down_unit_cost);
+        result.projected_locked_roi = pair_cost > 0
+            ? result.projected_locked_profit / pair_cost : 0;
         result.projected_residual_quantity = unmatched_up - quantity;
         if (quantity <= 0) result.reason = "down_depth";
         else if (result.projected_locked_profit < row.minimum_locked_profit)
             result.reason = "complement_cost_above_lock_threshold";
+        else if (result.projected_locked_roi < row.minimum_locked_roi)
+            result.reason = "locked_roi_below_threshold";
         else {
             result.decision = "ACCEPT";
             result.reason = "inventory_lock";
@@ -75,10 +89,15 @@ inline RebalanceDecision evaluate_rebalance(const RebalanceInput& row) {
         result.unit_cost = row.up_unit_cost;
         result.projected_locked_quantity = quantity;
         result.projected_locked_profit = quantity * (1 - average_down_cost - row.up_unit_cost);
+        const double pair_cost = quantity * (average_down_cost + row.up_unit_cost);
+        result.projected_locked_roi = pair_cost > 0
+            ? result.projected_locked_profit / pair_cost : 0;
         result.projected_residual_quantity = unmatched_down - quantity;
         if (quantity <= 0) result.reason = "up_depth";
         else if (result.projected_locked_profit < row.minimum_locked_profit)
             result.reason = "complement_cost_above_lock_threshold";
+        else if (result.projected_locked_roi < row.minimum_locked_roi)
+            result.reason = "locked_roi_below_threshold";
         else {
             result.decision = "ACCEPT";
             result.reason = "inventory_lock";
@@ -95,13 +114,29 @@ inline RebalanceDecision evaluate_rebalance(const RebalanceInput& row) {
     result.probability = buy_up ? row.up_probability : down_probability;
     result.unit_cost = buy_up ? row.up_unit_cost : row.down_unit_cost;
     result.probability_edge = buy_up ? up_edge : down_edge;
+    result.expected_value_roi = result.unit_cost > 0
+        ? result.probability_edge / result.unit_cost : 0;
     const double depth = buy_up ? row.up_depth : row.down_depth;
+    const double complement_cost = buy_up ? row.down_unit_cost : row.up_unit_cost;
+    const double maximum_pair_cost = 1 / (1 + row.minimum_locked_roi);
+    const double maximum_complement_cost = maximum_pair_cost - result.unit_cost;
+    result.complement_gap = std::max(0.0, complement_cost - maximum_complement_cost);
     const double notional_quantity = result.unit_cost > 0
         ? row.maximum_unmatched_notional / result.unit_cost : 0;
     result.quantity = std::min({row.target_size, depth, notional_quantity});
     result.projected_residual_quantity = result.quantity;
-    if (result.probability_edge < row.minimum_entry_edge)
+    result.expected_value = result.quantity * result.probability_edge;
+    result.maximum_loss = result.quantity * result.unit_cost;
+    if (result.unit_cost > row.maximum_initial_price)
+        result.reason = "initial_price_above_limit";
+    else if (result.probability_edge < row.minimum_entry_edge)
         result.reason = "probability_edge_below_threshold";
+    else if (result.expected_value_roi < row.minimum_entry_ev_roi)
+        result.reason = "entry_ev_roi_below_threshold";
+    else if (result.complement_gap > row.maximum_complement_gap)
+        result.reason = "complement_gap_above_limit";
+    else if (row.maximum_unmatched_notional <= 0)
+        result.reason = "unmatched_notional_limit";
     else if (result.quantity <= 0)
         result.reason = buy_up ? "up_depth" : "down_depth";
     else {

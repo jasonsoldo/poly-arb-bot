@@ -13,10 +13,27 @@ int main() {
         row.up_unit_cost = .5;
         row.down_unit_cost = .52;
         row.up_depth = row.down_depth = 20;
+        row.minimum_locked_roi = .02;
         const auto result = complete_set::evaluate_rebalance(row);
         assert(result.decision == "ACCEPT");
         assert(result.action == "BUY_DOWN_AND_LOCK");
         assert(std::abs(result.projected_locked_profit - .6) < 1e-12);
+        assert(result.projected_locked_roi > .02);
+    }
+    {
+        complete_set::RebalanceInput row;
+        row.target_size = 10;
+        row.up_probability = .30;
+        row.up_unit_cost = .20;
+        row.down_unit_cost = .81;
+        row.up_depth = row.down_depth = 20;
+        row.maximum_unmatched_notional = .50;
+        const auto result = complete_set::evaluate_rebalance(row);
+        assert(result.decision == "ACCEPT");
+        assert(result.action == "BUY_UP");
+        assert(std::abs(result.probability_edge - .10) < 1e-12);
+        assert(std::abs(result.maximum_loss - .50) < 1e-12);
+        assert(result.expected_value_roi > .25);
     }
     {
         complete_set::RebalanceInput row;
@@ -26,9 +43,45 @@ int main() {
         row.down_unit_cost = .4;
         row.up_depth = row.down_depth = 20;
         const auto result = complete_set::evaluate_rebalance(row);
-        assert(result.decision == "ACCEPT");
-        assert(result.action == "BUY_UP");
-        assert(std::abs(result.probability_edge - .15) < 1e-12);
+        assert(result.decision == "REJECT");
+        assert(result.reason == "initial_price_above_limit");
+    }
+    {
+        complete_set::RebalanceInput row;
+        row.target_size = 10;
+        row.up_probability = .26;
+        row.up_unit_cost = .20;
+        row.down_unit_cost = .86;
+        row.up_depth = row.down_depth = 20;
+        const auto result = complete_set::evaluate_rebalance(row);
+        assert(result.decision == "REJECT");
+        assert(result.reason == "complement_gap_above_limit");
+    }
+    {
+        complete_set::RebalanceInput row;
+        row.target_size = 10;
+        row.up_probability = .30;
+        row.up_unit_cost = .20;
+        row.down_unit_cost = .81;
+        row.up_depth = row.down_depth = 20;
+        row.maximum_unmatched_notional = 0;
+        const auto result = complete_set::evaluate_rebalance(row);
+        assert(result.decision == "REJECT");
+        assert(result.reason == "unmatched_notional_limit");
+    }
+    {
+        complete_set::RebalanceInput row;
+        row.inventory = {10, 0, 4.8, 0};
+        row.target_size = 10;
+        row.up_probability = .6;
+        row.up_unit_cost = .5;
+        row.down_unit_cost = .51;
+        row.up_depth = row.down_depth = 20;
+        row.minimum_locked_profit = .01;
+        row.minimum_locked_roi = .02;
+        const auto result = complete_set::evaluate_rebalance(row);
+        assert(result.decision == "REJECT");
+        assert(result.reason == "locked_roi_below_threshold");
     }
     {
         complete_set::MakerInput row;

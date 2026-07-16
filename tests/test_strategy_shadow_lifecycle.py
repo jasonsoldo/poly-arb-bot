@@ -186,6 +186,7 @@ def test_unmatched_complete_set_inventory_is_settled_and_loss_is_recorded(tmp_pa
         "price_to_beat": 100,
         "config_version": "inventory-rebalancing-v1",
         "config_hash": "inventory-hash",
+        "inventory_origin_config_hash": "old-inventory-hash",
         "ts": 1000,
     }, {"m1": market()})
     venue = {"assets": {"BTC": {"chainlink_settlement_samples": [
@@ -200,6 +201,7 @@ def test_unmatched_complete_set_inventory_is_settled_and_loss_is_recorded(tmp_pa
     assert complete["entry_cost"] == 6
     assert complete["payout"] == 0
     assert complete["realized_simulated_pnl"] == -6
+    assert complete["strategy_config_hash"] == "old-inventory-hash"
 
 
 def test_terminal_hedge_settlement_uses_main_or_hedge_payout(tmp_path):

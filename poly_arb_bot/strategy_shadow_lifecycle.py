@@ -599,6 +599,14 @@ class StrategyShadowLifecycle:
             "price_to_beat": row.get("price_to_beat"),
             "config_version": row.get("config_version"),
             "config_hash": row.get("config_hash"),
+            "origin_config_hash": row.get(
+                "inventory_origin_config_hash", row.get("config_hash")
+            ),
+            "expected_value": row.get("expected_value"),
+            "expected_value_roi": row.get("expected_value_roi"),
+            "maximum_loss": row.get("maximum_loss"),
+            "complement_gap": row.get("complement_gap"),
+            "projected_locked_roi": row.get("projected_locked_roi"),
             "updated_at": row.get("ts"),
         }
         self.data["processed_complete_set_events"] = (
@@ -620,7 +628,9 @@ class StrategyShadowLifecycle:
                 "payout": float(row.get("projected_locked_quantity", 0)),
                 "realized_simulated_pnl": locked_profit,
                 "strategy_config_version": row.get("config_version"),
-                "strategy_config_hash": row.get("config_hash"),
+                "strategy_config_hash": row.get(
+                    "inventory_origin_config_hash", row.get("config_hash")
+                ),
                 "real_order_submissions": 0,
                 "real_orders": 0,
                 "real_fills": 0,
@@ -870,7 +880,9 @@ class StrategyShadowLifecycle:
                 "settlement_timestamp_ms": float(sample["source_timestamp_ms"]),
                 "realized_simulated_pnl": pnl,
                 "strategy_config_version": inventory.get("config_version"),
-                "strategy_config_hash": inventory.get("config_hash"),
+                "strategy_config_hash": inventory.get(
+                    "origin_config_hash", inventory.get("config_hash")
+                ),
                 "real_order_submissions": 0,
                 "real_orders": 0,
                 "real_fills": 0,
@@ -884,7 +896,9 @@ class StrategyShadowLifecycle:
                     "market_id": market_id,
                     "ts": now,
                     "pnl": pnl,
-                    "strategy_config_hash": inventory.get("config_hash"),
+                    "strategy_config_hash": inventory.get(
+                        "origin_config_hash", inventory.get("config_hash")
+                    ),
                 }]
             )[-20000:]
             del self.data["complete_set_inventory"][market_id]
