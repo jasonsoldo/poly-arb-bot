@@ -55,6 +55,12 @@ struct Market {
     std::optional<double> open_price, open_price_source_timestamp_ms;
     double fee = .07, start_ts = 0, close_ts = 0, active_since = 0, last_audit = 0;
     double split_sell_active_since = 0, split_sell_last_audit = 0;
+    double arb_research_last_audit = 0;
+    std::array<bool, 32> arb_research_qualified{};
+    unsigned long long arb_research_up_version = 0;
+    unsigned long long arb_research_down_version = 0;
+    bool arb_research_books_synced = false;
+    bool arb_research_initialized = false;
     unsigned long long last_strategy_up_version = 0, last_strategy_down_version = 0;
     unsigned long long last_strategy_reference_revision = 0, last_strategy_time_bucket = 0;
     bool accepting_orders = true;
@@ -1527,12 +1533,7 @@ private:
         if (ec) return fail("websocket_handshake", ec);
         std::vector<std::string> assets;
         for (const auto& item : books_) assets.push_back(item.first);
-        const size_t first_count = std::min<size_t>(20, assets.size());
-        queue_write(subscription(std::vector<std::string>(assets.begin(), assets.begin() + first_count), ""));
-        for (size_t offset = first_count; offset < assets.size(); offset += 20) {
-            const size_t end = std::min(offset + 20, assets.size());
-            queue_write(subscription(std::vector<std::string>(assets.begin() + offset, assets.begin() + end), "subscribe"));
-        }
+        queue_write(subscription(assets, ""));
         schedule_ping();
         schedule_reload();
         schedule_evaluation();
@@ -1636,6 +1637,144 @@ private:
             std::cerr << "WS_DATA type=" << type << " books=" << book_events_ << " changes=" << price_changes_ << "\n";
     }
 
+    void emit_arbitrage_counterfactual(
+            const std::string& market_id, Market& market,
+            const Book& up_book, const Book& down_book, double rate,
+            bool books_synced, double timestamp) {
+        if (!audit_) return;
+        const bool periodic_audit = timestamp - market.arb_research_last_audit >= 60;
+        if (market.arb_research_initialized &&
+                up_book.version == market.arb_research_up_version &&
+                down_book.version == market.arb_research_down_version &&
+                books_synced == market.arb_research_books_synced &&
+                !periodic_audit) return;
+
+        struct StressSample {
+            double delay_us = 0;
+            complete_set::ExecutionStressResult result;
+        };
+        struct Observation {
+            const char* method = nullptr;
+            double target_size = 0;
+            bool depth_ok = false;
+            std::pair<double, double> up;
+            std::pair<double, double> down;
+            double total_fees = 0;
+            double execution_buffer = 0;
+            double post_cost_profit = 0;
+            std::array<StressSample, 4> stress;
+        };
+        std::array<Observation, 8> observations;
+        bool qualification_changed = false;
+        size_t qualification_index = 0;
+        size_t observation_index = 0;
+        for (const double target_size : counterfactual_sizes_) {
+            const auto up_buy = buy_vwap(up_book, target_size);
+            const auto down_buy = buy_vwap(down_book, target_size);
+            const auto up_sell = sell_vwap(up_book, target_size);
+            const auto down_sell = sell_vwap(down_book, target_size);
+            for (const bool buy_pair : {true, false}) {
+                const auto up = buy_pair ? up_buy : up_sell;
+                const auto down = buy_pair ? down_buy : down_sell;
+                const double up_fee = std::round(
+                    up.first * rate * up.second * (1 - up.second) * 100000
+                ) / 100000;
+                const double down_fee = std::round(
+                    down.first * rate * down.second * (1 - down.second) * 100000
+                ) / 100000;
+                const double execution_buffer = target_size * (
+                    buy_pair ? buffer_per_share_ : split_sell_buffer_per_share_
+                );
+                const double post_cost_profit = buy_pair
+                    ? target_size - target_size * (up.second + down.second) -
+                        up_fee - down_fee - execution_buffer
+                    : target_size * (up.second + down.second) - target_size -
+                        up_fee - down_fee - execution_buffer;
+                const bool depth_ok = books_synced && up.first >= target_size &&
+                    down.first >= target_size;
+                auto& observation = observations[observation_index++];
+                observation.method = buy_pair ? "paired_lock" : "split_sell_lock";
+                observation.target_size = target_size;
+                observation.depth_ok = depth_ok;
+                observation.up = up;
+                observation.down = down;
+                observation.total_fees = up_fee + down_fee;
+                observation.execution_buffer = execution_buffer;
+                observation.post_cost_profit = post_cost_profit;
+                for (size_t delay_index = 0;
+                        delay_index < counterfactual_delays_us_.size(); ++delay_index) {
+                    const double delay_us = counterfactual_delays_us_[delay_index];
+                    const auto stress = complete_set::evaluate_execution_stress(
+                        post_cost_profit,
+                        target_size > 0 ? up.first / target_size : 0,
+                        target_size > 0 ? down.first / target_size : 0,
+                        delay_us, execution_half_life_us_,
+                        target_size * orphan_loss_per_share_
+                    );
+                    const bool qualified = depth_ok && post_cost_profit > 0 &&
+                        stress.expected_execution_value > 0;
+                    if (!market.arb_research_initialized ||
+                            market.arb_research_qualified[qualification_index] != qualified) {
+                        qualification_changed = true;
+                    }
+                    market.arb_research_qualified[qualification_index++] = qualified;
+                    observation.stress[delay_index] = {delay_us, stress};
+                }
+            }
+        }
+        market.arb_research_up_version = up_book.version;
+        market.arb_research_down_version = down_book.version;
+        market.arb_research_books_synced = books_synced;
+        if (!qualification_changed && !periodic_audit) return;
+        market.arb_research_initialized = true;
+        market.arb_research_last_audit = timestamp;
+        const unsigned long long sequence = ++evaluation_sequence_;
+        audit_ << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
+               << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':'
+               << ws_session_id_ << ':' << market_id << ":arb_counterfactual:"
+               << sequence << "\",\"event_type\":\"shadow_arb_counterfactual\""
+               << ",\"strategy\":\"arbitrage_pattern_research\",\"market_id\":\""
+               << market_id << "\",\"condition_id\":\""
+               << reference_ipc::escaped(market.condition_id)
+               << "\",\"asset\":\"" << reference_ipc::escaped(market.asset)
+               << "\",\"timeframe\":\"" << reference_ipc::escaped(market.interval)
+               << "\",\"window\":\"" << reference_ipc::escaped(market.window)
+               << "\",\"close_ts\":" << market.close_ts
+               << ",\"generation\":" << generation_ << ",\"session\":"
+               << ws_session_id_ << ",\"research_only\":true,\"observations\":[";
+        for (size_t index = 0; index < observation_index; ++index) {
+            const auto& observation = observations[index];
+            if (index > 0) audit_ << ',';
+            audit_ << "{\"method\":\"" << observation.method
+                   << "\",\"target_size\":" << observation.target_size
+                   << ",\"depth_ok\":" << (observation.depth_ok ? "true" : "false")
+                   << ",\"up_fill\":" << observation.up.first
+                   << ",\"down_fill\":" << observation.down.first
+                   << ",\"up_vwap\":" << observation.up.second
+                   << ",\"down_vwap\":" << observation.down.second
+                   << ",\"total_fees\":" << observation.total_fees
+                   << ",\"execution_buffer\":" << observation.execution_buffer
+                   << ",\"post_cost_profit\":" << observation.post_cost_profit
+                   << ",\"latency_stress\":[";
+            for (size_t delay_index = 0; delay_index < observation.stress.size();
+                    ++delay_index) {
+                const auto& sample = observation.stress[delay_index];
+                if (delay_index > 0) audit_ << ',';
+                audit_ << "{\"delay_ms\":" << sample.delay_us / 1000
+                       << ",\"leg_1_fill_probability\":"
+                       << sample.result.leg_1_fill_probability
+                       << ",\"leg_2_fill_probability\":"
+                       << sample.result.leg_2_fill_probability
+                       << ",\"expected_execution_value\":"
+                       << sample.result.expected_execution_value << '}';
+            }
+            audit_ << "]}";
+        }
+        audit_ << "],\"decision\":\"OBSERVED\",\"reason\":\"counterfactual_only\""
+               << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
+               << std::flush;
+    }
+
     void evaluate() {
         for (auto& item : markets_) {
             Book& up_book = books_[item.second.up]; Book& down_book = books_[item.second.down];
@@ -1672,6 +1811,10 @@ private:
             const double up_best_ask = best_ask(up_book), down_best_ask = best_ask(down_book);
             const bool fok = up.first >= size_ && down.first >= size_;
             const double rate = item.second.fee > 0 ? item.second.fee : fallback_fee_;
+            emit_arbitrage_counterfactual(
+                item.first, item.second, up_book, down_book, rate,
+                books_synced, timestamp
+            );
             const double up_fee = std::round(up.first * rate * up.second * (1 - up.second) * 100000) / 100000;
             const double down_fee = std::round(down.first * rate * down.second * (1 - down.second) * 100000) / 100000;
             const double gross_cost = size_ * (up.second + down.second), buffer = size_ * buffer_per_share_;
@@ -1685,7 +1828,8 @@ private:
             const bool good = fok && books_synced && seconds_to_close >= 20 && seconds_to_close <= 7200
                               && profit >= min_profit_ && expected_execution_value >= min_expected_value_;
             const std::string reason = !books_synced ? "clob_book_stale" : seconds_to_close < 20 ? "closing_window" : seconds_to_close > 7200 ? "too_early" : up.first < size_ ? "up_depth" : down.first < size_ ? "down_depth" : profit < min_profit_ ? "net_cost_above_threshold" : expected_execution_value < min_expected_value_ ? "execution_value_below_threshold" : "opportunity";
-            if (good && item.second.active_since == 0) item.second.active_since = timestamp;
+            const bool paired_was_active = item.second.active_since > 0;
+            if (good && !paired_was_active) item.second.active_since = timestamp;
             if (!good) item.second.active_since = 0;
             if (reason != item.second.last_reason || timestamp - item.second.last_audit >= 5) {
                 const unsigned long long evaluation_sequence = ++evaluation_sequence_;
@@ -1736,7 +1880,7 @@ private:
             if (good) std::cout << "SHADOW_OPPORTUNITY\tmarket=" << item.first << "\tup_vwap=" << std::setprecision(12) << up.second
                                 << "\tdown_vwap=" << down.second << "\tfees=" << up_fee + down_fee << "\tnet_cost=" << net_cost
                                 << "\tprofit=" << profit << "\tfok=1\tduration_ms=" << (timestamp - item.second.active_since) * 1000 << "\n" << std::flush;
-            if (good && audit_) {
+            if (good && !paired_was_active && audit_) {
                 const unsigned long long opportunity_sequence = ++opportunity_sequence_;
                 audit_ << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
                        << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':' << ws_session_id_ << ':' << item.first << ":opportunity:" << opportunity_sequence
@@ -2054,7 +2198,7 @@ private:
     }
 
     void schedule_ping() {
-        timer_.expires_after(std::chrono::seconds(5));
+        timer_.expires_after(std::chrono::seconds(10));
         timer_.async_wait([self = shared_from_this()](beast::error_code ec) {
             if (ec || self->stopped_) return;
             self->queue_write("PING");
@@ -2259,6 +2403,8 @@ private:
     double maker_orphan_loss_ = environment_double("MAKER_ORPHAN_LOSS", "0.02");
     double maker_observation_window_seconds_ = environment_double(
         "MAKER_OBSERVATION_WINDOW_SECONDS", "30");
+    const std::array<double, 4> counterfactual_sizes_{{1, 2, 5, 10}};
+    const std::array<double, 4> counterfactual_delays_us_{{0, 50000, 100000, 250000}};
     std::string inventory_state_path_ = environment_value(
         "COMPLETE_SET_INVENTORY_STATE_PATH", "state/complete-set-inventory.json");
     std::string directional_strategy_config_hash_ = strategy_config_hash("late_window_directional_ev");

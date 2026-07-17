@@ -8,6 +8,7 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .arbitrage_research import IncrementalArbitrageResearch
 from .shadow_report import IncrementalReport
 from .reference_layer import reference_state_for_asset
 from .strategy_config import StrategyConfig
@@ -25,6 +26,10 @@ _STRATEGY_COUNT_JOBS = {}
 _STRATEGY_COUNT_RESULTS = {}
 _STRATEGY_JOB_LOCK = threading.Lock()
 STRATEGY_ASYNC_THRESHOLD_BYTES = 10 * 1024 * 1024
+_ARBITRAGE_ANALYTICS = {}
+_ARBITRAGE_RESULTS = {}
+_ARBITRAGE_JOBS = {}
+_ARBITRAGE_LOCK = threading.Lock()
 ASSETS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE")
 INTERVALS = ("5m", "15m", "1h", "4h")
 STRATEGIES = (
@@ -177,6 +182,125 @@ def _empty_strategy_counts():
         "terminal_hedge_rejections": 0,
     })
     return counts
+
+
+def _empty_arbitrage_research():
+    funnel = {
+        "evaluations": 0, "depth_passed": 0, "fee_passed": 0,
+        "latency_survived": 0, "independent_episodes": 0,
+        "shadow_attempts": None, "both_legs_filled": None,
+        "completed": 0, "positive_completed": 0,
+    }
+    return {
+        "funnels": {
+            name: dict(funnel) for name in (
+                "paired_lock", "split_sell_lock", "maker_complete_set_arb",
+            )
+        },
+        "repeatable_patterns": [],
+        "counterfactual_patterns": [],
+        "semantics": "RESEARCH_ONLY_NOT_ORDERS_OR_PNL",
+    }
+
+
+def _merge_arbitrage_research(reports):
+    merged = _empty_arbitrage_research()
+    patterns = {}
+    for report in reports:
+        for strategy, source in report.get("funnels", {}).items():
+            target = merged["funnels"].setdefault(strategy, {})
+            for field, value in source.items():
+                if value is not None:
+                    target[field] = int(target.get(field) or 0) + int(value)
+        for row in report.get("repeatable_patterns", []):
+            key = (
+                row.get("strategy"), row.get("asset"), row.get("timeframe"),
+                row.get("target_size"), row.get("delay_ms"),
+            )
+            if key not in patterns:
+                patterns[key] = dict(row)
+                continue
+            current = patterns[key]
+            for field in (
+                "independent_episodes", "distinct_close_windows", "completed",
+                "positive_completed", "simulated_pnl",
+            ):
+                current[field] = (current.get(field) or 0) + (row.get(field) or 0)
+            if current.get("distinct_close_windows", 0) >= 3:
+                current["classification"] = "RESEARCH_CANDIDATE"
+    merged["repeatable_patterns"] = sorted(
+        patterns.values(),
+        key=lambda row: (
+            row.get("classification") != "RESEARCH_CANDIDATE",
+            -int(row.get("distinct_close_windows") or 0),
+            -int(row.get("independent_episodes") or 0),
+        ),
+    )
+    counterfactuals = []
+    for report in reports:
+        counterfactuals.extend(report.get("counterfactual_patterns", []))
+    merged["counterfactual_patterns"] = sorted(
+        counterfactuals,
+        key=lambda row: (
+            row.get("classification") != "RESEARCH_CANDIDATE",
+            -int(row.get("distinct_close_windows") or 0),
+            -int(row.get("independent_episodes") or 0),
+            float(row.get("delay_ms") or 0),
+        ),
+    )
+    return merged
+
+
+def _refresh_arbitrage(paths, execution_path):
+    reports = []
+    for index, path in enumerate(paths):
+        key = str(path.resolve())
+        tracker = _ARBITRAGE_ANALYTICS.get(key)
+        if tracker is None:
+            tracker = IncrementalArbitrageResearch(
+                path,
+                execution_path if index == 0 else None,
+                _analytics_state_path(path, "web-arbitrage-research"),
+            )
+            _ARBITRAGE_ANALYTICS[key] = tracker
+        reports.append(tracker.refresh())
+    return _merge_arbitrage_research(reports)
+
+
+def _arbitrage_worker(key, paths, execution_path):
+    try:
+        result = _refresh_arbitrage(paths, execution_path)
+        with _ARBITRAGE_LOCK:
+            _ARBITRAGE_RESULTS[key] = result
+    finally:
+        with _ARBITRAGE_LOCK:
+            _ARBITRAGE_JOBS.pop(key, None)
+
+
+def _arbitrage_for_status(paths, execution_path):
+    paths = tuple(path for path in paths if path.exists())
+    key = tuple(str(path.resolve()) for path in paths)
+    total_size = sum(path.stat().st_size for path in paths)
+    initialized = all(
+        _analytics_state_path(path, "web-arbitrage-research").exists()
+        for path in paths
+    )
+    with _ARBITRAGE_LOCK:
+        job = _ARBITRAGE_JOBS.get(key)
+        if job and job.is_alive():
+            return _ARBITRAGE_RESULTS.get(key, _empty_arbitrage_research()), True
+        if paths and not initialized and total_size >= STRATEGY_ASYNC_THRESHOLD_BYTES:
+            job = threading.Thread(
+                target=_arbitrage_worker,
+                args=(key, paths, execution_path), daemon=True,
+            )
+            _ARBITRAGE_JOBS[key] = job
+            job.start()
+            return _ARBITRAGE_RESULTS.get(key, _empty_arbitrage_research()), True
+    result = _refresh_arbitrage(paths, execution_path)
+    with _ARBITRAGE_LOCK:
+        _ARBITRAGE_RESULTS[key] = result
+    return result, False
 
 
 def _new_strategy_state():
@@ -504,6 +628,9 @@ def build_status(data_dir, log_file, state_file):
     report, report_refreshing = _report_for_status(
         selected_log, execution_log, current_complete_set_hashes,
     )
+    arbitrage_research, arbitrage_refreshing = _arbitrage_for_status(
+        (selected_log, strategy_log), execution_log,
+    )
     shadow_events = [item for item in events if item.get("event_type") in {
         "shadow_eval", "shadow_opportunity", "shadow_hedge_eval",
         "shadow_hedged_opportunity", "shadow_inventory_eval",
@@ -649,7 +776,9 @@ def build_status(data_dir, log_file, state_file):
     session_strategy_evaluations = sum(
         row["evaluations"] for row in session_strategy_counts.values()
     )
-    analytics_refreshing = report_refreshing or strategy_refreshing
+    analytics_refreshing = (
+        report_refreshing or strategy_refreshing or arbitrage_refreshing
+    )
     strategy_evaluations = sum(row["evaluations"] for row in strategy_counts.values())
     strategy_accepts = sum(row["accepts"] for row in strategy_counts.values())
     unique_opportunities = sum(row["unique_opportunities"] for row in strategy_counts.values())
@@ -979,6 +1108,7 @@ def build_status(data_dir, log_file, state_file):
         "current_pair": current_pair,
         "current_split_sell": current_split_sell,
         "split_sell_near_misses": split_sell_near_misses,
+        "arbitrage_research": arbitrage_research,
         "current_terminal_hedge": latest_terminal_hedge or {},
         "terminal_hedge": terminal_hedge_summary,
         "clob_readiness": clob_readiness,

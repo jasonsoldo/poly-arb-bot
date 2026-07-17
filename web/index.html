@@ -166,6 +166,20 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
     <div class="chart" id="equityChart"><div class="empty">NO COMPLETED SIMULATIONS / CURRENT CONFIG</div></div>
   </section>
 
+  <section class="panel strategies arb-research">
+    <h2>ARBITRAGE EXECUTION FUNNEL</h2>
+    <span class="sub">RESEARCH ONLY / NOT ORDERS OR PNL</span>
+    <div id="arbitrageFunnels" class="strategy-grid"></div>
+    <div class="near-misses">
+      <h2>REPEATABLE PATTERN RESEARCH</h2>
+      <div id="repeatablePatterns"></div>
+    </div>
+    <div class="near-misses">
+      <h2>SIZE + DELAY COUNTERFACTUALS</h2>
+      <div id="counterfactualPatterns"></div>
+    </div>
+  </section>
+
   <section class="panel replay">
     <h2>POLYMARKET REPLAY / SHADOW LEDGER</h2>
     <div class="ledger" id="tradeLedger"></div>
@@ -266,6 +280,30 @@ function strategyCard(id,title,key,d){
     <div>${detail}</div><div class="${latest.decision==='ACCEPT'?'good':'warn'}">${esc(latest.reason||'N/A')}</div>
     <div class="history sub">HISTORY EVAL ${hist.evaluations??0} / SETTLED ${perf.completed??0} / PNL ${money(perf.simulated_pnl)}<br>TOP ${esc(reasons||'N/A')}</div>`;
 }
+function renderArbitrageResearch(research){
+  const names={paired_lock:'BUY BOTH + MERGE',split_sell_lock:'SPLIT + SELL BOTH',maker_complete_set_arb:'MAKER COMPLETE SET'};
+  $('arbitrageFunnels').innerHTML=Object.entries(research.funnels||{}).map(([key,x])=>`<div class="strategy-card">
+    <label>${names[key]||esc(key)}</label>
+    <div>EVALUATIONS <b>${x.evaluations??'N/A'}</b></div>
+    <div>DEPTH PASSED <b>${x.depth_passed??'N/A'}</b></div>
+    <div>FEE PASSED <b>${x.fee_passed??'N/A'}</b></div>
+    <div>LATENCY SURVIVED <b>${x.latency_survived??'N/A'}</b></div>
+    <div>INDEPENDENT EPISODES <b>${x.independent_episodes??'N/A'}</b></div>
+    <div>COMPLETED <b>${x.completed??'N/A'}</b> / POSITIVE <b>${x.positive_completed??'N/A'}</b></div>
+  </div>`).join('')||'<span class="na">NO ARBITRAGE AUDIT</span>';
+  $('repeatablePatterns').innerHTML=(research.repeatable_patterns||[]).slice(0,12).map(x=>`<div class="near-row">
+    <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span><span>${esc(names[x.strategy]||x.strategy||'N/A')}</span>
+    <span>${x.independent_episodes??0} EP / ${x.distinct_close_windows??0} WINDOWS</span>
+    <span>${fmt(x.target_size,2)} Q / ${fmt(x.delay_ms,0)}ms</span>
+    <b class="${x.classification==='RESEARCH_CANDIDATE'?'good':'warn'}">${esc(x.classification||'OBSERVED')}</b>
+  </div>`).join('')||'<div class="empty" style="height:45px">NO INDEPENDENT EPISODE YET</div>';
+  $('counterfactualPatterns').innerHTML=(research.counterfactual_patterns||[]).slice(0,12).map(x=>`<div class="near-row">
+    <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span><span>${esc(names[x.strategy]||x.strategy||'N/A')}</span>
+    <span>${fmt(x.target_size,2)} Q / ${fmt(x.delay_ms,0)}ms</span>
+    <span>${x.qualified_observations??0}/${x.observations??0} QUALIFIED</span>
+    <b class="${x.independent_episodes>0?'good':'warn'}">${x.independent_episodes??0} EP</b>
+  </div>`).join('')||'<div class="empty" style="height:45px">NO COUNTERFACTUAL OBSERVATION YET</div>';
+}
 function render(d){
   const c=d.counts||{},p=d.performance||{},session=d.engine_session||{},m=d.market_matrix||{};
   const assets=['BTC','ETH','SOL','XRP','BNB','DOGE','HYPE'],frames=['5m','15m','1h','4h'];
@@ -312,6 +350,7 @@ function render(d){
     <b class="warn">${money(x.profit_threshold_shortfall)}</b>
     <span>${fmt(x.required_gross_improvement_bps,1)} bps</span>
   </div>`).join('')||'<div class="empty" style="height:45px">NO ELIGIBLE NEAR-MISS SAMPLE</div>';
+  renderArbitrageResearch(d.arbitrage_research||{});
 
   const labels={ingest:'INGEST',clob_snap:'CLOB SNAP',replay:'REPLAY',backtest:'BACKTEST',validate:'VALIDATE',approve:'APPROVE',deploy:'DEPLOY'},pipeline=d.pipeline_steps||{};
   $('pipelineSteps').innerHTML=Object.entries(labels).map(([k,x],i)=>`<div class="step ${pipeline[k]==='PASS'?'on':pipeline[k]==='BLOCKED'?'block':''}"><i>0${i+1}</i>${x}<small class="sub">${pipeline[k]||'N/A'}</small></div>`).join('');

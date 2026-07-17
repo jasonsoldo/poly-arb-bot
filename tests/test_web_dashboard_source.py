@@ -120,3 +120,19 @@ def test_dashboard_shows_unknown_analytics_while_background_refresh_runs():
     source = Path("web/index.html").read_text(encoding="utf-8")
     assert "analytics_refreshing" in source
     assert "ANALYTICS REFRESHING" in source
+
+
+def test_dashboard_renders_real_arbitrage_funnel_and_repeatability_evidence():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    for element_id in (
+        "arbitrageFunnels", "repeatablePatterns", "counterfactualPatterns",
+    ):
+        assert f'id="{element_id}"' in source
+    for label in (
+        "ARBITRAGE EXECUTION FUNNEL", "REPEATABLE PATTERN RESEARCH",
+        "INDEPENDENT EPISODES", "LATENCY SURVIVED", "SIZE + DELAY COUNTERFACTUALS",
+        "RESEARCH ONLY / NOT ORDERS OR PNL",
+    ):
+        assert label in source
+    assert "arbitrage_research" in source
+    assert "repeatable_patterns" in source

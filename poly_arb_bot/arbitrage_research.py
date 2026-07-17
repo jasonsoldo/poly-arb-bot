@@ -1,0 +1,385 @@
+import json
+import os
+from pathlib import Path
+
+
+ARBITRAGE_STRATEGIES = (
+    "paired_lock",
+    "split_sell_lock",
+    "maker_complete_set_arb",
+)
+MAX_SEEN_EVENTS = 50_000
+MAX_PATTERN_VALUES = 4_096
+
+
+def _percentile(values, fraction):
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[round((len(ordered) - 1) * fraction)]
+
+
+def _empty_funnel():
+    return {
+        "evaluations": 0,
+        "depth_passed": 0,
+        "fee_passed": 0,
+        "latency_survived": 0,
+        "independent_episodes": 0,
+        "shadow_attempts": None,
+        "both_legs_filled": None,
+        "completed": 0,
+        "positive_completed": 0,
+    }
+
+
+def _empty_state():
+    return {
+        "version": 1,
+        "audit": {"identity": None, "offset": 0},
+        "execution": {"identity": None, "offset": 0},
+        "seen": [],
+        "funnels": {name: _empty_funnel() for name in ARBITRAGE_STRATEGIES},
+        "active": {},
+        "patterns": {},
+        "counterfactual_active": {},
+        "counterfactual_patterns": {},
+    }
+
+
+class IncrementalArbitrageResearch:
+    def __init__(self, audit_path, execution_path=None, state_path=None):
+        self.audit_path = Path(audit_path)
+        self.execution_path = Path(execution_path) if execution_path else None
+        self.state_path = Path(state_path) if state_path else None
+        self.state = self._load()
+        self.state.setdefault("active", {})
+        self.state.setdefault("patterns", {})
+        self.state.setdefault("counterfactual_active", {})
+        self.state.setdefault("counterfactual_patterns", {})
+        funnels = self.state.setdefault("funnels", {})
+        for strategy in ARBITRAGE_STRATEGIES:
+            funnel = funnels.setdefault(strategy, _empty_funnel())
+            for field, value in _empty_funnel().items():
+                funnel.setdefault(field, value)
+        self._seen_order = list(self.state.get("seen", []))[-MAX_SEEN_EVENTS:]
+        self._seen = set(self._seen_order)
+
+    def _load(self):
+        if not self.state_path:
+            return _empty_state()
+        try:
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return _empty_state()
+        return state if state.get("version") == 1 else _empty_state()
+
+    def _save(self):
+        if not self.state_path:
+            return
+        self.state["seen"] = self._seen_order[-MAX_SEEN_EVENTS:]
+        temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(self.state, separators=(",", ":")), encoding="utf-8",
+        )
+        os.replace(temporary, self.state_path)
+
+    @staticmethod
+    def _identity(stat):
+        return f"{stat.st_dev}:{stat.st_ino}"
+
+    def _consume_file(self, path, bucket_name, consumer):
+        if not path or not path.exists():
+            return False
+        bucket = self.state[bucket_name]
+        stat = path.stat()
+        identity = self._identity(stat)
+        if bucket.get("identity") != identity or stat.st_size < bucket.get("offset", 0):
+            bucket.update(identity=identity, offset=0)
+        changed = False
+        with path.open("rb") as handle:
+            handle.seek(bucket.get("offset", 0))
+            while True:
+                start = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    handle.seek(start)
+                    break
+                try:
+                    row = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    changed = True
+                    continue
+                event_id = row.get("event_id")
+                if event_id and event_id in self._seen:
+                    changed = True
+                    continue
+                if event_id:
+                    self._seen.add(event_id)
+                    self._seen_order.append(event_id)
+                    if len(self._seen_order) > MAX_SEEN_EVENTS:
+                        self._seen.discard(self._seen_order.pop(0))
+                consumer(row)
+                changed = True
+            bucket["offset"] = handle.tell()
+        return changed
+
+    @staticmethod
+    def _evaluation_kind(row):
+        strategy = row.get("strategy")
+        event_type = row.get("event_type")
+        if strategy == "paired_lock" and event_type == "shadow_eval":
+            return strategy
+        if strategy == "split_sell_lock" and event_type == "shadow_split_sell_eval":
+            return strategy
+        if strategy == "maker_complete_set_arb" and event_type == "shadow_maker_quote_eval":
+            return strategy
+        return None
+
+    @staticmethod
+    def _stage_passes(strategy, row):
+        if strategy == "paired_lock":
+            return (
+                bool(row.get("fok")),
+                float(row.get("locked_profit", 0)) > 0,
+                float(row.get("expected_execution_value", 0)) > 0,
+            )
+        if strategy == "split_sell_lock":
+            size = float(row.get("target_size", 0))
+            depth = (
+                size > 0
+                and float(row.get("up_sell_fill", 0)) >= size
+                and float(row.get("down_sell_fill", 0)) >= size
+            )
+            return (
+                depth,
+                float(row.get("locked_profit", 0)) > 0,
+                float(row.get("expected_execution_value", 0)) > 0,
+            )
+        return (
+            bool(row.get("quote_geometry_qualified")),
+            float(row.get("locked_edge_if_both_fill", 0)) > 0,
+            float(row.get("expected_value", 0)) > 0,
+        )
+
+    @staticmethod
+    def _pattern_key(row):
+        size = row.get("target_size", row.get("size"))
+        delay_us = row.get("time_between_legs_us")
+        delay_ms = None if delay_us is None else round(float(delay_us) / 1000, 3)
+        return "|".join((
+            str(row.get("strategy") or ""),
+            str(row.get("asset") or "UNKNOWN"),
+            str(row.get("timeframe") or "UNKNOWN"),
+            str(size if size is not None else "N/A"),
+            str(delay_ms if delay_ms is not None else "N/A"),
+        ))
+
+    def _pattern(self, row):
+        key = self._pattern_key(row)
+        return self.state["patterns"].setdefault(key, {
+            "strategy": row.get("strategy"),
+            "asset": row.get("asset"),
+            "timeframe": row.get("timeframe"),
+            "target_size": row.get("target_size", row.get("size")),
+            "delay_ms": (
+                round(float(row["time_between_legs_us"]) / 1000, 3)
+                if row.get("time_between_legs_us") is not None else None
+            ),
+            "independent_episodes": 0,
+            "close_windows": [],
+            "durations": [],
+            "profits": [],
+            "latency_survived": 0,
+            "completed": 0,
+            "positive_completed": 0,
+            "simulated_pnl": 0.0,
+        })
+
+    def _consume_audit(self, row):
+        if row.get("event_type") == "shadow_arb_counterfactual":
+            self._consume_counterfactual(row)
+            return
+        strategy = self._evaluation_kind(row)
+        if not strategy:
+            return
+        funnel = self.state["funnels"][strategy]
+        funnel["evaluations"] += 1
+        depth, fee, latency = self._stage_passes(strategy, row)
+        funnel["depth_passed"] += int(depth)
+        funnel["fee_passed"] += int(fee)
+        funnel["latency_survived"] += int(latency)
+
+        active_key = f"{strategy}|{row.get('market_id')}"
+        decision = row.get("decision")
+        if decision != "ACCEPT":
+            self.state["active"].pop(active_key, None)
+            return
+        identity = f"{row.get('generation')}|{row.get('session')}"
+        if self.state["active"].get(active_key) == identity:
+            return
+        self.state["active"][active_key] = identity
+        funnel["independent_episodes"] += 1
+        pattern = self._pattern(row)
+        pattern["independent_episodes"] += 1
+        window = str(row.get("close_ts") or row.get("market_id"))
+        if window not in pattern["close_windows"]:
+            pattern["close_windows"].append(window)
+        if row.get("duration_ms") is not None:
+            pattern["durations"].append(float(row["duration_ms"]))
+            pattern["durations"] = pattern["durations"][-MAX_PATTERN_VALUES:]
+        if row.get("locked_profit") is not None:
+            pattern["profits"].append(float(row["locked_profit"]))
+            pattern["profits"] = pattern["profits"][-MAX_PATTERN_VALUES:]
+        pattern["latency_survived"] += int(latency)
+
+    def _consume_counterfactual(self, row):
+        for observation in row.get("observations", []):
+            strategy = observation.get("method")
+            if strategy not in ("paired_lock", "split_sell_lock"):
+                continue
+            for stress in observation.get("latency_stress", []):
+                key = "|".join((
+                    strategy,
+                    str(row.get("asset") or "UNKNOWN"),
+                    str(row.get("timeframe") or "UNKNOWN"),
+                    str(observation.get("target_size")),
+                    str(stress.get("delay_ms")),
+                ))
+                active_key = f"{key}|{row.get('market_id')}"
+                pattern = self.state["counterfactual_patterns"].setdefault(key, {
+                    "strategy": strategy,
+                    "asset": row.get("asset"),
+                    "timeframe": row.get("timeframe"),
+                    "target_size": observation.get("target_size"),
+                    "delay_ms": stress.get("delay_ms"),
+                    "observations": 0,
+                    "qualified_observations": 0,
+                    "independent_episodes": 0,
+                    "close_windows": [],
+                    "profits": [],
+                    "expected_values": [],
+                })
+                pattern["observations"] += 1
+                qualified = (
+                    observation.get("depth_ok") is True
+                    and float(observation.get("post_cost_profit", 0)) > 0
+                    and float(stress.get("expected_execution_value", 0)) > 0
+                )
+                if not qualified:
+                    self.state["counterfactual_active"].pop(active_key, None)
+                    continue
+                pattern["qualified_observations"] += 1
+                identity = f"{row.get('generation')}|{row.get('session')}"
+                if self.state["counterfactual_active"].get(active_key) == identity:
+                    continue
+                self.state["counterfactual_active"][active_key] = identity
+                pattern["independent_episodes"] += 1
+                window = str(row.get("close_ts") or row.get("market_id"))
+                if window not in pattern["close_windows"]:
+                    pattern["close_windows"].append(window)
+                pattern["profits"].append(float(observation["post_cost_profit"]))
+                pattern["expected_values"].append(
+                    float(stress["expected_execution_value"])
+                )
+                pattern["profits"] = pattern["profits"][-MAX_PATTERN_VALUES:]
+                pattern["expected_values"] = pattern["expected_values"][-MAX_PATTERN_VALUES:]
+
+    def _consume_execution(self, row):
+        strategy = row.get("strategy")
+        if strategy not in ARBITRAGE_STRATEGIES or row.get("event_type") != "shadow_complete":
+            return
+        funnel = self.state["funnels"][strategy]
+        funnel["completed"] += 1
+        pnl = float(row.get("realized_simulated_pnl", 0))
+        funnel["positive_completed"] += int(pnl > 0)
+        candidates = [
+            pattern for pattern in self.state["patterns"].values()
+            if pattern.get("strategy") == strategy
+            and pattern.get("asset") == row.get("asset")
+            and pattern.get("timeframe") == row.get("timeframe")
+        ]
+        if not candidates:
+            candidates = [self._pattern(row)]
+        pattern = candidates[0]
+        pattern["completed"] += 1
+        pattern["positive_completed"] += int(pnl > 0)
+        pattern["simulated_pnl"] += pnl
+
+    def refresh(self):
+        changed = self._consume_file(
+            self.audit_path, "audit", self._consume_audit,
+        )
+        changed = self._consume_file(
+            self.execution_path, "execution", self._consume_execution,
+        ) or changed
+        if changed:
+            self._save()
+        return self.report()
+
+    def report(self):
+        patterns = []
+        for raw in self.state["patterns"].values():
+            durations = raw.get("durations", [])
+            profits = raw.get("profits", [])
+            windows = len(raw.get("close_windows", []))
+            episodes = int(raw.get("independent_episodes", 0))
+            row = {
+                key: raw.get(key) for key in (
+                    "strategy", "asset", "timeframe", "target_size", "delay_ms",
+                    "independent_episodes", "completed", "positive_completed",
+                    "simulated_pnl",
+                )
+            }
+            row.update({
+                "distinct_close_windows": windows,
+                "classification": (
+                    "RESEARCH_CANDIDATE" if windows >= 3 else "OBSERVED"
+                ),
+                "duration_ms": {
+                    "p50": _percentile(durations, 0.5),
+                    "p95": _percentile(durations, 0.95),
+                },
+                "median_post_cost_profit": _percentile(profits, 0.5),
+                "latency_survival_rate": (
+                    raw.get("latency_survived", 0) / episodes if episodes else None
+                ),
+            })
+            patterns.append(row)
+        patterns.sort(key=lambda row: (
+            row["classification"] != "RESEARCH_CANDIDATE",
+            -row["distinct_close_windows"],
+            -row["independent_episodes"],
+        ))
+        counterfactual_patterns = []
+        for raw in self.state.get("counterfactual_patterns", {}).values():
+            windows = len(raw.get("close_windows", []))
+            counterfactual_patterns.append({
+                key: raw.get(key) for key in (
+                    "strategy", "asset", "timeframe", "target_size", "delay_ms",
+                    "observations", "qualified_observations", "independent_episodes",
+                )
+            } | {
+                "distinct_close_windows": windows,
+                "classification": (
+                    "RESEARCH_CANDIDATE" if windows >= 3 else "OBSERVED"
+                ),
+                "median_post_cost_profit": _percentile(raw.get("profits", []), 0.5),
+                "median_expected_execution_value": _percentile(
+                    raw.get("expected_values", []), 0.5,
+                ),
+            })
+        counterfactual_patterns.sort(key=lambda row: (
+            row["classification"] != "RESEARCH_CANDIDATE",
+            -row["distinct_close_windows"], -row["independent_episodes"],
+            row.get("delay_ms") or 0,
+        ))
+        return {
+            "funnels": self.state["funnels"],
+            "repeatable_patterns": patterns,
+            "counterfactual_patterns": counterfactual_patterns,
+            "semantics": "RESEARCH_ONLY_NOT_ORDERS_OR_PNL",
+        }

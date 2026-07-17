@@ -6,6 +6,31 @@
 
 namespace complete_set {
 
+struct ExecutionStressResult {
+    double leg_1_fill_probability = 0;
+    double leg_2_fill_probability = 0;
+    double expected_execution_value = 0;
+};
+
+inline ExecutionStressResult evaluate_execution_stress(
+        double locked_profit, double leg_1_depth_ratio,
+        double leg_2_depth_ratio, double delay_us,
+        double execution_half_life_us, double orphan_leg_loss) {
+    ExecutionStressResult result;
+    result.leg_1_fill_probability = std::clamp(leg_1_depth_ratio, 0.0, 1.0);
+    const double decay = std::exp(
+        -std::max(0.0, delay_us) / std::max(1.0, execution_half_life_us)
+    );
+    result.leg_2_fill_probability =
+        std::clamp(leg_2_depth_ratio, 0.0, 1.0) * decay;
+    result.expected_execution_value =
+        result.leg_1_fill_probability * result.leg_2_fill_probability *
+            locked_profit -
+        result.leg_1_fill_probability *
+            (1 - result.leg_2_fill_probability) * orphan_leg_loss;
+    return result;
+}
+
 struct Inventory {
     double up_quantity = 0;
     double down_quantity = 0;

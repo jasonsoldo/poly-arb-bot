@@ -17,6 +17,20 @@ def test_ws_engine_uses_async_read_and_serialized_heartbeat_writes():
     assert "ws_.read(" not in SOURCE
 
 
+def test_market_channel_uses_official_full_initial_subscription_and_heartbeat():
+    handshake = SOURCE.split("void on_handshake", 1)[1].split(
+        "void do_read", 1
+    )[0]
+    ping = SOURCE.split("void schedule_ping()", 1)[1].split(
+        "void schedule_reload()", 1
+    )[0]
+
+    assert 'queue_write(subscription(assets, ""))' in handshake
+    assert "first_count" not in handshake
+    assert 'subscription(std::vector<std::string>(assets.begin() + offset' not in handshake
+    assert "expires_after(std::chrono::seconds(10))" in ping
+
+
 def test_ws_engine_keeps_initial_and_dynamic_subscriptions_distinct():
     assert 'operation.empty()' in SOURCE
     assert '\\"type\\":\\"market\\"' in SOURCE
@@ -264,3 +278,25 @@ def test_opportunity_episode_state_does_not_cross_session_or_generation():
     )[0]
     assert "item.second.active_since = old->second.active_since" not in reload_body
     assert "item.second.split_sell_active_since =" not in reload_body
+
+
+def test_paired_lock_emits_one_opportunity_per_continuous_episode():
+    evaluate = SOURCE.split("void evaluate()", 1)[1].split(
+        "void record_session_strategy", 1
+    )[0]
+
+    assert "const bool paired_was_active = item.second.active_since > 0" in evaluate
+    assert "if (good && !paired_was_active && audit_)" in evaluate
+
+
+def test_engine_emits_bounded_multi_size_latency_counterfactual_research():
+    assert "shadow_arb_counterfactual" in SOURCE
+    assert "counterfactual_sizes_" in SOURCE
+    assert "counterfactual_delays_us_" in SOURCE
+    assert "evaluate_execution_stress" in SOURCE
+    assert '\\"research_only\\":true' in SOURCE
+    assert "arb_research_qualified" in SOURCE
+    assert "qualification_changed" in SOURCE
+    assert "!qualification_changed && !periodic_audit" in SOURCE
+    assert "arb_research_up_version" in SOURCE
+    assert "up_book.version == market.arb_research_up_version" in SOURCE

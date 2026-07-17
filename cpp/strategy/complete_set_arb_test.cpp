@@ -194,5 +194,18 @@ int main() {
         assert(result.reason == "maker_fill_probability_unavailable");
         assert(result.locked_edge >= row.minimum_pair_edge);
     }
+    {
+        const auto immediate = complete_set::evaluate_execution_stress(
+            .20, 1, 1, 0, 250000, .20
+        );
+        const auto delayed = complete_set::evaluate_execution_stress(
+            .20, 1, 1, 250000, 250000, .20
+        );
+        assert(std::abs(immediate.leg_1_fill_probability - 1) < 1e-12);
+        assert(std::abs(immediate.leg_2_fill_probability - 1) < 1e-12);
+        assert(std::abs(immediate.expected_execution_value - .20) < 1e-12);
+        assert(delayed.leg_2_fill_probability < immediate.leg_2_fill_probability);
+        assert(delayed.expected_execution_value < immediate.expected_execution_value);
+    }
     std::cout << "complete-set arbitrage tests passed\n";
 }

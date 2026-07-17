@@ -780,6 +780,48 @@ def test_web_status_ranks_latest_split_sell_near_misses(tmp_path):
     assert status["split_sell_near_misses"][1]["profit_threshold_shortfall"] == .12
 
 
+def test_web_status_exposes_incremental_arbitrage_research(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir()
+    logs.mkdir()
+    now = time.time()
+    (data / "live_markets.json").write_text(json.dumps({
+        "markets": [{
+            "market_id": "m1", "asset": "BTC", "interval": "5m",
+            "close_ts": now + 100,
+        }],
+    }), encoding="utf-8")
+    (logs / "shadow-audit.jsonl").write_text(json.dumps({
+        "ts": now,
+        "event_id": "pair-accept",
+        "event_type": "shadow_eval",
+        "strategy": "paired_lock",
+        "market_id": "m1",
+        "asset": "BTC",
+        "timeframe": "5m",
+        "generation": 1,
+        "session": 2,
+        "decision": "ACCEPT",
+        "fok": True,
+        "locked_profit": .05,
+        "expected_execution_value": .03,
+        "size": 10,
+        "time_between_legs_us": 50_000,
+    }) + "\n", encoding="utf-8")
+    (logs / "strategy-audit.jsonl").write_text("", encoding="utf-8")
+
+    status = build_status(
+        data, logs / "shadow-audit.jsonl", tmp_path / "orders.json"
+    )
+
+    research = status["arbitrage_research"]
+    assert research["semantics"] == "RESEARCH_ONLY_NOT_ORDERS_OR_PNL"
+    assert research["funnels"]["paired_lock"]["independent_episodes"] == 1
+    assert research["repeatable_patterns"][0]["asset"] == "BTC"
+    assert research["repeatable_patterns"][0]["classification"] == "OBSERVED"
+
+
 def test_web_status_separates_engine_session_counts_and_legacy_inventory(tmp_path):
     data = tmp_path / "data"
     state = tmp_path / "state"
