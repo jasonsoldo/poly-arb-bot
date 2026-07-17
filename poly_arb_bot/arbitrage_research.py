@@ -62,8 +62,55 @@ class IncrementalArbitrageResearch:
             funnel = funnels.setdefault(strategy, _empty_funnel())
             for field, value in _empty_funnel().items():
                 funnel.setdefault(field, value)
+        self._migrate_legacy_patterns()
         self._seen_order = list(self.state.get("seen", []))[-MAX_SEEN_EVENTS:]
         self._seen = set(self._seen_order)
+
+    def _migrate_legacy_patterns(self):
+        patterns = self.state["patterns"]
+        for typed_key, typed in list(patterns.items()):
+            if not typed.get("asset") or not typed.get("timeframe"):
+                continue
+            if typed.get("independent_episodes", 0) or not typed.get("completed", 0):
+                continue
+            candidates = [
+                (key, pattern) for key, pattern in patterns.items()
+                if key != typed_key
+                and pattern.get("strategy") == typed.get("strategy")
+                and not pattern.get("asset")
+                and not pattern.get("timeframe")
+                and pattern.get("independent_episodes", 0)
+                and not pattern.get("completed", 0)
+                and pattern.get("target_size") == typed.get("target_size")
+            ]
+            if len(candidates) != 1:
+                continue
+            legacy_key, legacy = candidates[0]
+            legacy["asset"] = typed["asset"]
+            legacy["timeframe"] = typed["timeframe"]
+            legacy["completed"] = typed.get("completed", 0)
+            legacy["positive_completed"] = typed.get("positive_completed", 0)
+            legacy["simulated_pnl"] = typed.get("simulated_pnl", 0.0)
+            canonical_key = self._pattern_key(legacy)
+            patterns.pop(legacy_key)
+            patterns.pop(typed_key)
+            canonical = patterns.get(canonical_key)
+            if canonical:
+                for field in (
+                    "independent_episodes", "latency_survived", "completed",
+                    "positive_completed", "simulated_pnl",
+                ):
+                    canonical[field] = canonical.get(field, 0) + legacy.get(field, 0)
+                for field in ("close_windows", "market_ids"):
+                    canonical[field] = list(dict.fromkeys(
+                        canonical.get(field, []) + legacy.get(field, [])
+                    ))
+                for field in ("durations", "profits"):
+                    canonical[field] = (
+                        canonical.get(field, []) + legacy.get(field, [])
+                    )[-MAX_PATTERN_VALUES:]
+            else:
+                patterns[canonical_key] = legacy
 
     def _load(self):
         if not self.state_path:
@@ -169,7 +216,9 @@ class IncrementalArbitrageResearch:
     def _pattern_key(row):
         size = row.get("target_size", row.get("size"))
         delay_us = row.get("time_between_legs_us")
-        delay_ms = None if delay_us is None else round(float(delay_us) / 1000, 3)
+        delay_ms = row.get("delay_ms")
+        if delay_us is not None:
+            delay_ms = round(float(delay_us) / 1000, 3)
         return "|".join((
             str(row.get("strategy") or ""),
             str(row.get("asset") or "UNKNOWN"),
@@ -197,6 +246,7 @@ class IncrementalArbitrageResearch:
             "completed": 0,
             "positive_completed": 0,
             "simulated_pnl": 0.0,
+            "market_ids": [],
         })
 
     def _consume_audit(self, row):
@@ -225,6 +275,10 @@ class IncrementalArbitrageResearch:
         funnel["independent_episodes"] += 1
         pattern = self._pattern(row)
         pattern["independent_episodes"] += 1
+        market_id = row.get("market_id")
+        market_ids = pattern.setdefault("market_ids", [])
+        if market_id and market_id not in market_ids:
+            market_ids.append(market_id)
         window = str(row.get("close_ts") or row.get("market_id"))
         if window not in pattern["close_windows"]:
             pattern["close_windows"].append(window)
@@ -299,12 +353,22 @@ class IncrementalArbitrageResearch:
         candidates = [
             pattern for pattern in self.state["patterns"].values()
             if pattern.get("strategy") == strategy
-            and pattern.get("asset") == row.get("asset")
-            and pattern.get("timeframe") == row.get("timeframe")
+            and row.get("market_id") in pattern.get("market_ids", [])
         ]
+        if not candidates:
+            candidates = [
+                pattern for pattern in self.state["patterns"].values()
+                if pattern.get("strategy") == strategy
+                and pattern.get("asset") == row.get("asset")
+                and pattern.get("timeframe") == row.get("timeframe")
+            ]
         if not candidates:
             candidates = [self._pattern(row)]
         pattern = candidates[0]
+        if not pattern.get("asset") and row.get("asset"):
+            pattern["asset"] = row["asset"]
+        if not pattern.get("timeframe") and row.get("timeframe"):
+            pattern["timeframe"] = row["timeframe"]
         pattern["completed"] += 1
         pattern["positive_completed"] += int(pnl > 0)
         pattern["simulated_pnl"] += pnl

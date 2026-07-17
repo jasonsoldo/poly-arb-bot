@@ -99,6 +99,74 @@ def test_completed_lifecycle_is_separate_from_evaluations(tmp_path):
     assert result["repeatable_patterns"][0]["simulated_pnl"] == 0.04
 
 
+def test_completion_joins_legacy_episode_by_market_id_and_enriches_metadata(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    legacy = _row("a1", "ACCEPT", 1)
+    legacy.pop("asset")
+    legacy.pop("timeframe")
+    audit.write_text(json.dumps(legacy) + "\n")
+    execution.write_text(json.dumps({
+        "ts": 2,
+        "event_id": "complete-1",
+        "event_type": "shadow_complete",
+        "strategy": "paired_lock",
+        "market_id": "m1",
+        "asset": "BTC",
+        "timeframe": "5m",
+        "realized_simulated_pnl": 0.13875,
+    }) + "\n")
+
+    result = IncrementalArbitrageResearch(audit, execution).refresh()
+
+    assert len(result["repeatable_patterns"]) == 1
+    pattern = result["repeatable_patterns"][0]
+    assert pattern["asset"] == "BTC"
+    assert pattern["timeframe"] == "5m"
+    assert pattern["independent_episodes"] == 1
+    assert pattern["completed"] == 1
+    assert pattern["positive_completed"] == 1
+    assert pattern["simulated_pnl"] == 0.13875
+
+
+def test_persisted_split_pattern_is_migrated_without_future_duplication(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    state = tmp_path / "state.json"
+    audit.write_text(json.dumps(_row("a2", "ACCEPT", 2)) + "\n")
+    legacy = {
+        "strategy": "paired_lock", "asset": None, "timeframe": None,
+        "target_size": 10, "delay_ms": 50.0, "independent_episodes": 1,
+        "close_windows": ["m1"], "durations": [], "profits": [0.13875],
+        "latency_survived": 1, "completed": 0, "positive_completed": 0,
+        "simulated_pnl": 0.0,
+    }
+    completed = {
+        "strategy": "paired_lock", "asset": "BTC", "timeframe": "5m",
+        "target_size": 10, "delay_ms": None, "independent_episodes": 0,
+        "close_windows": [], "durations": [], "profits": [],
+        "latency_survived": 0, "completed": 1, "positive_completed": 1,
+        "simulated_pnl": 0.13875,
+    }
+    persisted = {
+        "version": 1,
+        "audit": {"identity": None, "offset": 0},
+        "execution": {"identity": None, "offset": 0},
+        "seen": [], "funnels": {}, "active": {},
+        "patterns": {"legacy": legacy, "completed": completed},
+    }
+    state.write_text(json.dumps(persisted), encoding="utf-8")
+
+    result = IncrementalArbitrageResearch(audit, state_path=state).refresh()
+
+    assert len(result["repeatable_patterns"]) == 1
+    pattern = result["repeatable_patterns"][0]
+    assert pattern["asset"] == "BTC"
+    assert pattern["timeframe"] == "5m"
+    assert pattern["independent_episodes"] == 2
+    assert pattern["completed"] == 1
+    assert pattern["simulated_pnl"] == 0.13875
+
+
 def test_counterfactual_patterns_are_independent_and_never_count_as_trades(tmp_path):
     audit = tmp_path / "audit.jsonl"
     observation = {

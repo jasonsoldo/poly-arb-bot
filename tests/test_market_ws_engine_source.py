@@ -72,6 +72,14 @@ def test_paired_opportunity_carries_canonical_identity_cost_and_risk_fields():
     assert "paired_config_hash" in SOURCE
 
 
+def test_paired_evaluation_carries_canonical_market_identity():
+    paired_eval = SOURCE.split(
+        '\\"event_type\\":\\"shadow_eval\\",\\"strategy\\":\\"paired_lock\\"', 1
+    )[1].split('record_session_strategy("paired_lock"', 1)[0]
+    for field in ("condition_id", "asset", "timeframe", "window", "close_ts"):
+        assert f'\\"{field}\\":' in paired_eval
+
+
 def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
     assert "ws_snapshot" in SOURCE
     assert "clob_book_stale" in SOURCE

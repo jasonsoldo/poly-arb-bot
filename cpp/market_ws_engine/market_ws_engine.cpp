@@ -1839,7 +1839,13 @@ private:
                           << "\tup_vwap=" << up.second << "\tdown_vwap=" << down.second
                           << "\tfees=" << up_fee + down_fee << "\tnet_cost=" << net_cost << "\tlocked_profit=" << profit << "\n" << std::flush;
                 if (audit_) audit_ << "{\"ts\":" << timestamp << ",\"event_id\":\"" << evaluation_id << "\",\"run_id\":\"" << run_id_ << "\",\"evaluation_sequence\":" << evaluation_sequence << ",\"event_type\":\"shadow_eval\",\"strategy\":\"paired_lock\",\"market_id\":\"" << item.first
-                                   << "\",\"reason\":\"" << reason << "\",\"fok\":" << (fok ? "true" : "false")
+                                   << "\",\"condition_id\":\"" << reference_ipc::escaped(item.second.condition_id)
+                                   << "\",\"asset\":\"" << reference_ipc::escaped(item.second.asset)
+                                   << "\",\"timeframe\":\"" << reference_ipc::escaped(item.second.interval)
+                                   << "\",\"window\":\"" << reference_ipc::escaped(item.second.window)
+                                   << "\",\"close_ts\":" << item.second.close_ts
+                                   << ",\"generation\":" << generation_ << ",\"session\":" << ws_session_id_
+                                   << ",\"reason\":\"" << reason << "\",\"fok\":" << (fok ? "true" : "false")
                                    << ",\"seconds_to_close\":" << seconds_to_close << ",\"size\":" << size_
                                    << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
                                    << ",\"clock_skew_ms\":" << source_timestamp_age_ms
