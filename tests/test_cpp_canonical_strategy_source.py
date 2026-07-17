@@ -22,7 +22,7 @@ def test_cpp_strategy_audit_exposes_price_to_beat_provenance():
     assert '\\"price_to_beat_source_timestamp_ms\\"' in ENGINE
 
 
-def test_cpp_engine_emits_four_independent_strategy_evaluations():
+def test_cpp_engine_emits_three_independent_primary_strategy_evaluations():
     assert "evaluate_reference_strategies" in ENGINE
     assert "strategy::probability_model" in ENGINE
     assert "strategy::lottery_probability_model" in ENGINE
@@ -30,28 +30,26 @@ def test_cpp_engine_emits_four_independent_strategy_evaluations():
     assert "strategy::evaluate_lottery" in ENGINE
     assert '"late_window_directional_ev"' in ENGINE
     assert '"low_price_lottery_ev"' in ENGINE
-    assert "shadow_hedged_opportunity" in ENGINE
-    assert "expected_portfolio_pnl" in ENGINE
-    assert "reversal_pnl" in ENGINE
-    assert "strategy::directional_window" in ENGINE
+    assert "emit_terminal_hedge_evaluation" not in ENGINE
+    assert "shadow_hedged_opportunity" not in ENGINE
+    assert "config.directional_windows" in ENGINE
     assert '"directional_not_accepted"' not in ENGINE
     assert '\\"volatility_per_sqrt_second\\"' in ENGINE
     assert '\\"model_sample_span_seconds\\"' in ENGINE
-    assert "main_fill_available" in ENGINE
     assert "for (const std::string outcome : {\"Up\", \"Down\"})" in ENGINE
     assert "strategy_audit_" in ENGINE
 
 
-def test_cpp_engine_evaluates_polymarket_only_complete_set_strategies():
+def test_cpp_engine_keeps_complete_set_observers_without_inventory_trading():
     assert '#include "../strategy/complete_set_arb.hpp"' in ENGINE
-    assert "complete_set::evaluate_rebalance" in ENGINE
     assert "complete_set::evaluate_maker" in ENGINE
-    assert '\\"strategy\\":\\"inventory_rebalancing_arb\\"' in ENGINE
+    assert "complete_set::evaluate_rebalance" not in ENGINE
+    assert '\\"strategy\\":\\"inventory_rebalancing_arb\\"' not in ENGINE
     assert '\\"strategy\\":\\"maker_complete_set_arb\\"' in ENGINE
     assert "maker_fill_probability_unavailable" in COMPLETE_SET
     assert "observe_maker_trade" in ENGINE
     assert "price_reached_quote_not_queue_fill" in ENGINE
-    assert '\\"realized_locked_profit\\"' in ENGINE
+    assert '\\"realized_locked_profit\\"' not in ENGINE
     assert "complete_set::evaluate_split_sell" in ENGINE
     assert '\\"strategy\\":\\"split_sell_lock\\"' in ENGINE
 

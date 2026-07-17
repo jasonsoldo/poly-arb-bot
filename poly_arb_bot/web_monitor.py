@@ -32,14 +32,16 @@ _ARBITRAGE_JOBS = {}
 _ARBITRAGE_LOCK = threading.Lock()
 ASSETS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE")
 INTERVALS = ("5m", "15m", "1h", "4h")
-STRATEGIES = (
+PRIMARY_STRATEGIES = (
     "late_window_directional_ev",
     "low_price_lottery_ev",
     "paired_lock",
+)
+ARBITRAGE_OBSERVERS = (
     "split_sell_lock",
-    "inventory_rebalancing_arb",
     "maker_complete_set_arb",
 )
+STRATEGIES = PRIMARY_STRATEGIES + ARBITRAGE_OBSERVERS
 
 
 def _report_cache_key(path, execution_path=None):
@@ -123,12 +125,7 @@ def build_report_empty():
                           "max": None, "samples": 0},
         "performance": dict(empty_performance),
         "performance_by_strategy": {
-            strategy: dict(empty_performance)
-            for strategy in (
-                "late_window_directional_ev", "low_price_lottery_ev", "paired_lock",
-                "split_sell_lock", "inventory_rebalancing_arb",
-                "maker_complete_set_arb",
-            )
+            strategy: dict(empty_performance) for strategy in STRATEGIES
         },
         "equity_curve": [], "trade_ledger": [], "asset_latest_pnl": {},
     }
@@ -176,11 +173,6 @@ def _empty_strategy_counts():
                "unique_opportunities": 0, "active_opportunities": 0}
         for name in STRATEGIES
     }
-    counts["late_window_directional_ev"].update({
-        "terminal_hedge_evaluations": 0,
-        "terminal_hedge_accepts": 0,
-        "terminal_hedge_rejections": 0,
-    })
     return counts
 
 
@@ -334,8 +326,6 @@ def _new_strategy_state():
         "last_saved": 0.0,
         "counts": _empty_strategy_counts(),
         "active": {name: set() for name in _empty_strategy_counts()},
-        "terminal_latest": None,
-        "terminal_rejection_reasons": {},
     }
 
 
@@ -348,10 +338,7 @@ def _load_strategy_state(path):
     state = _new_strategy_state()
     state.update({
         key: payload.get(key, state[key])
-        for key in (
-            "identity", "offset", "size", "terminal_latest",
-            "terminal_rejection_reasons",
-        )
+        for key in ("identity", "offset", "size")
     })
     state["seen"] = set(payload.get("seen", []))
     for name in state["counts"]:
@@ -413,8 +400,6 @@ def _save_strategy_state(path, state):
         "seen": list(state["seen"])[-50_000:], "counts": state["counts"],
         "active": {name: [list(item) for item in rows]
                    for name, rows in state["active"].items()},
-        "terminal_latest": state["terminal_latest"],
-        "terminal_rejection_reasons": state["terminal_rejection_reasons"],
     }
     temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
     os.replace(temporary, summary_path)
@@ -424,7 +409,6 @@ def _save_strategy_state(path, state):
 def _strategy_counts(paths):
     names = STRATEGIES
     total = _empty_strategy_counts()
-    terminal_summary = {"latest": None, "rejection_reasons": {}}
     with _STRATEGY_COUNT_LOCK:
         for path in paths:
             key = str(path.resolve())
@@ -466,9 +450,8 @@ def _strategy_counts(paths):
                             strategy = row.get("strategy", "paired_lock")
                             event_type = row.get("event_type")
                             if strategy not in state["counts"] or event_type not in {
-                                "shadow_eval", "shadow_hedge_eval", "shadow_hedged_opportunity",
-                                "shadow_inventory_eval", "shadow_inventory_action",
-                                "shadow_maker_quote_eval", "shadow_split_sell_eval",
+                                "shadow_eval", "shadow_maker_quote_eval",
+                                "shadow_split_sell_eval",
                             }:
                                 continue
                             event_id = row.get("event_id")
@@ -477,17 +460,6 @@ def _strategy_counts(paths):
                             if event_id:
                                 state["seen"].add(event_id)
                             bucket = state["counts"][strategy]
-                            if event_type in {"shadow_hedge_eval", "shadow_hedged_opportunity"}:
-                                accepted = event_type == "shadow_hedged_opportunity"
-                                bucket["terminal_hedge_evaluations"] += 1
-                                bucket["terminal_hedge_accepts"] += int(accepted)
-                                bucket["terminal_hedge_rejections"] += int(not accepted)
-                                state["terminal_latest"] = row
-                                if not accepted:
-                                    reason = row.get("reason", "unknown")
-                                    reasons = state["terminal_rejection_reasons"]
-                                    reasons[reason] = int(reasons.get(reason, 0)) + 1
-                                continue
                             bucket["evaluations"] += 1
                             accepted = row.get("decision") == "ACCEPT"
                             bucket["accepts"] += int(accepted)
@@ -521,24 +493,6 @@ def _strategy_counts(paths):
                 total[name]["unique_opportunities"] += state["counts"][name].get("unique_opportunities", 0)
                 total[name]["active_opportunities"] += len(state["active"][name])
                 total[name]["latest_model_evaluated"] = state["counts"][name]["latest_model_evaluated"]
-            for field in (
-                "terminal_hedge_evaluations", "terminal_hedge_accepts",
-                "terminal_hedge_rejections",
-            ):
-                total["late_window_directional_ev"][field] += state["counts"][
-                    "late_window_directional_ev"
-                ][field]
-            latest = state.get("terminal_latest")
-            if latest and (
-                not terminal_summary["latest"]
-                or float(latest.get("ts", 0)) >
-                   float(terminal_summary["latest"].get("ts", 0))
-            ):
-                terminal_summary["latest"] = latest
-            for reason, count in state.get("terminal_rejection_reasons", {}).items():
-                reasons = terminal_summary["rejection_reasons"]
-                reasons[reason] = int(reasons.get(reason, 0)) + int(count)
-    total["_terminal_hedge"] = terminal_summary
     return total
 
 
@@ -645,7 +599,6 @@ def build_status(data_dir, log_file, state_file):
     current_complete_set_hashes = {
         "paired_lock": shadow_health.get("paired_config_hash"),
         "split_sell_lock": shadow_health.get("split_sell_config_hash"),
-        "inventory_rebalancing_arb": shadow_health.get("inventory_config_hash"),
         "maker_complete_set_arb": shadow_health.get("maker_config_hash"),
     }
     if not any(current_complete_set_hashes.values()):
@@ -657,9 +610,7 @@ def build_status(data_dir, log_file, state_file):
         (selected_log, strategy_log), execution_log,
     )
     shadow_events = [item for item in events if item.get("event_type") in {
-        "shadow_eval", "shadow_opportunity", "shadow_hedge_eval",
-        "shadow_hedged_opportunity", "shadow_inventory_eval",
-        "shadow_inventory_action", "shadow_maker_quote_eval",
+        "shadow_eval", "shadow_opportunity", "shadow_maker_quote_eval",
         "shadow_split_sell_eval", "shadow_split_sell_opportunity",
     }]
     paired_events = [item for item in shadow_events if item.get("strategy", "paired_lock") == "paired_lock"]
@@ -782,9 +733,6 @@ def build_status(data_dir, log_file, state_file):
     strategy_count_result, strategy_refreshing = _strategy_counts_for_status(
         (selected_log, strategy_log)
     )
-    terminal_hedge_summary = strategy_count_result.get(
-        "_terminal_hedge", {"latest": None, "rejection_reasons": {}}
-    )
     empty_counts = _empty_strategy_counts()
     strategy_counts = {
         name: strategy_count_result.get(name, empty_counts[name])
@@ -815,19 +763,13 @@ def build_status(data_dir, log_file, state_file):
     paired_evaluations = strategy_counts["paired_lock"]["evaluations"]
     split_sell_evaluations = strategy_counts["split_sell_lock"]["evaluations"]
     split_sell_accepts = strategy_counts["split_sell_lock"]["accepts"]
-    inventory_evaluations = strategy_counts["inventory_rebalancing_arb"]["evaluations"]
-    inventory_actions = strategy_counts["inventory_rebalancing_arb"]["accepts"]
     maker_evaluations = strategy_counts["maker_complete_set_arb"]["evaluations"]
     maker_quote_candidates = strategy_counts["maker_complete_set_arb"]["accepts"]
-    complete_set_evaluations = (
-        paired_evaluations + split_sell_evaluations +
-        inventory_evaluations + maker_evaluations
-    )
+    complete_set_evaluations = paired_evaluations + split_sell_evaluations + maker_evaluations
     strategy_latest = {}
     for item in shadow_events:
         if item.get("event_type") not in {
-            "shadow_eval", "shadow_inventory_eval", "shadow_inventory_action",
-            "shadow_maker_quote_eval", "shadow_split_sell_eval",
+            "shadow_eval", "shadow_maker_quote_eval", "shadow_split_sell_eval",
             "shadow_split_sell_opportunity",
         }:
             continue
@@ -896,12 +838,6 @@ def build_status(data_dir, log_file, state_file):
         ),
         key=lambda item: float(item["profit_threshold_shortfall"]),
     )[:8]
-    latest_terminal_hedge = terminal_hedge_summary.get("latest") or next(
-        (item for item in shadow_events if item.get("event_type") in {
-            "shadow_hedge_eval", "shadow_hedged_opportunity",
-        }),
-        None,
-    )
     current_hash = report.get("current_strategy_config_hash")
     current_hashes = report.get("current_strategy_config_hashes", {})
     current_paired_hash = report.get("current_paired_config_hash")
@@ -925,7 +861,7 @@ def build_status(data_dir, log_file, state_file):
     simulated_complete = report["performance"]["completed"]
     locked_complete = sum(
         report["performance_by_strategy"][name]["completed"]
-        for name in ("paired_lock", "split_sell_lock", "inventory_rebalancing_arb")
+        for name in ("paired_lock", "split_sell_lock")
     )
     current_inventory_hash = shadow_health.get("inventory_config_hash")
     complete_set_inventory = []
@@ -1011,8 +947,6 @@ def build_status(data_dir, log_file, state_file):
             "paired_evaluations": paired_evaluations,
             "split_sell_evaluations": split_sell_evaluations,
             "split_sell_accepts": split_sell_accepts,
-            "inventory_evaluations": inventory_evaluations,
-            "inventory_actions": inventory_actions,
             "maker_evaluations": maker_evaluations,
             "maker_quote_candidates": maker_quote_candidates,
             "maker_quote_geometry_candidates": int(
@@ -1036,12 +970,6 @@ def build_status(data_dir, log_file, state_file):
             "active_shadow_positions": active_shadow_positions,
             "unique_opportunities": unique_opportunities,
             "active_opportunities": active_opportunities,
-            "terminal_hedge_evaluations": strategy_counts["late_window_directional_ev"].get(
-                "terminal_hedge_evaluations", 0
-            ),
-            "terminal_hedge_accepts": strategy_counts["late_window_directional_ev"].get(
-                "terminal_hedge_accepts", 0
-            ),
             "simulated_complete": simulated_complete,
             "locked_complete": locked_complete,
             "session_strategy_evaluations": session_strategy_evaluations,
@@ -1051,9 +979,6 @@ def build_status(data_dir, log_file, state_file):
             ]["evaluations"],
             "session_split_sell_accepts": session_strategy_counts[
                 "split_sell_lock"
-            ]["accepts"],
-            "session_inventory_actions": session_strategy_counts[
-                "inventory_rebalancing_arb"
             ]["accepts"],
             "session_maker_quote_candidates": session_strategy_counts[
                 "maker_complete_set_arb"
@@ -1155,8 +1080,6 @@ def build_status(data_dir, log_file, state_file):
         "current_split_sell": current_split_sell,
         "split_sell_near_misses": split_sell_near_misses,
         "arbitrage_research": arbitrage_research,
-        "current_terminal_hedge": latest_terminal_hedge or {},
-        "terminal_hedge": terminal_hedge_summary,
         "clob_readiness": clob_readiness,
         "pipeline_steps": {
             "ingest": "PASS" if markets else "BLOCKED",

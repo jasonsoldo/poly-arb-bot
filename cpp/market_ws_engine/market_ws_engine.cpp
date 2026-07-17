@@ -152,9 +152,6 @@ strategy::Config strategy_config_from_environment() {
     config.lottery_imbalance_z = environment_double("LOTTERY_IMBALANCE_Z", "0.10");
     config.lottery_market_blend = environment_double("LOTTERY_MARKET_BLEND", "0.50");
     config.minimum_model_sample_span_seconds = environment_double("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60");
-    config.terminal_hedge_max_reversal_loss = environment_double("TERMINAL_HEDGE_MAX_REVERSAL_LOSS", "1.0");
-    config.terminal_hedge_min_expected_pnl = environment_double("TERMINAL_HEDGE_MIN_EXPECTED_PNL", "0.05");
-    config.terminal_hedge_max_size_ratio = environment_double("TERMINAL_HEDGE_MAX_SIZE_RATIO", "1.0");
     config.directional_windows = {
         {"5m", {static_cast<int>(environment_double("DIRECTIONAL_WINDOW_5M_MIN", "5")), static_cast<int>(environment_double("DIRECTIONAL_WINDOW_5M_MAX", "15"))}},
         {"15m", {static_cast<int>(environment_double("DIRECTIONAL_WINDOW_15M_MIN", "5")), static_cast<int>(environment_double("DIRECTIONAL_WINDOW_15M_MAX", "20"))}},
@@ -213,7 +210,6 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"maximum_slippage", environment_value("STRATEGY_MAX_SLIPPAGE", "0.01")},
         {"maker_both_fill_probability", environment_value("MAKER_BOTH_FILL_PROBABILITY", "0")},
         {"maker_expected_rebate_per_pair", environment_value("MAKER_EXPECTED_REBATE_PER_PAIR", "0")},
-        {"maker_inventory_skew_per_unit", environment_value("MAKER_INVENTORY_SKEW_PER_UNIT", "0.005")},
         {"maker_minimum_pair_edge", environment_value("MAKER_MINIMUM_PAIR_EDGE", "0.01")},
         {"maker_orphan_loss", environment_value("MAKER_ORPHAN_LOSS", "0.02")},
         {"maker_observation_window_seconds", environment_value(
@@ -222,9 +218,6 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"maker_tick_size", environment_value("MAKER_TICK_SIZE", "0.01")},
         {"minimum_liquidity", environment_value("STRATEGY_MIN_LIQUIDITY", "20")},
         {"minimum_model_sample_span_seconds", environment_value("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60")},
-        {"terminal_hedge_max_reversal_loss", environment_value("TERMINAL_HEDGE_MAX_REVERSAL_LOSS", "1.0")},
-        {"terminal_hedge_min_expected_pnl", environment_value("TERMINAL_HEDGE_MIN_EXPECTED_PNL", "0.05")},
-        {"terminal_hedge_max_size_ratio", environment_value("TERMINAL_HEDGE_MAX_SIZE_RATIO", "1.0")},
         {"momentum_z_per_bps", environment_value("MODEL_MOMENTUM_Z_PER_BPS", "0.002")},
         {"probability_reference", "settlement_reference"},
         {"shadow_buffer_per_share", environment_value("SHADOW_BUFFER_PER_SHARE", "0.002")},
@@ -239,7 +232,7 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
                 key == "minimum_liquidity" || key == "maximum_slippage" ||
                 key == "maximum_reference_age_ms" || key == "maximum_book_age_ms" ||
                 key == "maximum_clock_skew_ms" || key == "minimum_model_sample_span_seconds" ||
-                key == "probability_reference" || key.rfind("terminal_hedge_", 0) == 0;
+                key == "probability_reference";
             if (strategy_name == "late_window_directional_ev") return common ||
                 key == "directional_min_net_ev" || key == "directional_latency_buffer" ||
                 key == "directional_settlement_buffer" || key == "directional_min_probability" ||
@@ -594,8 +587,7 @@ public:
         strategy_reject_heartbeat_seconds_ = environment_double("STRATEGY_REJECT_AUDIT_HEARTBEAT_SECONDS", "60");
         for (const std::string strategy : {
                  "late_window_directional_ev", "low_price_lottery_ev",
-                 "paired_lock", "split_sell_lock", "inventory_rebalancing_arb",
-                 "maker_complete_set_arb",
+                 "paired_lock", "split_sell_lock", "maker_complete_set_arb",
              }) {
             session_strategy_counts_[strategy];
         }
@@ -747,8 +739,6 @@ private:
             const auto down = buy_vwap(down_book, size_);
             const double rate = market.fee > 0 ? market.fee : fallback_fee_;
             std::map<std::string, strategy::EvaluationInput> directional_inputs;
-            std::map<std::string, strategy::Decision> directional_decisions;
-            std::map<std::string, strategy::EvaluationInput> lottery_inputs;
             for (const std::string outcome : {"Up", "Down"}) {
                 const bool is_up = outcome == "Up";
                 const Book& book = is_up ? up_book : down_book;
@@ -800,10 +790,8 @@ private:
                     strategy::Decision decision = strategy_name == "late_window_directional_ev"
                         ? strategy::evaluate_directional(input, strategy_config_)
                         : strategy::evaluate_lottery(input, strategy_config_);
-                    if (is_lottery) lottery_inputs[outcome] = input;
-                    else {
+                    if (!is_lottery) {
                         directional_inputs[outcome] = input;
-                        directional_decisions[outcome] = decision;
                     }
                     if (!strategy_audit_.available()) {
                         decision.decision = "REJECT";
@@ -835,12 +823,9 @@ private:
                                         raw_probability, reference, decision, timestamp, ask);
                 }
             }
-            emit_terminal_hedge_evaluation(
-                item.first, market, directional_inputs, directional_decisions,
-                lottery_inputs, probability_input, timestamp);
             emit_complete_set_evaluations(
                 item.first, market, up_book, down_book, directional_inputs,
-                directional_probability.estimated_probability, opening_price, timestamp);
+                directional_probability.estimated_probability, timestamp);
         }
         const auto evaluation_finished = std::chrono::steady_clock::now();
         if (evaluated_any && last_clob_mutation_at_.time_since_epoch().count()) {
@@ -850,315 +835,18 @@ private:
         last_clob_mutation_at_ = {};
     }
 
-    void emit_terminal_hedge_evaluation(
-            const std::string& market_id, const Market& market,
-            const std::map<std::string, strategy::EvaluationInput>& directional_inputs,
-            const std::map<std::string, strategy::Decision>& directional_decisions,
-            const std::map<std::string, strategy::EvaluationInput>& lottery_inputs,
-            const strategy::ProbabilityInput& probability_input,
-            double timestamp) {
-        if (directional_inputs.empty()) return;
-        const int seconds_to_close = directional_inputs.begin()->second.seconds_to_close;
-        const auto terminal_window = strategy::directional_window(market.interval, strategy_config_);
-        if (!terminal_window || seconds_to_close < terminal_window->first ||
-            seconds_to_close > terminal_window->second) return;
-        const strategy::Decision* main_decision = nullptr;
-        const strategy::EvaluationInput* main = nullptr;
-        std::string main_outcome;
-        const strategy::Decision* diagnostic_decision = nullptr;
-        const strategy::EvaluationInput* diagnostic = nullptr;
-        std::string diagnostic_outcome;
-        for (const std::string outcome : {"Up", "Down"}) {
-            const auto decision = directional_decisions.find(outcome);
-            const auto input = directional_inputs.find(outcome);
-            if (decision == directional_decisions.end() || input == directional_inputs.end()) continue;
-            if (!diagnostic || input->second.estimated_probability.value_or(-1) >
-                diagnostic->estimated_probability.value_or(-1)) {
-                diagnostic_decision = &decision->second;
-                diagnostic = &input->second;
-                diagnostic_outcome = outcome;
-            }
-            if (decision->second.decision != "ACCEPT") continue;
-            if (!main_decision || decision->second.net_ev.value_or(-1e9) > main_decision->net_ev.value_or(-1e9)) {
-                main_decision = &decision->second;
-                main = &input->second;
-                main_outcome = outcome;
-            }
-        }
-        if (!main) {
-            main_decision = diagnostic_decision;
-            main = diagnostic;
-            main_outcome = diagnostic_outcome;
-        }
-        std::string reason = main_decision ? main_decision->reason : "directional_not_evaluated";
-        bool accepted = false;
-        strategy::TerminalHedgeOutput result;
-        std::string hedge_outcome;
-        const strategy::EvaluationInput* hedge = nullptr;
-        if (main) {
-            hedge_outcome = main_outcome == "Up" ? "Down" : "Up";
-            const auto found = lottery_inputs.find(hedge_outcome);
-            if (found != lottery_inputs.end()) hedge = &found->second;
-        }
-        if (main && main_decision && main_decision->decision == "ACCEPT" &&
-            main->estimated_probability) {
-            if (!hedge) reason = "hedge_quote_unavailable";
-            else {
-                result = strategy::evaluate_terminal_hedge({
-                    size_, *main->estimated_probability,
-                    main->expected_fill_price, main->fee_per_share, main->slippage_per_share,
-                    hedge->expected_fill_price, hedge->fee_per_share, hedge->slippage_per_share,
-                    hedge->liquidity, hedge->minimum_liquidity, hedge->maximum_slippage,
-                    hedge->target_depth_ok,
-                }, strategy_config_);
-                reason = result.reason;
-                accepted = result.accepted;
-            }
-        }
-        strategy::Decision combined{
-            "late_window_directional_ev", std::nullopt,
-            accepted ? std::optional<double>(result.expected_pnl / std::max(size_, 1e-9)) : std::nullopt,
-            accepted ? "ACCEPT" : "REJECT", reason, {reason},
-        };
-        const std::string state_key = market_id + "|terminal_hedge";
-        if (!should_emit_strategy(state_key, combined, timestamp)) return;
-        const unsigned long long sequence = ++strategy_evaluation_sequence_;
-        const std::string event_id = run_id_ + ":" + std::to_string(generation_) + ":" +
-            std::to_string(ws_session_id_) + ":" + market_id + ":terminal_hedge:" +
-            std::to_string(sequence);
-        std::ostringstream out;
-        const bool main_fill_available = main && main->target_depth_ok;
-        const bool hedge_fill_available = hedge && hedge->target_depth_ok;
-        const bool helper_evaluated = main && main_decision &&
-            main_decision->decision == "ACCEPT" && main->estimated_probability && hedge;
-        const bool full_cost_chain = helper_evaluated && result.total_cost > 0;
-        const auto optional = [&](const std::optional<double>& value) {
-            if (value && std::isfinite(*value)) out << *value;
-            else out << "null";
-        };
-        const auto available = [&](bool present, double value) {
-            if (present && std::isfinite(value)) out << value;
-            else out << "null";
-        };
-        out << std::setprecision(15)
-            << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
-            << ",\"event_id\":\"" << reference_ipc::escaped(event_id)
-            << "\",\"event_type\":\"" << (accepted ? "shadow_hedged_opportunity" : "shadow_hedge_eval")
-            << "\",\"strategy\":\"late_window_directional_ev\",\"hedge_strategy\":\"low_price_lottery_ev\""
-            << ",\"execution_mode\":\"terminal_hedged\",\"market_id\":\""
-            << reference_ipc::escaped(market_id) << "\",\"condition_id\":\""
-            << reference_ipc::escaped(market.condition_id) << "\",\"asset\":\""
-            << reference_ipc::escaped(market.asset) << "\",\"timeframe\":\""
-            << reference_ipc::escaped(market.interval) << "\",\"window\":\""
-            << reference_ipc::escaped(market.window) << "\",\"generation\":" << generation_
-            << ",\"session\":" << ws_session_id_ << ",\"evaluation_sequence\":" << sequence
-            << ",\"main_outcome\":\"" << main_outcome << "\",\"hedge_outcome\":\""
-            << hedge_outcome << "\",\"main_size\":" << size_ << ",\"hedge_size\":";
-        available(result.hedge_size > 0, result.hedge_size);
-        out << ",\"main_expected_fill_price\":";
-        available(main_fill_available, main ? main->expected_fill_price : 0);
-        out << ",\"hedge_expected_fill_price\":";
-        available(hedge_fill_available, hedge ? hedge->expected_fill_price : 0);
-        out << ",\"main_probability\":";
-        available(helper_evaluated, result.main_probability);
-        out << ",\"hedge_probability\":";
-        available(helper_evaluated, result.hedge_probability);
-        out << ",\"main_unit_cost\":";
-        available(helper_evaluated, result.main_unit_cost);
-        out << ",\"hedge_unit_cost\":";
-        available(helper_evaluated, result.hedge_unit_cost);
-        out << ",\"main_net_ev_per_share\":";
-        available(helper_evaluated, result.main_net_ev_per_share);
-        out << ",\"hedge_net_ev_per_share\":";
-        available(helper_evaluated, result.hedge_net_ev_per_share);
-        out << ",\"main_cost\":";
-        available(helper_evaluated, result.main_cost);
-        out << ",\"hedge_cost\":";
-        available(result.hedge_cost > 0, result.hedge_cost);
-        out << ",\"total_cost\":";
-        available(full_cost_chain, result.total_cost);
-        out << ",\"main_win_pnl\":";
-        available(full_cost_chain, result.main_win_pnl);
-        out << ",\"reversal_pnl\":";
-        available(full_cost_chain, result.reversal_pnl);
-        out << ",\"expected_portfolio_pnl\":";
-        available(full_cost_chain, result.expected_pnl);
-        out << ",\"worst_case_pnl\":";
-        available(full_cost_chain, std::min(result.main_win_pnl, result.reversal_pnl));
-        out << ",\"estimated_probability\":";
-        optional(main ? main->estimated_probability : std::nullopt);
-        out << ",\"volatility_per_sqrt_second\":";
-        optional(probability_input.volatility_per_sqrt_second);
-        out << ",\"model_sample_count\":" << probability_input.model_sample_count
-            << ",\"model_sample_span_seconds\":" << probability_input.model_sample_span_seconds
-            << ",\"settlement_reference\":";
-        optional(probability_input.settlement_reference);
-        out << ",\"price_to_beat\":";
-        optional(probability_input.price_to_beat);
-        out << ",\"reference_quorum_met\":"
-            << (main && main->reference_quorum_met ? "true" : "false")
-            << ",\"seconds_to_close\":" << (main ? main->seconds_to_close : 0)
-            << ",\"decision\":\"" << combined.decision << "\",\"reason\":\"" << reason
-            << "\",\"target_size\":" << size_ << ",\"config_version\":\"terminal-hedge-v1\""
-            << ",\"config_hash\":\"" << strategy_config_hash() << "\""
-            << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
-        if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
-    }
 
     void emit_complete_set_evaluations(
             const std::string& market_id, const Market& market,
             const Book& up_book, const Book& down_book,
             const std::map<std::string, strategy::EvaluationInput>& inputs,
             const std::optional<double>& up_probability,
-            const std::optional<double>& price_to_beat, double timestamp) {
+            double timestamp) {
         const auto up_found = inputs.find("Up");
         const auto down_found = inputs.find("Down");
         if (up_found == inputs.end() || down_found == inputs.end()) return;
         const auto& up = up_found->second;
         const auto& down = down_found->second;
-        auto& inventory = complete_set_inventory_[market_id];
-        double total_unmatched_notional = 0;
-        for (const auto& item : complete_set_inventory_)
-            total_unmatched_notional += item.second.up_cost + item.second.down_cost;
-        const double other_inventory_notional = std::max(
-            0.0, total_unmatched_notional - inventory.up_cost - inventory.down_cost);
-        const double available_global_notional = std::max(
-            0.0, inventory_max_total_unmatched_notional_ - other_inventory_notional);
-        const double available_market_notional = std::min(
-            inventory_max_unmatched_notional_, available_global_notional);
-        const std::string inventory_origin_hash =
-            inventory_origin_config_hashes_.count(market_id)
-                ? inventory_origin_config_hashes_.at(market_id)
-                : inventory_strategy_config_hash_;
-        const bool legacy_inventory =
-            (inventory.up_quantity > 1e-12 || inventory.down_quantity > 1e-12)
-            && inventory_origin_hash != inventory_strategy_config_hash_;
-
-        complete_set::RebalanceDecision rebalance;
-        if (!up_probability) {
-            rebalance.reason = "probability_model_unavailable";
-        } else if (!up.market_active || !up.market_tradable) {
-            rebalance.reason = "market_not_tradable";
-        } else if (!up.reference_quorum_met) {
-            rebalance.reason = up.reference_block_reason.empty()
-                ? "insufficient_reference_sources" : up.reference_block_reason;
-        } else if (!up.settlement_source_verified) {
-            rebalance.reason = "settlement_reference_unverified";
-        } else if (!up.clock_skew_ms ||
-                   std::abs(*up.clock_skew_ms) > up.maximum_clock_skew_ms) {
-            rebalance.reason = up.clock_skew_ms
-                ? "clock_skew_exceeded" : "clock_skew_unavailable";
-        } else if (up.book_age_ms > up.maximum_book_age_ms ||
-                   down.book_age_ms > down.maximum_book_age_ms) {
-            rebalance.reason = "clob_book_stale";
-        } else {
-            rebalance = complete_set::evaluate_rebalance({
-                inventory, size_, *up_probability,
-                up.expected_fill_price + up.fee_per_share + buffer_per_share_,
-                down.expected_fill_price + down.fee_per_share + buffer_per_share_,
-                up.liquidity, down.liquidity,
-                inventory_min_entry_edge_, inventory_min_entry_ev_roi_,
-                inventory_max_initial_price_, inventory_max_complement_gap_,
-                min_profit_, inventory_min_locked_roi_, available_market_notional,
-                legacy_inventory, inventory_legacy_max_guaranteed_loss_,
-                inventory_legacy_min_loss_reduction_ratio_,
-            });
-        }
-
-        double locked_profit = 0;
-        const bool inventory_was_empty =
-            inventory.up_quantity <= 1e-12 && inventory.down_quantity <= 1e-12;
-        if (rebalance.decision == "ACCEPT") {
-            if (inventory_was_empty)
-                inventory_origin_config_hashes_[market_id] = inventory_strategy_config_hash_;
-            if (rebalance.action.rfind("BUY_UP", 0) == 0) {
-                inventory.up_quantity += rebalance.quantity;
-                inventory.up_cost += rebalance.quantity * rebalance.unit_cost;
-            } else {
-                inventory.down_quantity += rebalance.quantity;
-                inventory.down_cost += rebalance.quantity * rebalance.unit_cost;
-            }
-            if (rebalance.projected_locked_quantity > 0) {
-                const double locked = std::min({
-                    rebalance.projected_locked_quantity,
-                    inventory.up_quantity,
-                    inventory.down_quantity,
-                });
-                const double up_average = inventory.up_cost /
-                    std::max(inventory.up_quantity, 1e-12);
-                const double down_average = inventory.down_cost /
-                    std::max(inventory.down_quantity, 1e-12);
-                locked_profit = locked * (1 - up_average - down_average);
-                inventory.up_quantity -= locked;
-                inventory.down_quantity -= locked;
-                inventory.up_cost = std::max(0.0, inventory.up_cost - locked * up_average);
-                inventory.down_cost = std::max(0.0, inventory.down_cost - locked * down_average);
-            }
-            save_complete_set_inventory();
-        }
-
-        strategy::Decision inventory_audit{
-            "inventory_rebalancing_arb", std::nullopt, std::nullopt,
-            rebalance.decision, rebalance.reason, {rebalance.reason},
-        };
-        const std::string inventory_key = market_id + "|inventory_rebalancing_arb";
-        if (should_emit_strategy(inventory_key, inventory_audit, timestamp)) {
-            const unsigned long long sequence = ++strategy_evaluation_sequence_;
-            std::ostringstream out;
-            out << std::setprecision(15)
-                << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
-                << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':'
-                << ws_session_id_ << ':' << market_id << ":inventory:" << sequence
-                << "\",\"event_type\":\""
-                << (rebalance.decision == "ACCEPT"
-                    ? "shadow_inventory_action" : "shadow_inventory_eval")
-                << "\",\"strategy\":\"inventory_rebalancing_arb\",\"market_id\":\""
-                << reference_ipc::escaped(market_id) << "\",\"condition_id\":\""
-                << reference_ipc::escaped(market.condition_id) << "\",\"asset\":\""
-                << reference_ipc::escaped(market.asset) << "\",\"timeframe\":\""
-                << reference_ipc::escaped(market.interval) << "\",\"window\":\""
-                << reference_ipc::escaped(market.window) << "\",\"generation\":"
-                << generation_ << ",\"session\":" << ws_session_id_
-                << ",\"close_ts\":" << market.close_ts
-                << ",\"settlement_source\":\""
-                << reference_ipc::escaped(market.settlement_source)
-                << "\",\"price_to_beat\":";
-            if (price_to_beat) out << *price_to_beat;
-            else out << "null";
-            out
-                << ",\"evaluation_sequence\":" << sequence << ",\"action\":\""
-                << rebalance.action << "\",\"outcome\":\"" << rebalance.outcome
-                << "\",\"quantity\":" << rebalance.quantity
-                << ",\"unit_cost\":" << rebalance.unit_cost
-                << ",\"estimated_probability\":" << rebalance.probability
-                << ",\"probability_edge\":" << rebalance.probability_edge
-                << ",\"expected_value\":" << rebalance.expected_value
-                << ",\"expected_value_roi\":" << rebalance.expected_value_roi
-                << ",\"maximum_loss\":" << rebalance.maximum_loss
-                << ",\"complement_gap\":" << rebalance.complement_gap
-                << ",\"projected_locked_quantity\":" << rebalance.projected_locked_quantity
-                << ",\"projected_locked_profit\":" << rebalance.projected_locked_profit
-                << ",\"projected_locked_roi\":" << rebalance.projected_locked_roi
-                << ",\"guaranteed_loss\":" << rebalance.guaranteed_loss
-                << ",\"loss_reduction_ratio\":" << rebalance.loss_reduction_ratio
-                << ",\"realized_locked_profit\":" << locked_profit
-                << ",\"residual_up_quantity\":" << inventory.up_quantity
-                << ",\"residual_down_quantity\":" << inventory.down_quantity
-                << ",\"residual_up_cost\":" << inventory.up_cost
-                << ",\"residual_down_cost\":" << inventory.down_cost
-                << ",\"total_unmatched_notional\":" << total_unmatched_notional
-                << ",\"available_global_unmatched_notional\":" << available_global_notional
-                << ",\"inventory_origin_config_hash\":\""
-                << reference_ipc::escaped(inventory_origin_hash)
-                << "\",\"legacy_inventory\":" << (legacy_inventory ? "true" : "false")
-                << ",\"decision\":\"" << rebalance.decision << "\",\"reason\":\""
-                << rebalance.reason << "\",\"config_version\":\"inventory-rebalancing-v1\""
-                << ",\"config_hash\":\"" << inventory_strategy_config_hash_ << "\""
-                << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
-            if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
-            else record_session_strategy("inventory_rebalancing_arb", rebalance.decision);
-        }
-
         complete_set::MakerDecision maker;
         if (!up_probability) {
             maker.reason = "probability_model_unavailable";
@@ -1177,13 +865,10 @@ private:
                    down.book_age_ms > down.maximum_book_age_ms) {
             maker.reason = "clob_book_stale";
         } else {
-            const double inventory_skew = (
-                inventory.up_quantity - inventory.down_quantity
-            ) / std::max(size_, 1e-9) * maker_inventory_skew_per_unit_;
             maker = complete_set::evaluate_maker({
                 *up_probability, best_bid(up_book), best_ask(up_book),
                 best_bid(down_book), best_ask(down_book), maker_tick_size_,
-                maker_quote_half_spread_, inventory_skew,
+                maker_quote_half_spread_, 0.0,
                 maker_expected_rebate_per_pair_, maker_minimum_pair_edge_,
                 maker_both_fill_probability_, maker_orphan_loss_,
             });
@@ -2832,8 +2517,6 @@ private:
         "INVENTORY_LEGACY_MIN_LOSS_REDUCTION_RATIO", "0.75");
     double maker_tick_size_ = environment_double("MAKER_TICK_SIZE", "0.01");
     double maker_quote_half_spread_ = environment_double("MAKER_QUOTE_HALF_SPREAD", "0.02");
-    double maker_inventory_skew_per_unit_ = environment_double(
-        "MAKER_INVENTORY_SKEW_PER_UNIT", "0.005");
     double maker_expected_rebate_per_pair_ = environment_double(
         "MAKER_EXPECTED_REBATE_PER_PAIR", "0");
     double maker_minimum_pair_edge_ = environment_double("MAKER_MINIMUM_PAIR_EDGE", "0.01");

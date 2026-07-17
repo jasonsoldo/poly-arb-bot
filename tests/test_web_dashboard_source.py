@@ -65,46 +65,41 @@ def test_dashboard_renders_three_strategies_without_combining_acceptance():
         assert f'id="{element_id}"' in source
 
 
-def test_dashboard_separates_complete_set_arbitrage_strategies():
+def test_dashboard_separates_primary_strategy_cards_from_arbitrage_observers():
     source = Path("web/index.html").read_text(encoding="utf-8")
-    for strategy in (
-        "BUY BOTH + MERGE", "SPLIT + SELL BOTH",
-        "INVENTORY REBALANCE", "MAKER COMPLETE SET",
-    ):
+    for strategy in ("BUY BOTH + MERGE", "SPLIT + SELL BOTH", "MAKER COMPLETE SET"):
         assert strategy in source
     for element_id in ("splitSellCard", "inventoryCard", "makerCard"):
-        assert f'id="{element_id}"' in source
-    assert "NO FILLS INFERRED" in source
-    assert "GEOMETRY" in source
+        assert f'id="{element_id}"' not in source
+    assert "INVENTORY REBALANCE" not in source
+    assert "RESEARCH ONLY / NOT ORDERS OR PNL" in source
 
 
 def test_dashboard_header_uses_unambiguous_complete_set_metrics():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for label in (
-        "BUY+MERGE EVALS", "SPLIT+SELL ACCEPT", "INVENTORY ACTIONS",
-        "MAKER GEOMETRY", "LOCKED COMPLETE", "REAL ORDERS",
+        "BUY+MERGE EVALS", "REPEATABLE PATTERNS", "MAKER GEOMETRY",
+        "CURRENT LOCKED COMPLETE", "REAL ORDERS",
     ):
         assert label in source
     assert "SIM OPENED" not in source
     assert "engine_session" in source
     assert "session_strategy_counts" in source
     assert "session.strategy_counts?.paired_lock?.evaluations" in source
-    assert "session.strategy_counts?.split_sell_lock?.accepts" in source
     assert "split_sell_near_misses" in source
     assert "required_gross_improvement_bps" in source
-    assert "session.strategy_counts?.inventory_rebalancing_arb?.accepts" in source
+    assert "inventory_rebalancing_arb" not in source
     assert "maker_quote_geometry_candidates" in source
     assert "locked_complete" in source
 
 
-def test_dashboard_separates_current_session_history_and_legacy_inventory():
+def test_dashboard_separates_current_session_history_without_inventory_strategy():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for label in (
         "CURRENT CONFIG PERFORMANCE", "SESSION EVAL", "HISTORY EVAL",
-        "LEGACY INVENTORY", "LEGACY COST / MAX LOSS", "CURRENT POSITIONS / COST",
     ):
         assert label in source
-    assert "inventory_cohorts" in source
+    assert "LEGACY INVENTORY" not in source
     assert "historical_completed_excluded" in source
 
 
@@ -129,7 +124,7 @@ def test_dashboard_renders_real_arbitrage_funnel_and_repeatability_evidence():
     ):
         assert f'id="{element_id}"' in source
     for label in (
-        "ARBITRAGE DISCOVERY FUNNEL", "REPEATABLE PATTERN RESEARCH",
+        "REPEATABLE ARBITRAGE RESEARCH", "REPEATABLE PATTERN RESEARCH",
         "INDEPENDENT EPISODES", "LATENCY SURVIVED", "SIZE + DELAY COUNTERFACTUALS",
         "RESEARCH ONLY / NOT ORDERS OR PNL",
     ):

@@ -177,15 +177,15 @@ def test_acceptance_fails_when_probability_model_never_evaluated():
     assert "probability_models_evaluated" in failed
 
 
-def test_acceptance_marks_missing_terminal_hedge_evaluations_incomplete():
+def test_acceptance_ignores_retired_terminal_hedge_counter():
     status = valid_status()
     status["strategy_counts"]["late_window_directional_ev"]["terminal_hedge_evaluations"] = 0
 
     report = evaluate_status(status)
 
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
-    assert failed == {"terminal_hedge_evaluated"}
-    assert report["status"] == "INCOMPLETE"
+    assert failed == set()
+    assert report["status"] == "PASS"
 
 
 def test_acceptance_marks_missing_complete_set_strategy_evaluations_incomplete():

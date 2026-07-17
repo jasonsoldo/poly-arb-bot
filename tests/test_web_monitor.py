@@ -6,7 +6,7 @@ import poly_arb_bot.web_monitor as web_monitor
 from poly_arb_bot.web_monitor import _jsonl, _strategy_counts, build_status
 
 
-def test_strategy_counts_separates_terminal_hedge_from_raw_model_accepts(tmp_path):
+def test_strategy_counts_ignores_retired_terminal_hedge_events(tmp_path):
     path = tmp_path / "strategy.jsonl"
     rows = [
         {"event_id": "raw", "event_type": "shadow_eval",
@@ -26,16 +26,11 @@ def test_strategy_counts_separates_terminal_hedge_from_raw_model_accepts(tmp_pat
 
     assert counts["evaluations"] == 1
     assert counts["accepts"] == 1
-    assert counts["terminal_hedge_evaluations"] == 2
-    assert counts["terminal_hedge_accepts"] == 1
-    assert counts["terminal_hedge_rejections"] == 1
-    assert result["_terminal_hedge"]["latest"]["event_id"] == "hedge-accept"
-    assert result["_terminal_hedge"]["rejection_reasons"] == {
-        "hedge_price_above_limit": 1
-    }
+    assert "terminal_hedge_evaluations" not in counts
+    assert "_terminal_hedge" not in result
 
 
-def test_web_status_exposes_terminal_hedge_cost_chain(tmp_path):
+def test_web_status_does_not_expose_retired_terminal_hedge(tmp_path):
     data = tmp_path / "data"
     logs = tmp_path / "logs"
     data.mkdir(); logs.mkdir()
@@ -58,11 +53,9 @@ def test_web_status_exposes_terminal_hedge_cost_chain(tmp_path):
 
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
 
-    assert status["current_terminal_hedge"]["event_id"] == "hedged"
-    assert status["current_terminal_hedge"]["reversal_pnl"] == -3.5
-    assert status["terminal_hedge"]["latest"]["event_id"] == "hedged"
-    assert status["counts"]["terminal_hedge_evaluations"] == 1
-    assert status["counts"]["terminal_hedge_accepts"] == 1
+    assert "current_terminal_hedge" not in status
+    assert "terminal_hedge" not in status
+    assert "terminal_hedge_evaluations" not in status["counts"]
 
 
 def test_web_status_ignores_snapshot_signals_without_current_market(tmp_path):
@@ -571,8 +564,6 @@ def test_web_status_keeps_three_strategy_statistics_separate(tmp_path):
         "evaluations": 1, "accepts": 1, "rejections": 0,
         "model_evaluations": 1, "latest_model_evaluated": True,
         "unique_opportunities": 1, "active_opportunities": 1,
-        "terminal_hedge_evaluations": 0, "terminal_hedge_accepts": 0,
-        "terminal_hedge_rejections": 0,
     }
     assert status["strategy_counts"]["low_price_lottery_ev"] == {"evaluations": 1, "accepts": 0, "rejections": 1, "model_evaluations": 1, "latest_model_evaluated": True, "unique_opportunities": 0, "active_opportunities": 0}
     assert status["counts"]["shadow_evaluations"] == 3
@@ -648,19 +639,19 @@ def test_web_status_exposes_unambiguous_complete_set_counts(tmp_path):
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
     counts = status["counts"]
 
-    assert counts["total_strategy_evaluations"] == 6
+    assert counts["total_strategy_evaluations"] == 4
     assert counts["probability_strategy_evaluations"] == 1
     assert counts["paired_evaluations"] == 2
-    assert counts["inventory_evaluations"] == 2
-    assert counts["inventory_actions"] == 1
+    assert "inventory_evaluations" not in counts
+    assert "inventory_actions" not in counts
     assert counts["maker_evaluations"] == 1
     assert counts["maker_quote_candidates"] == 1
     assert counts["maker_quote_geometry_candidates"] == 7
     assert counts["maker_trade_events"] == 11
     assert counts["maker_single_leg_trade_throughs"] == 3
     assert counts["maker_both_leg_trade_throughs"] == 1
-    assert counts["complete_set_evaluations"] == 5
-    assert counts["locked_complete"] == 2
+    assert counts["complete_set_evaluations"] == 3
+    assert counts["locked_complete"] == 1
 
 
 def test_web_status_exposes_split_sell_as_independent_locked_method(tmp_path):
@@ -905,9 +896,9 @@ def test_web_status_separates_engine_session_counts_and_legacy_inventory(tmp_pat
     status = build_status(data, tmp_path / "missing.jsonl", state / "orders.json")
 
     assert status["engine_session"]["run_id"] == "run-1"
-    assert status["engine_session"]["evaluations"] == 20
+    assert status["engine_session"]["evaluations"] == 12
     assert status["counts"]["session_paired_evaluations"] == 12
-    assert status["counts"]["session_inventory_actions"] == 1
+    assert "session_inventory_actions" not in status["counts"]
     assert status["session_strategy_counts"]["maker_complete_set_arb"] == {
         "evaluations": 0, "accepts": 0, "rejections": 0,
     }

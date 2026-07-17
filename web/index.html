@@ -93,8 +93,7 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
     <div class="headstat"><label>MARKETS</label><b id="markets">N/A</b></div>
     <div class="headstat"><label>SESSION EVALS</label><b id="raw">N/A</b></div>
     <div class="headstat"><label>BUY+MERGE EVALS</label><b id="pairedEvals">N/A</b></div>
-    <div class="headstat"><label>SPLIT+SELL ACCEPT</label><b id="splitSellAccepts">N/A</b></div>
-    <div class="headstat"><label>INVENTORY ACTIONS</label><b id="inventoryActions">N/A</b></div>
+    <div class="headstat"><label>REPEATABLE PATTERNS</label><b id="repeatableCount">N/A</b></div>
     <div class="headstat"><label>MAKER GEOMETRY</label><b id="makerQuotes">N/A</b></div>
     <div class="headstat"><label>CURRENT LOCKED COMPLETE</label><b id="lockedComplete">N/A</b></div>
     <div class="headstat"><label>REAL ORDERS</label><b id="realOrders">0</b></div>
@@ -148,20 +147,13 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
   </section>
 
   <section class="panel strategies">
-    <h2>INDEPENDENT STRATEGY STATUS / CURRENT SESSION + HISTORY</h2>
+    <h2>PRIMARY STRATEGY STATUS / THREE INDEPENDENT MODELS</h2>
     <div class="strategy-grid">
       <div class="strategy-card" id="directionalCard"></div>
       <div class="strategy-card" id="lotteryCard"></div>
       <div class="strategy-card" id="pairedCard"></div>
-      <div class="strategy-card" id="splitSellCard"></div>
-      <div class="strategy-card" id="inventoryCard"></div>
-      <div class="strategy-card" id="makerCard"></div>
     </div>
     <div class="flow" id="pipelineSteps"></div>
-    <div class="near-misses">
-      <h2>SPLIT + SELL / NEAREST LOCKED ARBITRAGE</h2>
-      <div id="splitSellNearMisses"></div>
-    </div>
   </section>
 
   <section class="panel probability-panel">
@@ -176,9 +168,13 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
   </section>
 
   <section class="panel arb-research">
-    <h2>ARBITRAGE DISCOVERY FUNNEL</h2>
+    <h2>REPEATABLE ARBITRAGE RESEARCH</h2>
     <span class="sub">RESEARCH ONLY / NOT ORDERS OR PNL</span>
     <div id="arbitrageFunnels" class="strategy-grid"></div>
+    <div class="near-misses">
+      <h2>SPLIT + SELL / NEAREST LOCKED ARBITRAGE</h2>
+      <div id="splitSellNearMisses"></div>
+    </div>
     <div class="near-misses">
       <h2>REPEATABLE PATTERN RESEARCH</h2>
       <div id="repeatablePatterns"></div>
@@ -192,18 +188,6 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
   <section class="panel replay">
     <h2>POLYMARKET REPLAY / SHADOW LEDGER</h2>
     <div class="ledger" id="tradeLedger"></div>
-    <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:9px">
-      <h2>TERMINAL DIRECTIONAL + REVERSAL HEDGE / RESEARCH</h2>
-      <div class="command-grid">
-        <div><label>MARKET</label><b id="hedgeMarket">N/A</b></div>
-        <div><label>MAIN</label><b id="hedgeMain">N/A</b></div>
-        <div><label>PROTECTION</label><b id="hedgeProtection">N/A</b></div>
-        <div><label>EXPECTED PNL</label><b id="hedgeExpected">N/A</b></div>
-        <div><label>SECONDS</label><b id="hedgeSeconds">N/A</b></div>
-      </div>
-      <div id="hedgeAudit" class="sub" style="margin-top:7px"></div>
-      <div id="hedgeReason" class="sub"></div>
-    </div>
   </section>
 
   <section class="panel references">
@@ -224,16 +208,6 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
     <div class="health-grid" id="health"></div>
   </section>
 
-  <section class="panel legacy">
-    <h2>LEGACY INVENTORY / TAIL-RISK CONTAINMENT</h2>
-    <div class="inventory-summary">
-      <div><label>LEGACY POSITIONS</label><b id="legacyPositions">0</b></div>
-      <div><label>LEGACY COST / MAX LOSS</label><b id="legacyCost">N/A</b></div>
-      <div><label>CURRENT POSITIONS / COST</label><b id="currentInventory">N/A</b></div>
-      <div><label>NEXT CLOSE</label><b id="legacyNextClose">N/A</b></div>
-    </div>
-    <div class="inventory-list" id="inventoryRows"></div>
-  </section>
 
   <section class="panel pnl-panel">
     <h2>PNL METER / CURRENT CONFIG</h2>
@@ -280,9 +254,6 @@ function strategyCard(id,title,key,d){
   const reasons=Object.entries(recent.rejection_reasons||{}).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([k,v])=>`${k} ${v}`).join(' / ');
   const probability=['late_window_directional_ev','low_price_lottery_ev'].includes(key);
   let detail='COMPLETE-SET MATH';
-  if(key==='inventory_rebalancing_arb')detail=`${latest.action||'HOLD'} / RISK ${money(latest.maximum_loss)} / LOCK ${money(latest.projected_locked_profit)}`;
-  if(key==='split_sell_lock')detail=`BIDS ${fmt(latest.combined_bid_vwap,3)} / HURDLE ${fmt(latest.observed_profit_threshold_bid_sum,3)} / SHORT ${money(latest.profit_threshold_shortfall)}`;
-  if(key==='maker_complete_set_arb')detail=`PAIR ${fmt(latest.pair_quote_cost,3)} / GEOMETRY ${latest.quote_geometry_qualified?'PASS':'BLOCKED'} / NO FILLS INFERRED`;
   if(probability){
     const obs=d.probability_observations?.by_strategy?.[key]||{};
     detail=`OBS PENDING ${obs.pending??0} / SETTLED ${obs.settled??0} / BRIER ${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)} / CALIBRATION ONLY`;
@@ -340,8 +311,7 @@ function render(d){
   $('markets').textContent=assets.reduce((n,a)=>n+frames.reduce((q,f)=>q+Number(m[a]?.[f]?.count||0),0),0);
   $('raw').textContent=session.evaluations??'N/A';
   $('pairedEvals').textContent=session.strategy_counts?.paired_lock?.evaluations??'N/A';
-  $('splitSellAccepts').textContent=session.strategy_counts?.split_sell_lock?.accepts??'N/A';
-  $('inventoryActions').textContent=session.strategy_counts?.inventory_rebalancing_arb?.accepts??'N/A';
+  $('repeatableCount').textContent=(d.arbitrage_research?.repeatable_patterns||[]).length;
   $('makerQuotes').textContent=c.maker_quote_geometry_candidates??'N/A';
   $('lockedComplete').textContent=c.locked_complete??'N/A';
   $('realOrders').textContent=c.executed_orders??0;
@@ -368,9 +338,6 @@ function render(d){
   strategyCard('directionalCard','DIRECTIONAL EV','late_window_directional_ev',d);
   strategyCard('lotteryCard','LOW-PRICE LOTTERY','low_price_lottery_ev',d);
   strategyCard('pairedCard','BUY BOTH + MERGE','paired_lock',d);
-  strategyCard('splitSellCard','SPLIT + SELL BOTH','split_sell_lock',d);
-  strategyCard('inventoryCard','INVENTORY REBALANCE','inventory_rebalancing_arb',d);
-  strategyCard('makerCard','MAKER COMPLETE SET','maker_complete_set_arb',d);
   renderProbabilityCalibration(d);
   $('splitSellNearMisses').innerHTML=(d.split_sell_near_misses||[]).map(x=>`<div class="near-row">
     <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span>
@@ -384,15 +351,6 @@ function render(d){
   $('pipelineSteps').innerHTML=Object.entries(labels).map(([k,x],i)=>`<div class="step ${pipeline[k]==='PASS'?'on':pipeline[k]==='BLOCKED'?'block':''}"><i>0${i+1}</i>${x}<small class="sub">${pipeline[k]||'N/A'}</small></div>`).join('');
   $('tradeLedger').innerHTML=(d.trade_ledger||[]).map(x=>`<div class="trade"><span>${esc(String(x.market_id||'').slice(0,20))}</span><span>${new Date(x.ts*1000).toLocaleTimeString()}</span><b class="${Number(x.pnl)>=0?'good':'bad'}">${money(x.pnl)}</b><span>${esc(x.strategy||'N/A')}</span></div>`).join('')||'<div class="empty">NO CURRENT CONFIG COMPLETIONS</div>';
 
-  const th=d.current_terminal_hedge||{},hasMain=Boolean(th.main_outcome);
-  $('hedgeMarket').textContent=th.market_id?String(th.market_id).slice(0,16):'N/A';
-  $('hedgeMain').textContent=hasMain?`${th.main_outcome} ${fmt(th.main_expected_fill_price,3)}`:'N/A';
-  $('hedgeProtection').textContent=hasMain?`${th.hedge_outcome||'N/A'} ${fmt(th.hedge_expected_fill_price,3)}`:'N/A';
-  $('hedgeExpected').textContent=hasMain?money(th.expected_portfolio_pnl):'N/A';
-  $('hedgeSeconds').textContent=hasMain?fmt(th.seconds_to_close,1)+'s':'N/A';
-  $('hedgeAudit').textContent=hasMain?`COST ${money(th.total_cost)} / MAIN-WIN ${money(th.main_win_pnl)} / REVERSAL ${money(th.reversal_pnl)} / WORST ${money(th.worst_case_pnl)}`:'NO COMBINED EVALUATION';
-  $('hedgeReason').textContent=`${th.reason||'N/A'} / SESSION HEDGE ACCEPT ${c.terminal_hedge_accepts??0} / REAL ORDERS 0`;
-
   const assetPnls=d.asset_latest_pnl||{};
   $('marketMatrix').innerHTML='<tr><th>ASSET</th>'+frames.map(f=>`<th>${f.toUpperCase()}</th>`).join('')+'<th>LATEST SIM PNL</th></tr>'+assets.map(a=>'<tr><td>'+a+'</td>'+frames.map(f=>{const cell=m[a]?.[f]||{},ready=cell.reference_ready??0,total=cell.count??0;return `<td class="${total?'hot':''}">${total}<small class="sub">DIR REF ${ready}/${total}</small></td>`}).join('')+assetPnlCell(assetPnls[a])+'</tr>').join('');
   $('referencePrices').innerHTML=assets.map(a=>{const v=refs[a]||{};return `<div>${a}</div>${['binance','coinbase','kraken','chainlink'].map(s=>`<div>${sourceState(v,s)}</div>`).join('')}`}).join('');
@@ -404,11 +362,6 @@ function render(d){
   const cr=d.clob_readiness||{},execution=d.shadow_execution||{};
   const healthRows=[['DISCOVERED',cr.discovered_markets],['PAIRED MARKETS READY',cr.paired_markets_ready],['NOT READY',cr.not_ready],['WAIT UP',cr.waiting_up_snapshot],['WAIT DOWN',cr.waiting_down_snapshot],['SUBSCRIPTION GEN',health.subscription_generation],['WS SESSION',health.ws_session_id],['RESYNCS',health.resyncs],['MAKER GEOMETRY',c.maker_quote_geometry_candidates],['TRADE EVENTS',c.maker_trade_events],['ONE-LEG THROUGH',c.maker_single_leg_trade_throughs],['BOTH-LEGS THROUGH',c.maker_both_leg_trade_throughs],['AUDIT QUEUE',health.strategy_audit_queue],['BACKPRESSURE',health.strategy_audit_backpressure],['EXECUTION STATE',execution.state||'IDLE'],['REAL FILLS',execution.real_fills??0]];
   $('health').innerHTML=healthRows.map(x=>`<div class="health-row"><span>${x[0]}</span><b>${x[1]??'N/A'}</b></div>`).join('');
-
-  const cohorts=life.inventory_cohorts||{},legacy=cohorts.legacy||{},current=cohorts.current||{},inventory=life.complete_set_inventory||[];
-  $('legacyPositions').textContent=legacy.positions??0;$('legacyCost').textContent=`${money(legacy.cost)} / ${money(legacy.maximum_loss)}`;
-  $('currentInventory').textContent=`${current.positions??0} / ${money(current.cost)}`;$('legacyNextClose').textContent=duration(legacy.next_close_seconds);
-  $('inventoryRows').innerHTML=inventory.map(x=>`<div class="inventory-row"><b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'')}</span><span class="${x.cohort==='LEGACY'?'warn':'good'}">${x.cohort} ${esc(x.action||'HOLD')}</span><span>${money(x.cost)}</span><span>${duration(x.seconds_to_close)}</span></div>`).join('')||'<span class="na">NO OPEN INVENTORY</span>';
 
   const maxEquity=Math.max(1,...(d.equity_curve||[]).map(x=>Math.abs(Number(x.equity)||0))),pnl=Number(p.simulated_pnl||0);
   $('pnlMeter').innerHTML=`<div class="pnl-meter"><span>SIM PNL</span><div class="track"><div class="fill" style="width:${Math.min(100,Math.abs(pnl)/maxEquity*100)}%"></div></div><b class="${pnl>=0?'good':'bad'}">${money(p.simulated_pnl)}</b></div>

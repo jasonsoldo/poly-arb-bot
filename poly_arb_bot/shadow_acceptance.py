@@ -13,9 +13,7 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
     reasons = shadow.get("rejection_reasons", {})
     strategy_counts = status.get("strategy_counts", {})
     strategy_names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
-    complete_set_strategy_names = (
-        "split_sell_lock", "inventory_rebalancing_arb", "maker_complete_set_arb",
-    )
+    complete_set_strategy_names = ("split_sell_lock", "maker_complete_set_arb")
     strategy_rows = [strategy_counts.get(name, {}) for name in strategy_names]
     probability_rows = [strategy_counts.get(name, {}) for name in strategy_names[:2]]
     counts = status.get("counts", {})
@@ -123,10 +121,6 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                        for row in strategy_rows)},
         {"name": "probability_models_evaluated",
          "passed": all(row.get("model_evaluations", 0) > 0 for row in probability_rows)},
-        {"name": "terminal_hedge_evaluated",
-         "passed": strategy_counts.get("late_window_directional_ev", {}).get(
-             "terminal_hedge_evaluations", 0
-         ) > 0},
         {"name": "complete_set_strategies_evaluated",
          "passed": all(
              strategy_counts.get(name, {}).get("evaluations", 0) > 0
@@ -136,7 +130,7 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
     passed = all(item["passed"] for item in checks)
     incomplete_checks = {"analytics_ready", "market_data_present", "audit_data_present",
                          "three_strategy_evaluations", "probability_models_evaluated",
-                         "low_latency_observed", "terminal_hedge_evaluated"}
+                         "low_latency_observed"}
     incomplete_checks.add("complete_set_strategies_evaluated")
     incomplete_only = all(item["passed"] or item["name"] in incomplete_checks for item in checks)
     status = "PASS" if passed else "INCOMPLETE" if incomplete_only else "FAIL"
@@ -146,12 +140,6 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                         "evaluations": shadow.get("evaluations", 0),
                         "strategy_evaluations": {name: strategy_counts.get(name, {}).get("evaluations", 0)
                                                  for name in strategy_names + complete_set_strategy_names},
-                        "terminal_hedge_evaluations": strategy_counts.get(
-                            "late_window_directional_ev", {}
-                        ).get("terminal_hedge_evaluations", 0),
-                        "terminal_hedge_accepts": strategy_counts.get(
-                            "late_window_directional_ev", {}
-                        ).get("terminal_hedge_accepts", 0),
                         "duplicates": shadow.get("duplicate_events", 0),
                         "reference_ipc_receive_age_ms_p95": reference_age_p95,
                         "clob_to_strategy_evaluation_us_p95": strategy_latency_p95,
