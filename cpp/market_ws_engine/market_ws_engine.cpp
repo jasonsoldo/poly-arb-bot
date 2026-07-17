@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -42,7 +43,8 @@ using boost::property_tree::ptree;
 struct Book {
     std::map<double, double> bids, asks;
     bool initialized = false, ws_snapshot = false;
-    double updated_at = 0, source_timestamp_ms = 0;
+    double updated_at = 0, source_timestamp_ms = 0, snapshot_timestamp_ms = 0;
+    double crossed_since = 0;
     std::string hash;
     unsigned long long generation = 0, version = 0;
 };
@@ -55,8 +57,6 @@ struct Market {
     double split_sell_active_since = 0, split_sell_last_audit = 0;
     unsigned long long last_strategy_up_version = 0, last_strategy_down_version = 0;
     unsigned long long last_strategy_reference_revision = 0, last_strategy_time_bucket = 0;
-    unsigned long long last_split_sell_up_version = 0;
-    unsigned long long last_split_sell_down_version = 0;
     bool accepting_orders = true;
     Market() = default;
     Market(const std::string& up_token, const std::string& down_token) : up(up_token), down(down_token) {}
@@ -434,10 +434,12 @@ void set_levels(Book& book, const ptree& rows, bool bid, bool clear) {
 }
 
 bool update_level(Book& book, const ptree& row) {
-    auto& side = row.get<std::string>("side", "") == "BUY" ? book.bids : book.asks;
+    const std::string direction = row.get<std::string>("side", "");
+    if (direction != "BUY" && direction != "SELL") return false;
+    auto& side = direction == "BUY" ? book.bids : book.asks;
     const double price = number(row, "price"), size = number(row, "size");
-    if (size < 0) return false;
-    if (size == 0 && !side.count(price)) return false;
+    if (!std::isfinite(price) || price <= 0 || !std::isfinite(size) || size < 0)
+        return false;
     if (size == 0) side.erase(price); else side[price] = size;
     return true;
 }
@@ -574,7 +576,7 @@ public:
             maker_strategy_config_hash_ + "|" + std::to_string(size_) + "|" +
             std::to_string(buffer_per_share_));
         split_sell_strategy_config_hash_ = sha256_hex(
-            paired_config_hash_ + "|split_sell|" +
+            paired_config_hash_ + "|split_sell_v2|" +
             std::to_string(split_sell_buffer_per_share_));
         load_complete_set_inventory();
         strategy_accept_heartbeat_seconds_ = environment_double("STRATEGY_ACCEPT_AUDIT_HEARTBEAT_SECONDS", "5");
@@ -1574,6 +1576,8 @@ private:
             books_[asset].ws_snapshot = true;
             books_[asset].updated_at = now_seconds();
             books_[asset].source_timestamp_ms = message.get<double>("timestamp", 0);
+            books_[asset].snapshot_timestamp_ms = books_[asset].source_timestamp_ms;
+            books_[asset].crossed_since = 0;
             books_[asset].hash = message.get<std::string>("hash", "");
             ++books_[asset].version;
             last_clob_mutation_at_ = std::chrono::steady_clock::now();
@@ -1583,16 +1587,25 @@ private:
             auto changes = message.get_child_optional("price_changes");
             if (!changes) return;
             bool changed = false;
+            std::set<std::string> touched_tokens;
+            std::map<std::string, std::string> resync_reasons;
             for (const auto& item : *changes) {
                 const auto& row = item.second; const std::string token = row.get<std::string>("asset_id", asset);
                 if (!books_.count(token) || books_[token].generation != generation_) continue;
                 if (!books_[token].ws_snapshot) continue;
-                if (source_timestamp && books_[token].source_timestamp_ms && source_timestamp < books_[token].source_timestamp_ms) {
-                    resync_token(token, "timestamp_rollback");
+                if (resync_reasons.count(token)) continue;
+                if (source_timestamp && books_[token].snapshot_timestamp_ms &&
+                    source_timestamp <= books_[token].snapshot_timestamp_ms) {
+                    ++stale_price_changes_ignored_;
+                    continue;
+                }
+                if (source_timestamp && books_[token].source_timestamp_ms &&
+                    source_timestamp < books_[token].source_timestamp_ms) {
+                    ++stale_price_changes_ignored_;
                     continue;
                 }
                 if (!update_level(books_[token], row)) {
-                    resync_token(token, "invalid_level_update");
+                    resync_reasons[token] = "invalid_level_update";
                     continue;
                 }
                 books_[token].updated_at = now_seconds();
@@ -1600,8 +1613,20 @@ private:
                 books_[token].hash = row.get<std::string>("hash", books_[token].hash);
                 ++books_[token].version;
                 changed = true;
-                if (crossed(books_[token])) resync_token(token, "crossed_book");
+                touched_tokens.insert(token);
             }
+            const double batch_applied_at = now_seconds();
+            for (const auto& token : touched_tokens) {
+                if (resync_reasons.count(token)) continue;
+                if (crossed(books_[token])) {
+                    if (books_[token].crossed_since == 0)
+                        books_[token].crossed_since = batch_applied_at;
+                } else {
+                    books_[token].crossed_since = 0;
+                }
+            }
+            for (const auto& item : resync_reasons)
+                resync_token(item.first, item.second);
             if (changed) last_clob_mutation_at_ = std::chrono::steady_clock::now();
             ++price_changes_;
         } else if (type == "last_trade_price" && books_.count(asset)) {
@@ -1614,8 +1639,18 @@ private:
     void evaluate() {
         for (auto& item : markets_) {
             Book& up_book = books_[item.second.up]; Book& down_book = books_[item.second.down];
+            const double timestamp = now_seconds();
+            bool crossed_book_pending = false;
+            for (const auto& token : {item.second.up, item.second.down}) {
+                Book& book = books_[token];
+                if (!book.ws_snapshot || !crossed(book)) continue;
+                crossed_book_pending = true;
+                if (book.crossed_since == 0) book.crossed_since = timestamp;
+                if (timestamp - book.crossed_since >= 0.5)
+                    resync_token(token, "crossed_book");
+            }
+            if (crossed_book_pending) continue;
             if (!up_book.ws_snapshot || !down_book.ws_snapshot) {
-                const double timestamp = now_seconds();
                 if (item.second.last_reason != "book_uninitialized" || timestamp - item.second.last_audit >= 5) {
                     std::cout << "SHADOW_EVAL\tmarket=" << item.first << "\treason=book_uninitialized\tfok=0\n" << std::flush;
                     item.second.last_reason = "book_uninitialized";
@@ -1623,7 +1658,6 @@ private:
                 }
                 continue;
             }
-            const double timestamp = now_seconds();
             const double up_age_ms = std::max(0.0, (timestamp - up_book.updated_at) * 1000);
             const double down_age_ms = std::max(0.0, (timestamp - down_book.updated_at) * 1000);
             const double book_state_age_ms = std::max(up_age_ms, down_age_ms);
@@ -1770,7 +1804,9 @@ private:
                     : seconds_to_close > 7200
                         ? "too_early"
                         : split_sell.reason;
-            if (split_sell_good && item.second.split_sell_active_since == 0)
+            const bool split_sell_was_active =
+                item.second.split_sell_active_since > 0;
+            if (split_sell_good && !split_sell_was_active)
                 item.second.split_sell_active_since = timestamp;
             if (!split_sell_good) item.second.split_sell_active_since = 0;
             if (
@@ -1844,7 +1880,7 @@ private:
                            << ",\"books_synced\":"
                            << (books_synced ? "true" : "false")
                            << ",\"seconds_to_close\":" << seconds_to_close
-                           << ",\"config_version\":\"split-sell-shadow-v1\""
+                           << ",\"config_version\":\"split-sell-shadow-v2\""
                            << ",\"config_hash\":\""
                            << split_sell_strategy_config_hash_
                            << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
@@ -1855,10 +1891,7 @@ private:
                 item.second.split_sell_last_reason = split_sell_reason;
                 item.second.split_sell_last_audit = timestamp;
             }
-            const bool split_sell_new_book_state =
-                up_book.version != item.second.last_split_sell_up_version ||
-                down_book.version != item.second.last_split_sell_down_version;
-            if (split_sell_good && split_sell_new_book_state && audit_) {
+            if (split_sell_good && !split_sell_was_active && audit_) {
                 const unsigned long long sequence = ++opportunity_sequence_;
                 audit_ << "{\"ts\":" << timestamp << ",\"timestamp\":"
                        << timestamp << ",\"event_id\":\"" << run_id_ << ':'
@@ -1920,13 +1953,11 @@ private:
                        << ",\"seconds_to_close\":" << seconds_to_close
                        << ",\"duration_ms\":"
                        << (timestamp - item.second.split_sell_active_since) * 1000
-                       << ",\"config_version\":\"split-sell-shadow-v1\""
+                       << ",\"config_version\":\"split-sell-shadow-v2\""
                        << ",\"config_hash\":\""
                        << split_sell_strategy_config_hash_
                        << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
                        << std::flush;
-                item.second.last_split_sell_up_version = up_book.version;
-                item.second.last_split_sell_down_version = down_book.version;
             }
         }
         evaluate_reference_strategies();
@@ -2013,7 +2044,10 @@ private:
         else out << "null";
         out << ",\"clob_to_strategy_evaluation_samples\":" << clob_to_strategy_evaluation_us_.count();
         out
-            << ",\"book_events\":" << book_events_ << ",\"price_changes\":" << price_changes_ << "}\n";
+            << ",\"book_events\":" << book_events_
+            << ",\"price_changes\":" << price_changes_
+            << ",\"stale_price_changes_ignored\":"
+            << stale_price_changes_ignored_ << "}\n";
         out.close();
         std::filesystem::rename(temporary, health_path_);
         last_health_write_ = now_seconds();
@@ -2051,7 +2085,16 @@ private:
     void resync_token(const std::string& token, const std::string& reason) {
         auto found = books_.find(token);
         if (found == books_.end()) return;
+        if (!found->second.ws_snapshot) return;
         found->second.ws_snapshot = false;
+        found->second.bids.clear();
+        found->second.asks.clear();
+        found->second.crossed_since = 0;
+        for (auto& item : markets_) {
+            if (item.second.up != token && item.second.down != token) continue;
+            item.second.active_since = 0;
+            item.second.split_sell_active_since = 0;
+        }
         ++full_resync_count_;
         std::cerr << "BOOK_RESYNC token=" << token << " reason=" << reason << " count=" << full_resync_count_ << "\n";
         queue_write(subscription({token}, "unsubscribe"));
@@ -2069,19 +2112,12 @@ private:
                 next_tokens[item.second.up] = true; next_tokens[item.second.down] = true;
                 auto old = markets_.find(item.first);
                 if (old != markets_.end()) {
-                    item.second.active_since = old->second.active_since;
                     item.second.last_audit = old->second.last_audit;
                     item.second.last_reason = old->second.last_reason;
-                    item.second.split_sell_active_since =
-                        old->second.split_sell_active_since;
                     item.second.split_sell_last_audit =
                         old->second.split_sell_last_audit;
                     item.second.split_sell_last_reason =
                         old->second.split_sell_last_reason;
-                    item.second.last_split_sell_up_version =
-                        old->second.last_split_sell_up_version;
-                    item.second.last_split_sell_down_version =
-                        old->second.last_split_sell_down_version;
                 }
             }
             std::vector<std::string> added, removed;
@@ -2153,6 +2189,10 @@ private:
             item.second.bids.clear();
             item.second.asks.clear();
         }
+        for (auto& item : markets_) {
+            item.second.active_since = 0;
+            item.second.split_sell_active_since = 0;
+        }
         maker_quote_observations_.clear();
         write_health(false);
         std::cerr << "WS_ERROR stage=" << stage << " code=" << ec.value() << " message=" << ec.message() << "\n";
@@ -2182,6 +2222,7 @@ private:
     double split_sell_buffer_per_share_ = environment_double(
         "SPLIT_SELL_BUFFER_PER_SHARE", "0.003");
     unsigned long long book_events_ = 0, price_changes_ = 0;
+    unsigned long long stale_price_changes_ignored_ = 0;
     bool stopped_ = false;
     std::ofstream audit_;
     BoundedAuditWriter strategy_audit_;

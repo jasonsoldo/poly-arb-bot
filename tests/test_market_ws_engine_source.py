@@ -76,7 +76,7 @@ def test_paired_lock_requires_ws_snapshots_sync_buffer_and_profit_threshold():
     assert '"MARKET_RELOAD markets="' in SOURCE
     assert "subscription_generation" in SOURCE
     assert "ws_session_id" in SOURCE
-    assert "timestamp_rollback" in SOURCE
+    assert "stale_price_changes_ignored" in SOURCE
     assert "invalid_level_update" in SOURCE
     assert "crossed_book" in SOURCE
     assert "BOOK_RESYNC token=" in SOURCE
@@ -190,9 +190,9 @@ def test_split_sell_lock_uses_bid_vwap_fees_buffer_and_independent_audit():
     assert "split_sell_buffer_per_share_" in SOURCE
     assert "pre_split_complete_set_available" in SOURCE
     assert '\\"split_sell_config_hash\\":' in SOURCE
-    assert "split_sell_new_book_state" in SOURCE
-    assert "last_split_sell_up_version" in SOURCE
-    assert "last_split_sell_down_version" in SOURCE
+    assert "split_sell_was_active" in SOURCE
+    assert "split_sell_good && !split_sell_was_active" in SOURCE
+    assert "split-sell-shadow-v2" in SOURCE
     assert '\\"profit_threshold_shortfall\\":' in SOURCE
     assert '\\"required_gross_improvement_bps\\":' in SOURCE
 
@@ -206,3 +206,61 @@ def test_websocket_failure_invalidates_all_snapshot_readiness():
     assert "item.second.asks.clear()" in fail_body
     assert "maker_quote_observations_.clear()" in fail_body
     assert "write_health(false)" in fail_body
+
+
+def test_price_change_batch_is_applied_before_integrity_resync():
+    price_change_body = SOURCE.split(
+        '} else if (type == "price_change") {', 1
+    )[1].split('} else if (type == "last_trade_price"', 1)[0]
+    assert "std::set<std::string> touched_tokens" in price_change_body
+    assert "std::map<std::string, std::string> resync_reasons" in price_change_body
+    assert price_change_body.index("touched_tokens.insert(token)") < price_change_body.index(
+        "for (const auto& token : touched_tokens)"
+    )
+    assert "books_[token].crossed_since = batch_applied_at" in price_change_body
+    assert "source_timestamp <= books_[token].snapshot_timestamp_ms" in price_change_body
+    assert "++stale_price_changes_ignored_" in price_change_body
+    assert 'resync_reasons[token] = "timestamp_rollback"' not in price_change_body
+    assert 'resync_reasons[token] = "crossed_book"' not in price_change_body
+
+
+def test_zero_size_delete_is_idempotent_and_resync_is_debounced():
+    update_body = SOURCE.split("bool update_level(Book& book", 1)[1].split(
+        "bool crossed", 1
+    )[0]
+    assert "size == 0) side.erase(price)" in update_body
+    assert "!side.count(price)" not in update_body
+
+    resync_body = SOURCE.split("void resync_token", 1)[1].split(
+        "void reload_markets", 1
+    )[0]
+    assert "if (!found->second.ws_snapshot) return" in resync_body
+    assert "found->second.bids.clear()" in resync_body
+    assert "found->second.asks.clear()" in resync_body
+    assert "found->second.crossed_since = 0" in resync_body
+    assert "item.second.active_since = 0" in resync_body
+    assert "item.second.split_sell_active_since = 0" in resync_body
+
+
+def test_crossed_book_fails_closed_before_deferred_resync():
+    evaluate_body = SOURCE.split("void evaluate()", 1)[1].split(
+        "void record_session_strategy", 1
+    )[0]
+    assert "bool crossed_book_pending = false" in evaluate_body
+    assert "if (crossed_book_pending) continue" in evaluate_body
+    assert "timestamp - book.crossed_since >= 0.5" in evaluate_body
+    assert 'resync_token(token, "crossed_book")' in evaluate_body
+
+
+def test_opportunity_episode_state_does_not_cross_session_or_generation():
+    fail_body = SOURCE.split(
+        "void fail(const char* stage, beast::error_code ec)", 1
+    )[1].split("const std::string host_", 1)[0]
+    assert "item.second.active_since = 0" in fail_body
+    assert "item.second.split_sell_active_since = 0" in fail_body
+
+    reload_body = SOURCE.split("void reload_markets()", 1)[1].split(
+        "std::string subscription", 1
+    )[0]
+    assert "item.second.active_since = old->second.active_since" not in reload_body
+    assert "item.second.split_sell_active_since =" not in reload_body

@@ -1,4 +1,5 @@
 import json
+import time
 
 import poly_arb_bot.shadow_acceptance as shadow_acceptance
 from poly_arb_bot.shadow_acceptance import evaluate_status
@@ -57,6 +58,9 @@ def valid_status():
             "reference_ipc_receive_age_samples": 100,
             "clob_to_strategy_evaluation_us_p95": 100.0,
             "clob_to_strategy_evaluation_samples": 100,
+            "engine_started_at": time.time() - 3600,
+            "ws_session_id": 2,
+            "full_resyncs": 2,
         },
     }
 
@@ -208,6 +212,33 @@ def test_acceptance_marks_missing_latency_samples_incomplete():
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert failed == {"low_latency_observed"}
     assert report["status"] == "INCOMPLETE"
+
+
+def test_acceptance_fails_reconnect_or_book_resync_storm():
+    status = valid_status()
+    status["shadow_health"].update(
+        engine_started_at=time.time() - 3600,
+        ws_session_id=14,
+        full_resyncs=61,
+    )
+    report = evaluate_status(status)
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert failed == {"websocket_stability_budget"}
+    assert report["status"] == "FAIL"
+    assert report["metrics"]["ws_reconnects_per_hour"] >= 13
+    assert report["metrics"]["book_resyncs_per_hour"] > 60
+
+
+def test_acceptance_defers_stability_rate_during_startup():
+    status = valid_status()
+    status["shadow_health"].update(
+        engine_started_at=time.time() - 30,
+        ws_session_id=4,
+        full_resyncs=100,
+    )
+    report = evaluate_status(status)
+    assert report["status"] == "PASS"
+    assert report["metrics"]["ws_reconnects_per_hour"] is None
 
 
 def test_acceptance_marks_missing_market_and_audit_data_incomplete():

@@ -46,6 +46,21 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
             and float(strategy_latency_p95) <= max_strategy_latency
         )
     )
+    engine_started_at = float(health.get("engine_started_at", 0) or 0)
+    engine_age_seconds = max(0.0, time.time() - engine_started_at) if engine_started_at else 0.0
+    stability_window_seconds = float(os.getenv("WS_STABILITY_MIN_OBSERVATION_SECONDS", "300"))
+    stability_observed = engine_age_seconds >= stability_window_seconds
+    ws_reconnects = max(0, int(health.get("ws_session_id", 0) or 0) - 1)
+    full_resyncs = max(0, int(health.get("full_resyncs", 0) or 0))
+    hours_observed = engine_age_seconds / 3600 if stability_observed else 0
+    ws_reconnects_per_hour = ws_reconnects / hours_observed if hours_observed else None
+    book_resyncs_per_hour = full_resyncs / hours_observed if hours_observed else None
+    max_ws_reconnects_per_hour = float(os.getenv("MAX_WS_RECONNECTS_PER_HOUR", "12"))
+    max_book_resyncs_per_hour = float(os.getenv("MAX_BOOK_RESYNCS_PER_HOUR", "60"))
+    websocket_stability_within_budget = not stability_observed or (
+        ws_reconnects_per_hour <= max_ws_reconnects_per_hour
+        and book_resyncs_per_hour <= max_book_resyncs_per_hour
+    )
     real_counters_zero = all(
         field in section and type(section[field]) in (int, float) and section[field] == 0
         for section in (execution, lifecycle)
@@ -67,6 +82,8 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
         {"name": "low_latency_observed",
          "passed": not market_data_present or latency_observed},
         {"name": "low_latency_budget", "passed": latency_within_budget},
+        {"name": "websocket_stability_budget",
+         "passed": not market_data_present or websocket_stability_within_budget},
         {"name": "audit_data_present", "passed": shadow.get("evaluations", 0) > 0},
         {"name": "market_readiness",
          "passed": readiness.get("paired_markets_ready", 0) + readiness.get("not_ready", 0) == readiness.get("discovered_markets", 0)},
@@ -120,7 +137,14 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                         "reference_ipc_receive_age_ms_p95": reference_age_p95,
                         "clob_to_strategy_evaluation_us_p95": strategy_latency_p95,
                         "max_reference_ipc_age_p95_ms": max_reference_age,
-                        "max_clob_to_strategy_p95_us": max_strategy_latency}}
+                        "max_clob_to_strategy_p95_us": max_strategy_latency,
+                        "engine_age_seconds": engine_age_seconds,
+                        "ws_reconnects": ws_reconnects,
+                        "full_resyncs": full_resyncs,
+                        "ws_reconnects_per_hour": ws_reconnects_per_hour,
+                        "book_resyncs_per_hour": book_resyncs_per_hour,
+                        "max_ws_reconnects_per_hour": max_ws_reconnects_per_hour,
+                        "max_book_resyncs_per_hour": max_book_resyncs_per_hour}}
 
 
 def run(data_dir=Path("data"), log_file=Path("logs/shadow-audit.jsonl"), state_file=Path("state/orders.json"),
