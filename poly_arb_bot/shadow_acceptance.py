@@ -22,6 +22,21 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
     execution = status.get("shadow_execution", {})
     lifecycle = status.get("shadow_lifecycle", {})
     health = status.get("shadow_health", {})
+    probability_observations = status.get("probability_observations", {})
+    arbitrage_research = status.get("arbitrage_research", {})
+    arbitrage_funnels = arbitrage_research.get("funnels", {})
+    arbitrage_book_evidence_integrity = (
+        arbitrage_research.get("semantics") == "RESEARCH_ONLY_NOT_ORDERS_OR_PNL"
+        and bool(arbitrage_funnels)
+        and all(
+            "both_legs_filled" not in funnel
+            and all(field in funnel for field in (
+                "shadow_attempts", "leg_1_book_executable",
+                "both_legs_book_executable", "orphaned", "invalidated",
+            ))
+            for funnel in arbitrage_funnels.values()
+        )
+    )
     market_data_present = readiness.get("discovered_markets", 0) > 0
     max_reference_age = float(
         max_reference_ipc_age_p95_ms if max_reference_ipc_age_p95_ms is not None
@@ -96,6 +111,10 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                    type(counts["executed_orders"]) in (int, float) and
                    counts["executed_orders"] == 0 and
                    real_counters_zero},
+        {"name": "probability_observation_integrity", "passed":
+         probability_observations.get("semantics") == "CALIBRATION_ONLY_NOT_ORDERS_OR_PNL"},
+        {"name": "arbitrage_book_evidence_integrity", "passed":
+         arbitrage_book_evidence_integrity},
         {"name": "event_deduplication", "passed": shadow.get("duplicate_events", 0) == 0},
         {"name": "three_strategy_evaluations",
          "passed": all(row.get("evaluations", 0) > 0 for row in strategy_rows)},
@@ -144,7 +163,10 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                         "ws_reconnects_per_hour": ws_reconnects_per_hour,
                         "book_resyncs_per_hour": book_resyncs_per_hour,
                         "max_ws_reconnects_per_hour": max_ws_reconnects_per_hour,
-                        "max_book_resyncs_per_hour": max_book_resyncs_per_hour}}
+                        "max_book_resyncs_per_hour": max_book_resyncs_per_hour,
+                        "arbitrage_research_conclusion": arbitrage_research.get(
+                            "conclusion", "NO REPEATABLE ARBITRAGE FOUND"
+                        )}}
 
 
 def run(data_dir=Path("data"), log_file=Path("logs/shadow-audit.jsonl"), state_file=Path("state/orders.json"),

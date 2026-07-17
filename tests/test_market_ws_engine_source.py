@@ -127,6 +127,15 @@ def test_audit_stream_preserves_unix_timestamp_precision():
     assert "audit_ << std::setprecision(15);" in SOURCE
 
 
+def test_paired_evaluations_explicitly_keep_real_execution_counters_zero():
+    paired_evaluation = SOURCE.split(
+        '\\"event_type\\":\\"shadow_eval\\"', 1
+    )[1].split("record_session_strategy", 1)[0]
+    assert '\\"real_order_submissions\\":0' in paired_evaluation
+    assert '\\"real_orders\\":0' in paired_evaluation
+    assert '\\"real_fills\\":0' in paired_evaluation
+
+
 def test_directional_inputs_use_real_clob_best_ask_slippage_and_imbalance():
     for field in ("up_best_ask", "down_best_ask", "up_slippage_per_share",
                   "down_slippage_per_share", "up_book_imbalance", "down_book_imbalance",
@@ -244,6 +253,65 @@ def test_price_change_batch_is_applied_before_integrity_resync():
     assert "++stale_price_changes_ignored_" in price_change_body
     assert 'resync_reasons[token] = "timestamp_rollback"' not in price_change_body
     assert 'resync_reasons[token] = "crossed_book"' not in price_change_body
+
+
+def test_live_books_drive_bounded_delayed_arbitrage_observations():
+    assert '#include "../strategy/observed_arb.hpp"' in SOURCE
+    assert "pending_arb_attempts_" in SOURCE
+    assert "active_arb_episodes_" in SOURCE
+    assert "counterfactual_sizes_{{1, 2, 5, 10}}" in SOURCE
+    assert "counterfactual_delays_us_{{0, 50000, 100000, 250000}}" in SOURCE
+    assert "observed_arb::LegOrder::UP_THEN_DOWN" in SOURCE
+    assert "observed_arb::LegOrder::DOWN_THEN_UP" in SOURCE
+    assert "steady_now_us()" in SOURCE
+    assert "queue_arb_audit" in SOURCE
+    assert "flush_arb_audit_queue" in SOURCE
+    assert "max_arb_audit_queue_" in SOURCE
+    assert "arb_audit_backpressure_" in SOURCE
+    observation = SOURCE.split("void emit_arb_observation(", 1)[1].split(
+        "\n    void update_observed_arbitrage", 1
+    )[0]
+    assert "queue_arb_audit(record.str())" in observation
+    counterfactual = SOURCE.split("void emit_arbitrage_counterfactual(", 1)[1].split(
+        "\n    void evaluate()", 1
+    )[0]
+    assert "audit_ <<" not in counterfactual
+    assert "queue_arb_audit(record.str())" in counterfactual
+    for event_type in (
+        "arb_episode_started", "arb_episode_ended", "arb_shadow_attempt",
+        "arb_shadow_leg_result", "arb_shadow_book_executable",
+        "arb_shadow_orphaned", "arb_shadow_invalidated",
+        "arb_research_summary",
+    ):
+        assert f'\\"event_type\\":\\"{event_type}\\"' in SOURCE
+    for field in (
+        "leg_order", "delay_ms", "target_size", "initial_net_cost",
+        "delayed_net_cost", "book_executable_quantity", "orphan_pnl",
+        "generation", "session", "real_order_submissions", "real_orders",
+        "real_fills",
+    ):
+        assert f'\\"{field}\\":' in SOURCE
+
+
+def test_engine_emits_dedicated_non_trading_probability_observations():
+    assert '"shadow_prediction_observation"' in SOURCE
+    assert '\\"opens_position\\":false' in SOURCE
+    assert '\\"observation_semantics\\":\\"PROBABILITY_CALIBRATION_NOT_ORDER\\"' in SOURCE
+    assert "probability_observations_emitted_" in SOURCE
+    assert "calibration_horizon_seconds" in SOURCE
+
+
+def test_disconnect_and_market_reload_invalidate_pending_arbitrage_attempts():
+    reload_body = SOURCE.split("void reload_markets()", 1)[1].split(
+        "void queue_write", 1
+    )[0]
+    fail_body = SOURCE.split(
+        "void fail(const char* stage, beast::error_code ec)", 1
+    )[1].split("const std::string host_", 1)[0]
+    assert "invalidate_arb_attempts" in reload_body
+    assert "invalidate_arb_attempts" in fail_body
+    assert "pending_arb_attempts_.clear()" in SOURCE
+    assert "active_arb_episodes_.clear()" in SOURCE
 
 
 def test_zero_size_delete_is_idempotent_and_resync_is_debounced():

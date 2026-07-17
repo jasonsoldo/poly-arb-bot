@@ -10,6 +10,7 @@
 #include "../reference_ipc/latest_value_client.hpp"
 #include "../strategy/complete_set_arb.hpp"
 #include "../strategy/ev_strategy.hpp"
+#include "../strategy/observed_arb.hpp"
 #include <openssl/sha.h>
 #include <algorithm>
 #include <array>
@@ -69,6 +70,10 @@ struct Market {
 };
 
 double now_seconds();
+double steady_now_us() {
+    return std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 std::map<std::string, Market> load_markets(const std::string& path, unsigned long long* version_out = nullptr, double* generated_at_out = nullptr) {
     std::ifstream file(path); ptree root; boost::property_tree::read_json(file, root);
@@ -805,6 +810,24 @@ private:
                         decision.reason = "audit_backpressure";
                         decision.blocking_reasons.insert(decision.blocking_reasons.begin(), "audit_backpressure");
                     }
+                    if (outcome == "Up" && input.estimated_probability && opening_price &&
+                        reference.settlement_reference && reference.quorum &&
+                        input.settlement_source_verified) {
+                        const auto horizon = probability_calibration_horizons_.find(market.interval);
+                        if (horizon != probability_calibration_horizons_.end() &&
+                            seconds_to_close > 0 && seconds_to_close <= horizon->second) {
+                            const std::string observation_key = item.first + "|" + strategy_name + "|" +
+                                strategy_hash_for(strategy_name) + "|" + std::to_string(
+                                    static_cast<int>(horizon->second));
+                            if (!probability_observations_emitted_.count(observation_key) &&
+                                emit_strategy_audit(item.first, market, outcome, input, probability_input,
+                                    is_lottery ? lottery_probability : directional_probability,
+                                    raw_probability, reference, decision, timestamp, ask,
+                                    "shadow_prediction_observation", horizon->second)) {
+                                probability_observations_emitted_.insert(observation_key);
+                            }
+                        }
+                    }
                     const std::string key = item.first + "|" + strategy_name + "|" + outcome;
                     if (!should_emit_strategy(key, decision, timestamp)) continue;
                     emit_strategy_audit(item.first, market, outcome, input, probability_input,
@@ -1304,13 +1327,15 @@ private:
         }
     }
 
-    void emit_strategy_audit(const std::string& market_id, const Market& market,
+    bool emit_strategy_audit(const std::string& market_id, const Market& market,
                              const std::string& outcome, const strategy::EvaluationInput& input,
                              const strategy::ProbabilityInput& model_input,
                              const strategy::ProbabilityOutput& model,
                              const std::optional<double>& raw_estimated_probability,
                              const ReferenceView& reference, const strategy::Decision& decision,
-                             double timestamp, double market_price) {
+                             double timestamp, double market_price,
+                             const std::string& event_type = "shadow_eval",
+                             double calibration_horizon_seconds = 0) {
         const unsigned long long sequence = ++strategy_evaluation_sequence_;
         const std::string event_id = run_id_ + ":" + std::to_string(generation_) + ":" +
             std::to_string(ws_session_id_) + ":" + market_id + ":" + decision.strategy + ":" +
@@ -1323,7 +1348,7 @@ private:
         };
         out << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
             << ",\"event_id\":\"" << reference_ipc::escaped(event_id)
-            << "\",\"event_type\":\"shadow_eval\",\"strategy\":\"" << decision.strategy
+            << "\",\"event_type\":\"" << event_type << "\",\"strategy\":\"" << decision.strategy
             << "\",\"market_id\":\"" << reference_ipc::escaped(market_id)
             << "\",\"condition_id\":\"" << reference_ipc::escaped(market.condition_id)
             << "\",\"asset\":\"" << reference_ipc::escaped(market.asset)
@@ -1441,13 +1466,21 @@ private:
             if (index) out << ',';
             out << '"' << reference_ipc::escaped(decision.blocking_reasons[index]) << '"';
         }
-        out << "],\"target_size\":" << size_ << ",\"config_version\":\"shadow-buy-rules-v7\""
+        out << "],\"target_size\":" << size_;
+        if (event_type == "shadow_prediction_observation") {
+            out << ",\"opens_position\":false"
+                << ",\"observation_semantics\":\"PROBABILITY_CALIBRATION_NOT_ORDER\""
+                << ",\"calibration_horizon_seconds\":" << calibration_horizon_seconds;
+        }
+        out << ",\"config_version\":\"shadow-buy-rules-v7\""
             << ",\"config_hash\":\"" << strategy_hash_for(decision.strategy) << "\""
             << ",\"reference_sequence\":" << reference_snapshot_.sequence
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
             << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
-        if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
-        else record_session_strategy(decision.strategy, decision.decision);
+        const bool queued = strategy_audit_.enqueue(out.str());
+        if (!queued) ++strategy_audit_backpressure_;
+        else if (event_type == "shadow_eval") record_session_strategy(decision.strategy, decision.decision);
+        return queued;
     }
 
     void load_complete_set_inventory() {
@@ -1637,6 +1670,361 @@ private:
             std::cerr << "WS_DATA type=" << type << " books=" << book_events_ << " changes=" << price_changes_ << "\n";
     }
 
+    struct PendingArbObservation {
+        observed_arb::Attempt attempt;
+        std::string episode_key, market_id, asset, timeframe, window;
+        double close_ts = 0, delay_us = 0, started_wall = 0;
+        double initial_up_vwap = 0, initial_down_vwap = 0;
+        double initial_up_fee = 0, initial_down_fee = 0;
+        double initial_net_cost = 0, initial_locked_profit = 0;
+        bool first_is_up = true;
+    };
+
+    static const char* leg_order_name(observed_arb::LegOrder order) {
+        return order == observed_arb::LegOrder::UP_THEN_DOWN
+            ? "UP_THEN_DOWN" : "DOWN_THEN_UP";
+    }
+
+    observed_arb::BookLeg observed_buy_leg(
+            const Book& book, double target_size, double rate,
+            bool books_synced) const {
+        const auto fill = buy_vwap(book, target_size);
+        observed_arb::BookLeg leg;
+        leg.requested_quantity = target_size;
+        leg.executable_quantity = fill.first;
+        leg.vwap = fill.second;
+        leg.gross_value = fill.first * fill.second;
+        leg.rounded_fee = std::round(
+            fill.first * rate * fill.second * (1 - fill.second) * 100000) / 100000;
+        leg.age_ms = std::max(0.0, (now_seconds() - book.updated_at) * 1000);
+        leg.snapshot = book.ws_snapshot;
+        leg.fresh = books_synced;
+        leg.synced = books_synced;
+        leg.crossed = crossed(book);
+        leg.generation = book.generation;
+        leg.session = ws_session_id_;
+        return leg;
+    }
+
+    observed_arb::BookLeg observed_sell_leg(
+            const Book& book, double target_size, double rate,
+            bool books_synced) const {
+        const auto fill = sell_vwap(book, target_size);
+        observed_arb::BookLeg leg;
+        leg.requested_quantity = target_size;
+        leg.executable_quantity = fill.first;
+        leg.vwap = fill.second;
+        leg.gross_value = fill.first * fill.second;
+        leg.rounded_fee = std::round(
+            fill.first * rate * fill.second * (1 - fill.second) * 100000) / 100000;
+        leg.age_ms = std::max(0.0, (now_seconds() - book.updated_at) * 1000);
+        leg.snapshot = book.ws_snapshot;
+        leg.fresh = books_synced;
+        leg.synced = books_synced;
+        leg.crossed = crossed(book);
+        leg.generation = book.generation;
+        leg.session = ws_session_id_;
+        return leg;
+    }
+
+    std::string arb_episode_key(
+            const std::string& market_id, double target_size, double delay_us,
+            observed_arb::LegOrder order) const {
+        std::ostringstream key;
+        key << paired_config_hash_ << '|' << market_id << '|' << target_size
+            << '|' << delay_us << '|' << leg_order_name(order);
+        return key.str();
+    }
+
+    void queue_arb_audit(std::string record) {
+        if (arb_audit_queue_.size() >= max_arb_audit_queue_) {
+            ++arb_audit_backpressure_;
+            return;
+        }
+        arb_audit_queue_.push_back(std::move(record));
+    }
+
+    void flush_arb_audit_queue() {
+        if (!audit_ || arb_audit_queue_.empty()) return;
+        while (!arb_audit_queue_.empty()) {
+            audit_ << arb_audit_queue_.front();
+            arb_audit_queue_.pop_front();
+        }
+        audit_.flush();
+    }
+
+    void emit_arb_episode(
+            const char* event_label, const char* event_name,
+            const std::string& event_id, const std::string& market_id,
+            const Market& market, double target_size, double delay_us,
+            observed_arb::LegOrder order, const std::string& reason) {
+        const double timestamp = now_seconds();
+        std::ostringstream record;
+        record << std::setprecision(15)
+               << '{' << event_label << ",\"ts\":" << timestamp
+               << ",\"timestamp\":" << timestamp << ",\"event_id\":\""
+               << event_id << ':' << event_name << "\",\"strategy\":\"paired_lock\""
+               << ",\"market_id\":\"" << market_id << "\",\"condition_id\":\""
+               << reference_ipc::escaped(market.condition_id)
+               << "\",\"asset\":\"" << reference_ipc::escaped(market.asset)
+               << "\",\"timeframe\":\"" << reference_ipc::escaped(market.interval)
+               << "\",\"window\":\"" << reference_ipc::escaped(market.window)
+               << "\",\"close_ts\":" << market.close_ts
+               << ",\"generation\":" << generation_ << ",\"session\":"
+               << ws_session_id_ << ",\"leg_order\":\"" << leg_order_name(order)
+               << "\",\"delay_ms\":" << delay_us / 1000
+               << ",\"target_size\":" << target_size
+               << ",\"decision\":\"OBSERVED\",\"reason\":\"" << reason
+               << "\",\"observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\""
+               << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
+        queue_arb_audit(record.str());
+    }
+
+    void emit_arb_observation(
+            const char* event_label, const char* event_name,
+            const PendingArbObservation& pending,
+            const observed_arb::Outcome* outcome,
+            const std::string& reason, int leg_index = 0) {
+        const double timestamp = now_seconds();
+        const double delayed_net_cost = outcome ? outcome->net_cost : 0;
+        const double book_executable_quantity =
+            outcome && outcome->both_legs_book_executable
+                ? pending.attempt.target_size : 0;
+        std::ostringstream record;
+        record << std::setprecision(15)
+               << '{' << event_label << ",\"ts\":" << timestamp
+               << ",\"timestamp\":" << timestamp << ",\"event_id\":\""
+               << pending.attempt.identity.attempt_id << ':' << event_name;
+        if (leg_index) record << ':' << leg_index;
+        record << "\",\"attempt_id\":\"" << pending.attempt.identity.attempt_id
+               << "\",\"strategy\":\"paired_lock\",\"market_id\":\""
+               << pending.market_id << "\",\"condition_id\":\""
+               << reference_ipc::escaped(pending.attempt.identity.condition_id)
+               << "\",\"asset\":\"" << reference_ipc::escaped(pending.asset)
+               << "\",\"timeframe\":\"" << reference_ipc::escaped(pending.timeframe)
+               << "\",\"window\":\"" << reference_ipc::escaped(pending.window)
+               << "\",\"close_ts\":" << pending.close_ts
+               << ",\"generation\":" << pending.attempt.identity.generation
+               << ",\"session\":" << pending.attempt.identity.session
+               << ",\"leg_order\":\"" << leg_order_name(pending.attempt.order)
+               << "\",\"delay_ms\":" << pending.delay_us / 1000
+               << ",\"observed_delay_ms\":"
+               << std::max(0.0, steady_now_us() - pending.attempt.started_us) / 1000
+               << ",\"target_size\":" << pending.attempt.target_size
+               << ",\"initial_up_vwap\":" << pending.initial_up_vwap
+               << ",\"initial_down_vwap\":" << pending.initial_down_vwap
+               << ",\"initial_up_fee\":" << pending.initial_up_fee
+               << ",\"initial_down_fee\":" << pending.initial_down_fee
+               << ",\"initial_net_cost\":" << pending.initial_net_cost
+               << ",\"initial_locked_profit\":" << pending.initial_locked_profit
+               << ",\"delayed_net_cost\":" << delayed_net_cost
+               << ",\"delayed_locked_profit\":"
+               << (outcome ? outcome->locked_profit : 0)
+               << ",\"book_executable_quantity\":" << book_executable_quantity
+               << ",\"first_leg_book_executable\":"
+               << (pending.attempt.valid ? "true" : "false")
+               << ",\"both_legs_book_executable\":"
+               << (outcome && outcome->both_legs_book_executable ? "true" : "false")
+               << ",\"orphan_pnl\":" << (outcome ? outcome->orphan_pnl : 0)
+               << ",\"leg_index\":" << leg_index
+               << ",\"decision\":\"OBSERVED\",\"reason\":\"" << reason
+               << "\",\"observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\""
+               << ",\"config_version\":\"observed-arb-v1\",\"config_hash\":\""
+               << paired_config_hash_
+               << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
+        queue_arb_audit(record.str());
+    }
+
+    void update_observed_arbitrage(
+            const std::string& market_id, const Market& market,
+            const Book& up_book, const Book& down_book, double rate,
+            bool books_synced, double timestamp) {
+        const double seconds_to_close = market.close_ts - timestamp;
+        for (const double target_size : counterfactual_sizes_) {
+            const auto up = observed_buy_leg(up_book, target_size, rate, books_synced);
+            const auto down = observed_buy_leg(down_book, target_size, rate, books_synced);
+            const double buffer = target_size * buffer_per_share_;
+            const double initial_net_cost = up.gross_value + up.rounded_fee +
+                down.gross_value + down.rounded_fee + buffer;
+            const double initial_profit = target_size - initial_net_cost;
+            const bool qualified = books_synced && up.executable_quantity >= target_size &&
+                down.executable_quantity >= target_size && initial_profit > 0 &&
+                seconds_to_close >= 20 && seconds_to_close <= 7200;
+            for (const auto order : {
+                    observed_arb::LegOrder::UP_THEN_DOWN,
+                    observed_arb::LegOrder::DOWN_THEN_UP}) {
+                for (const double delay_us : counterfactual_delays_us_) {
+                    const std::string key = arb_episode_key(
+                        market_id, target_size, delay_us, order);
+                    const auto active = active_arb_episodes_.find(key);
+                    if (!qualified) {
+                        if (active != active_arb_episodes_.end()) {
+                            emit_arb_episode(
+                                arb_episode_ended_event_, "arb_episode_ended",
+                                active->second, market_id, market, target_size,
+                                delay_us, order, "qualification_ended");
+                            active_arb_episodes_.erase(active);
+                        }
+                        continue;
+                    }
+                    if (active != active_arb_episodes_.end()) continue;
+                    if (pending_arb_attempts_.size() >= max_pending_arb_attempts_)
+                        continue;
+                    const unsigned long long sequence = ++arb_observation_sequence_;
+                    const std::string episode_id = run_id_ + ':' +
+                        std::to_string(generation_) + ':' +
+                        std::to_string(ws_session_id_) + ':' + market_id +
+                        ":arb_episode:" + std::to_string(sequence);
+                    active_arb_episodes_[key] = episode_id;
+                    emit_arb_episode(
+                        arb_episode_started_event_, "arb_episode_started",
+                        episode_id, market_id, market, target_size, delay_us,
+                        order, "post_cost_positive");
+                    const bool first_is_up =
+                        order == observed_arb::LegOrder::UP_THEN_DOWN;
+                    const double now_us = steady_now_us();
+                    const observed_arb::AttemptIdentity identity{
+                        episode_id + ":attempt", market_id,
+                        market.condition_id, generation_, ws_session_id_};
+                    PendingArbObservation pending;
+                    pending.attempt = observed_arb::start_buy_both(
+                        identity, order, target_size, target_size, buffer,
+                        first_is_up ? up : down, now_us, now_us + delay_us);
+                    pending.episode_key = key;
+                    pending.market_id = market_id;
+                    pending.asset = market.asset;
+                    pending.timeframe = market.interval;
+                    pending.window = market.window;
+                    pending.close_ts = market.close_ts;
+                    pending.delay_us = delay_us;
+                    pending.started_wall = timestamp;
+                    pending.initial_up_vwap = up.vwap;
+                    pending.initial_down_vwap = down.vwap;
+                    pending.initial_up_fee = up.rounded_fee;
+                    pending.initial_down_fee = down.rounded_fee;
+                    pending.initial_net_cost = initial_net_cost;
+                    pending.initial_locked_profit = initial_profit;
+                    pending.first_is_up = first_is_up;
+                    pending_arb_attempts_[identity.attempt_id] = pending;
+                    emit_arb_observation(
+                        arb_shadow_attempt_event_, "arb_shadow_attempt",
+                        pending, nullptr, "attempt_started");
+                    emit_arb_observation(
+                        arb_shadow_leg_result_event_, "arb_shadow_leg_result",
+                        pending, nullptr, "first_leg_book_executable", 1);
+                    ++arb_attempts_started_;
+                }
+            }
+        }
+    }
+
+    void process_due_arb_attempts() {
+        const double now_us = steady_now_us();
+        for (auto item = pending_arb_attempts_.begin();
+                item != pending_arb_attempts_.end();) {
+            PendingArbObservation& pending = item->second;
+            if (now_us < pending.attempt.due_us) {
+                ++item;
+                continue;
+            }
+            observed_arb::Outcome outcome;
+            auto market = markets_.find(pending.market_id);
+            if (market == markets_.end()) {
+                outcome.state = observed_arb::State::INVALIDATED;
+                outcome.order = pending.attempt.order;
+                outcome.reason = "market_removed";
+                outcome.first_leg_book_executable = pending.attempt.valid;
+                outcome.orphan_pnl = -pending.attempt.first_leg.gross_value -
+                    pending.attempt.first_leg.rounded_fee -
+                    pending.attempt.execution_buffer;
+            } else {
+                const Book& up_book = books_[market->second.up];
+                const Book& down_book = books_[market->second.down];
+                const double timestamp = now_seconds();
+                const double up_age_ms = std::max(
+                    0.0, (timestamp - up_book.updated_at) * 1000);
+                const double down_age_ms = std::max(
+                    0.0, (timestamp - down_book.updated_at) * 1000);
+                const double feed_age_ms = std::max(
+                    0.0, (timestamp - last_activity_) * 1000);
+                const bool books_synced = std::min(
+                    std::max(up_age_ms, down_age_ms), feed_age_ms) <= 750;
+                const double rate = market->second.fee > 0
+                    ? market->second.fee : fallback_fee_;
+                const Book& second_book = pending.first_is_up
+                    ? down_book : up_book;
+                const Book& first_book = pending.first_is_up
+                    ? up_book : down_book;
+                outcome = observed_arb::observe_buy_both(
+                    pending.attempt,
+                    observed_buy_leg(
+                        second_book, pending.attempt.target_size, rate,
+                        books_synced),
+                    observed_sell_leg(
+                        first_book, pending.attempt.target_size, rate,
+                        books_synced),
+                    now_us);
+            }
+            emit_arb_observation(
+                arb_shadow_leg_result_event_, "arb_shadow_leg_result",
+                pending, &outcome, outcome.reason, 2);
+            if (outcome.state == observed_arb::State::BOOK_EXECUTABLE) {
+                emit_arb_observation(
+                    arb_shadow_book_executable_event_,
+                    "arb_shadow_book_executable", pending, &outcome,
+                    outcome.reason);
+                ++arb_book_executable_;
+            } else if (outcome.state == observed_arb::State::ORPHANED) {
+                emit_arb_observation(
+                    arb_shadow_orphaned_event_, "arb_shadow_orphaned",
+                    pending, &outcome, outcome.reason);
+                ++arb_orphaned_;
+            } else {
+                emit_arb_observation(
+                    arb_shadow_invalidated_event_, "arb_shadow_invalidated",
+                    pending, &outcome, outcome.reason);
+                ++arb_invalidated_;
+            }
+            item = pending_arb_attempts_.erase(item);
+        }
+        if (audit_ && now_seconds() - last_arb_summary_at_ >= 60) {
+            last_arb_summary_at_ = now_seconds();
+            audit_ << '{' << arb_research_summary_event_
+                   << ",\"ts\":" << last_arb_summary_at_
+                   << ",\"timestamp\":" << last_arb_summary_at_
+                   << ",\"event_id\":\"" << run_id_ << ":arb_summary:"
+                   << ++arb_observation_sequence_
+                   << "\",\"strategy\":\"paired_lock\",\"active_episodes\":"
+                   << active_arb_episodes_.size()
+                   << ",\"pending_attempts\":" << pending_arb_attempts_.size()
+                   << ",\"attempts\":" << arb_attempts_started_
+                   << ",\"book_executable\":" << arb_book_executable_
+                   << ",\"orphaned\":" << arb_orphaned_
+                   << ",\"invalidated\":" << arb_invalidated_
+                   << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
+                   << std::flush;
+        }
+    }
+
+    void invalidate_arb_attempts(const std::string& reason) {
+        for (const auto& item : pending_arb_attempts_) {
+            observed_arb::Outcome outcome;
+            outcome.state = observed_arb::State::INVALIDATED;
+            outcome.order = item.second.attempt.order;
+            outcome.reason = reason;
+            outcome.first_leg_book_executable = item.second.attempt.valid;
+            outcome.orphan_pnl = -item.second.attempt.first_leg.gross_value -
+                item.second.attempt.first_leg.rounded_fee -
+                item.second.attempt.execution_buffer;
+            emit_arb_observation(
+                arb_shadow_invalidated_event_, "arb_shadow_invalidated",
+                item.second, &outcome, reason);
+            ++arb_invalidated_;
+        }
+        pending_arb_attempts_.clear();
+        active_arb_episodes_.clear();
+    }
+
     void emit_arbitrage_counterfactual(
             const std::string& market_id, Market& market,
             const Book& up_book, const Book& down_book, double rate,
@@ -1729,7 +2117,9 @@ private:
         market.arb_research_initialized = true;
         market.arb_research_last_audit = timestamp;
         const unsigned long long sequence = ++evaluation_sequence_;
-        audit_ << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
+        std::ostringstream record;
+        record << std::setprecision(15)
+               << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
                << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':'
                << ws_session_id_ << ':' << market_id << ":arb_counterfactual:"
                << sequence << "\",\"event_type\":\"shadow_arb_counterfactual\""
@@ -1744,8 +2134,8 @@ private:
                << ws_session_id_ << ",\"research_only\":true,\"observations\":[";
         for (size_t index = 0; index < observation_index; ++index) {
             const auto& observation = observations[index];
-            if (index > 0) audit_ << ',';
-            audit_ << "{\"method\":\"" << observation.method
+            if (index > 0) record << ',';
+            record << "{\"method\":\"" << observation.method
                    << "\",\"target_size\":" << observation.target_size
                    << ",\"depth_ok\":" << (observation.depth_ok ? "true" : "false")
                    << ",\"up_fill\":" << observation.up.first
@@ -1759,8 +2149,8 @@ private:
             for (size_t delay_index = 0; delay_index < observation.stress.size();
                     ++delay_index) {
                 const auto& sample = observation.stress[delay_index];
-                if (delay_index > 0) audit_ << ',';
-                audit_ << "{\"delay_ms\":" << sample.delay_us / 1000
+                if (delay_index > 0) record << ',';
+                record << "{\"delay_ms\":" << sample.delay_us / 1000
                        << ",\"leg_1_fill_probability\":"
                        << sample.result.leg_1_fill_probability
                        << ",\"leg_2_fill_probability\":"
@@ -1768,14 +2158,15 @@ private:
                        << ",\"expected_execution_value\":"
                        << sample.result.expected_execution_value << '}';
             }
-            audit_ << "]}";
+            record << "]}";
         }
-        audit_ << "],\"decision\":\"OBSERVED\",\"reason\":\"counterfactual_only\""
-               << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
-               << std::flush;
+        record << "],\"decision\":\"OBSERVED\",\"reason\":\"counterfactual_only\""
+               << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
+        queue_arb_audit(record.str());
     }
 
     void evaluate() {
+        process_due_arb_attempts();
         for (auto& item : markets_) {
             Book& up_book = books_[item.second.up]; Book& down_book = books_[item.second.down];
             const double timestamp = now_seconds();
@@ -1812,6 +2203,10 @@ private:
             const bool fok = up.first >= size_ && down.first >= size_;
             const double rate = item.second.fee > 0 ? item.second.fee : fallback_fee_;
             emit_arbitrage_counterfactual(
+                item.first, item.second, up_book, down_book, rate,
+                books_synced, timestamp
+            );
+            update_observed_arbitrage(
                 item.first, item.second, up_book, down_book, rate,
                 books_synced, timestamp
             );
@@ -1878,7 +2273,9 @@ private:
                                    << ",\"books_synced\":" << (books_synced ? "true" : "false")
                                    << ",\"config_version\":\"paired-lock-shadow-v2\",\"config_hash\":\""
                                    << paired_config_hash_ << "\",\"decision\":\""
-                                   << (good ? "ACCEPT" : "REJECT") << "\"}\n" << std::flush;
+                                   << (good ? "ACCEPT" : "REJECT")
+                                   << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
+                                   << std::flush;
                 record_session_strategy("paired_lock", good ? "ACCEPT" : "REJECT");
                 item.second.last_reason = reason;
                 item.second.last_audit = timestamp;
@@ -2110,6 +2507,7 @@ private:
                        << std::flush;
             }
         }
+        process_due_arb_attempts();
         evaluate_reference_strategies();
         if (now_seconds() - last_health_write_ >= 1) write_health(true);
     }
@@ -2152,6 +2550,8 @@ private:
             << ",\"reference_coalesced_frames\":" << (reference_client_ ? reference_client_->coalesced_frames() : 0)
             << ",\"strategy_audit_queue\":" << strategy_audit_.queued()
             << ",\"strategy_audit_backpressure\":" << strategy_audit_backpressure_
+            << ",\"arb_audit_backpressure\":" << arb_audit_backpressure_
+            << ",\"arb_audit_queue_depth\":" << arb_audit_queue_.size()
             << ",\"strategy_evaluations\":" << strategy_evaluation_sequence_
             << ",\"maker_quote_geometry_candidates\":"
             << maker_quote_geometry_candidates_
@@ -2228,6 +2628,7 @@ private:
         evaluation_timer_.async_wait([self = shared_from_this()](beast::error_code ec) {
             if (ec || self->stopped_) return;
             self->evaluate();
+            self->flush_arb_audit_queue();
             self->schedule_evaluation();
         });
     }
@@ -2239,6 +2640,7 @@ private:
         found->second.ws_snapshot = false;
         found->second.bids.clear();
         found->second.asks.clear();
+        invalidate_arb_attempts("book_resync");
         found->second.crossed_since = 0;
         for (auto& item : markets_) {
             if (item.second.up != token && item.second.down != token) continue;
@@ -2271,6 +2673,7 @@ private:
                 }
             }
             std::vector<std::string> added, removed;
+            invalidate_arb_attempts("market_reload");
             ++generation_;
             maker_quote_observations_.clear();
             for (auto& book : books_) book.second.generation = generation_;
@@ -2343,11 +2746,31 @@ private:
             item.second.active_since = 0;
             item.second.split_sell_active_since = 0;
         }
+        invalidate_arb_attempts("websocket_disconnected");
+        flush_arb_audit_queue();
         maker_quote_observations_.clear();
         write_health(false);
         std::cerr << "WS_ERROR stage=" << stage << " code=" << ec.value() << " message=" << ec.message() << "\n";
     }
 
+    static constexpr const char* arb_episode_started_event_ =
+        "\"event_type\":\"arb_episode_started\"";
+    static constexpr const char* arb_episode_ended_event_ =
+        "\"event_type\":\"arb_episode_ended\"";
+    static constexpr const char* arb_shadow_attempt_event_ =
+        "\"event_type\":\"arb_shadow_attempt\"";
+    static constexpr const char* arb_shadow_leg_result_event_ =
+        "\"event_type\":\"arb_shadow_leg_result\"";
+    static constexpr const char* arb_shadow_book_executable_event_ =
+        "\"event_type\":\"arb_shadow_book_executable\"";
+    static constexpr const char* arb_shadow_orphaned_event_ =
+        "\"event_type\":\"arb_shadow_orphaned\"";
+    static constexpr const char* arb_shadow_invalidated_event_ =
+        "\"event_type\":\"arb_shadow_invalidated\"";
+    static constexpr const char* arb_research_summary_event_ =
+        "\"event_type\":\"arb_research_summary\"";
+    static constexpr std::size_t max_pending_arb_attempts_ = 2048;
+    static constexpr std::size_t max_arb_audit_queue_ = 4096;
     const std::string host_ = "ws-subscriptions-clob.polymarket.com";
     asio::io_context& io_;
     asio::ssl::context& ssl_;
@@ -2367,6 +2790,13 @@ private:
     std::deque<std::string> writes_;
     std::map<std::string, Market> markets_;
     std::map<std::string, Book> books_;
+    std::set<std::string> probability_observations_emitted_;
+    std::map<std::string, double> probability_calibration_horizons_ = {
+        {"5m", environment_double("MODEL_CALIBRATION_HORIZON_5M", "90")},
+        {"15m", environment_double("MODEL_CALIBRATION_HORIZON_15M", "180")},
+        {"1h", environment_double("MODEL_CALIBRATION_HORIZON_1H", "300")},
+        {"4h", environment_double("MODEL_CALIBRATION_HORIZON_4H", "600")},
+    };
     double size_, fallback_fee_, buffer_per_share_, min_profit_, leg_interval_us_, execution_half_life_us_;
     double orphan_loss_per_share_, min_expected_value_, last_activity_;
     double split_sell_buffer_per_share_ = environment_double(
@@ -2379,6 +2809,9 @@ private:
     std::string markets_path_, health_path_, run_id_;
     strategy::Config strategy_config_ = strategy_config_from_environment();
     std::map<std::string, complete_set::Inventory> complete_set_inventory_;
+    std::map<std::string, std::string> active_arb_episodes_;
+    std::map<std::string, PendingArbObservation> pending_arb_attempts_;
+    std::deque<std::string> arb_audit_queue_;
     std::map<std::string, std::string> inventory_origin_config_hashes_;
     double inventory_min_entry_edge_ = environment_double("INVENTORY_MIN_ENTRY_EDGE", "0.05");
     double inventory_min_entry_ev_roi_ = environment_double(
@@ -2427,9 +2860,14 @@ private:
     unsigned long long document_version_, generation_, ws_session_id_, full_resync_count_ = 0;
     unsigned long long evaluation_sequence_ = 0, opportunity_sequence_ = 0;
     unsigned long long strategy_evaluation_sequence_ = 0, strategy_audit_backpressure_ = 0;
+    unsigned long long arb_audit_backpressure_ = 0;
     unsigned long long maker_quote_geometry_candidates_ = 0, maker_trade_events_ = 0;
     unsigned long long maker_single_leg_trade_throughs_ = 0;
     unsigned long long maker_both_leg_trade_throughs_ = 0;
+    unsigned long long arb_observation_sequence_ = 0;
+    unsigned long long arb_attempts_started_ = 0, arb_book_executable_ = 0;
+    unsigned long long arb_orphaned_ = 0, arb_invalidated_ = 0;
+    double last_arb_summary_at_ = 0;
     static std::atomic<unsigned long long> next_session_id_;
 };
 

@@ -188,7 +188,8 @@ def _empty_arbitrage_research():
     funnel = {
         "evaluations": 0, "depth_passed": 0, "fee_passed": 0,
         "latency_survived": 0, "independent_episodes": 0,
-        "shadow_attempts": None, "both_legs_filled": None,
+        "shadow_attempts": 0, "leg_1_book_executable": 0,
+        "both_legs_book_executable": 0, "orphaned": 0, "invalidated": 0,
         "completed": 0, "positive_completed": 0,
     }
     return {
@@ -200,6 +201,8 @@ def _empty_arbitrage_research():
         "repeatable_patterns": [],
         "counterfactual_patterns": [],
         "semantics": "RESEARCH_ONLY_NOT_ORDERS_OR_PNL",
+        "no_repeatable_arbitrage": True,
+        "conclusion": "NO REPEATABLE ARBITRAGE FOUND",
     }
 
 
@@ -216,6 +219,7 @@ def _merge_arbitrage_research(reports):
             key = (
                 row.get("strategy"), row.get("asset"), row.get("timeframe"),
                 row.get("target_size"), row.get("delay_ms"),
+                row.get("leg_order"), row.get("config_hash"),
             )
             if key not in patterns:
                 patterns[key] = dict(row)
@@ -226,12 +230,21 @@ def _merge_arbitrage_research(reports):
                 "positive_completed", "simulated_pnl",
             ):
                 current[field] = (current.get(field) or 0) + (row.get(field) or 0)
-            if current.get("distinct_close_windows", 0) >= 3:
-                current["classification"] = "RESEARCH_CANDIDATE"
+            rank = {
+                "NO_EVIDENCE": 0, "OBSERVED": 1, "PROVISIONAL": 2,
+                "RESEARCH_CANDIDATE": 3, "MAKER_RESEARCH_CANDIDATE": 3,
+                "OUT_OF_SAMPLE_VALIDATED": 4,
+            }
+            if rank.get(row.get("classification"), 0) > rank.get(current.get("classification"), 0):
+                current["classification"] = row.get("classification")
+                current["profitable_capacity"] = row.get("profitable_capacity")
     merged["repeatable_patterns"] = sorted(
         patterns.values(),
         key=lambda row: (
-            row.get("classification") != "RESEARCH_CANDIDATE",
+            row.get("classification") not in {
+                "OUT_OF_SAMPLE_VALIDATED", "RESEARCH_CANDIDATE",
+                "MAKER_RESEARCH_CANDIDATE",
+            },
             -int(row.get("distinct_close_windows") or 0),
             -int(row.get("independent_episodes") or 0),
         ),
@@ -247,6 +260,18 @@ def _merge_arbitrage_research(reports):
             -int(row.get("independent_episodes") or 0),
             float(row.get("delay_ms") or 0),
         ),
+    )
+    repeatable = any(
+        row.get("classification") in {
+            "OUT_OF_SAMPLE_VALIDATED", "RESEARCH_CANDIDATE",
+            "MAKER_RESEARCH_CANDIDATE",
+        }
+        for row in merged["repeatable_patterns"]
+    )
+    merged["no_repeatable_arbitrage"] = not repeatable
+    merged["conclusion"] = (
+        "REPEATABLE ARBITRAGE CANDIDATE FOUND"
+        if repeatable else "NO REPEATABLE ARBITRAGE FOUND"
     )
     return merged
 
@@ -1081,6 +1106,27 @@ def build_status(data_dir, log_file, state_file):
         "probability_calibration": _probability_calibration_view(
             lifecycle_state.get("probability_calibration", {})
         ),
+        "probability_observations": {
+            "pending": len(lifecycle_state.get("probability_predictions", {})),
+            "settled": len(lifecycle_state.get("completed_predictions", [])),
+            "orphaned": len(lifecycle_state.get("orphaned_predictions", [])),
+            "by_strategy": {
+                strategy: {
+                    "pending": sum(
+                        row.get("strategy") == strategy
+                        for row in lifecycle_state.get("probability_predictions", {}).values()
+                    ),
+                    "settled": int(
+                        lifecycle_state.get("probability_calibration", {})
+                        .get(strategy, {}).get("samples", 0)
+                    ),
+                }
+                for strategy in (
+                    "late_window_directional_ev", "low_price_lottery_ev",
+                )
+            },
+            "semantics": "CALIBRATION_ONLY_NOT_ORDERS_OR_PNL",
+        },
         "market_matrix": market_matrix,
         "market_reference_states": market_reference_states,
         "asset_latest_pnl": asset_latest_pnl,

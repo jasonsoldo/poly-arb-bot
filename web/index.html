@@ -27,6 +27,8 @@ main{padding:8px;max-width:1920px;margin:auto}
 .dashboard{display:grid;grid-template-columns:35% 43% 22%;grid-template-areas:
   "profile command matrix"
   "profile strategies matrix"
+  "probability probability probability"
+  "arb arb arb"
   "equity replay references"
   "rejections replay health"
   "legacy pnl latency";gap:7px}
@@ -34,6 +36,7 @@ main{padding:8px;max-width:1920px;margin:auto}
 .panel h2{margin:0 0 9px;color:var(--cyan);font-size:9px;letter-spacing:.11em}
 .profile{grid-area:profile}.command{grid-area:command}.matrix-panel{grid-area:matrix}
 .strategies{grid-area:strategies}.equity-panel{grid-area:equity}.replay{grid-area:replay}
+.probability-panel{grid-area:probability}.arb-research{grid-area:arb}
 .references{grid-area:references}.rejections{grid-area:rejections}.health-panel{grid-area:health}
 .legacy{grid-area:legacy}.pnl-panel{grid-area:pnl}.latency-panel{grid-area:latency}
 .profile-head{display:flex;justify-content:space-between;align-items:start;border-bottom:1px solid var(--line);padding-bottom:8px}
@@ -78,7 +81,7 @@ main{padding:8px;max-width:1920px;margin:auto}
 .pnl-meter{display:grid;grid-template-columns:90px 1fr 70px;gap:8px;align-items:center;padding:7px 0}
 .good{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}.na{color:var(--muted)}
 footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--muted);display:flex;justify-content:space-between}
-@media(max-width:1300px){.dashboard{grid-template-columns:34% 66%;grid-template-areas:"profile command" "profile strategies" "equity matrix" "rejections references" "replay health" "legacy legacy" "pnl latency"}.headstat{min-width:78px;padding-inline:8px}}
+@media(max-width:1300px){.dashboard{grid-template-columns:34% 66%;grid-template-areas:"profile command" "profile strategies" "probability probability" "arb arb" "equity matrix" "rejections references" "replay health" "legacy legacy" "pnl latency"}.headstat{min-width:78px;padding-inline:8px}}
 @media(max-width:850px){header{padding-inline:10px}.engine{font-size:9px}.dashboard{display:block}.panel{margin-bottom:7px}.headstats{display:none}.metrics,.session-strip,.inventory-summary{grid-template-columns:1fr 1fr}.strategy-grid{grid-template-columns:1fr}.command-grid{grid-template-columns:1fr 1fr}.cost-chain{grid-template-columns:1fr 1fr}.flow{grid-template-columns:repeat(2,1fr)}.refs{grid-template-columns:38px repeat(4,86px)}}
 </style>
 </head>
@@ -161,13 +164,19 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
     </div>
   </section>
 
+  <section class="panel probability-panel">
+    <h2>PROBABILITY CALIBRATION / OBSERVATION ONLY</h2>
+    <span class="sub">CALIBRATION ONLY / NOT ORDERS OR PNL / STRICT ACCEPT REMAINS SEPARATE</span>
+    <div id="probabilityCalibration" class="strategy-grid"></div>
+  </section>
+
   <section class="panel equity-panel">
     <h2>SIMULATED EQUITY / CURRENT CONFIG</h2>
     <div class="chart" id="equityChart"><div class="empty">NO COMPLETED SIMULATIONS / CURRENT CONFIG</div></div>
   </section>
 
-  <section class="panel strategies arb-research">
-    <h2>ARBITRAGE EXECUTION FUNNEL</h2>
+  <section class="panel arb-research">
+    <h2>ARBITRAGE DISCOVERY FUNNEL</h2>
     <span class="sub">RESEARCH ONLY / NOT ORDERS OR PNL</span>
     <div id="arbitrageFunnels" class="strategy-grid"></div>
     <div class="near-misses">
@@ -274,28 +283,46 @@ function strategyCard(id,title,key,d){
   if(key==='inventory_rebalancing_arb')detail=`${latest.action||'HOLD'} / RISK ${money(latest.maximum_loss)} / LOCK ${money(latest.projected_locked_profit)}`;
   if(key==='split_sell_lock')detail=`BIDS ${fmt(latest.combined_bid_vwap,3)} / HURDLE ${fmt(latest.observed_profit_threshold_bid_sum,3)} / SHORT ${money(latest.profit_threshold_shortfall)}`;
   if(key==='maker_complete_set_arb')detail=`PAIR ${fmt(latest.pair_quote_cost,3)} / GEOMETRY ${latest.quote_geometry_qualified?'PASS':'BLOCKED'} / NO FILLS INFERRED`;
-  if(probability)detail=`PRED ${cal.samples??0} / BRIER ${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)}`;
+  if(probability){
+    const obs=d.probability_observations?.by_strategy?.[key]||{};
+    detail=`OBS PENDING ${obs.pending??0} / SETTLED ${obs.settled??0} / BRIER ${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)} / CALIBRATION ONLY`;
+  }
   $(id).innerHTML=`<label>${title}</label><b class="${latest.decision==='ACCEPT'?'good':'warn'}">${latest.decision||'NO EVALUATION'}</b>
     <div>SESSION EVAL ${session.evaluations??0} / ACCEPT ${session.accepts??0} / REJECT ${session.rejections??0}</div>
     <div>${detail}</div><div class="${latest.decision==='ACCEPT'?'good':'warn'}">${esc(latest.reason||'N/A')}</div>
     <div class="history sub">HISTORY EVAL ${hist.evaluations??0} / SETTLED ${perf.completed??0} / PNL ${money(perf.simulated_pnl)}<br>TOP ${esc(reasons||'N/A')}</div>`;
 }
+function renderProbabilityCalibration(d){
+  const names={late_window_directional_ev:'DIRECTIONAL MODEL',low_price_lottery_ev:'LOTTERY MODEL'};
+  $('probabilityCalibration').innerHTML=Object.entries(names).map(([key,name])=>{
+    const cal=d.probability_calibration?.[key]||{},obs=d.probability_observations?.by_strategy?.[key]||{};
+    return `<div class="strategy-card"><label>${name}</label><b>OBSERVATION ONLY</b>
+      <div>PENDING <b>${obs.pending??0}</b> / SETTLED <b>${obs.settled??0}</b></div>
+      <div>BRIER <b>${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)}</b> / LOG LOSS <b>${cal.log_loss==null?'N/A':fmt(cal.log_loss,4)}</b></div>
+      <div>EXPECTED UP ${cal.expected_up_rate==null?'N/A':fmt(cal.expected_up_rate*100,1)+'%'} / REALIZED UP ${cal.realized_up_rate==null?'N/A':fmt(cal.realized_up_rate*100,1)+'%'}</div>
+      <div class="history sub">STRICT ORIGIN ACCEPT ${cal.origin_accepted??0} / REJECT ${cal.origin_rejected??0}<br>OPENS POSITION: FALSE</div></div>`;
+  }).join('');
+}
 function renderArbitrageResearch(research){
   const names={paired_lock:'BUY BOTH + MERGE',split_sell_lock:'SPLIT + SELL BOTH',maker_complete_set_arb:'MAKER COMPLETE SET'};
-  $('arbitrageFunnels').innerHTML=Object.entries(research.funnels||{}).map(([key,x])=>`<div class="strategy-card">
+  $('arbitrageFunnels').innerHTML=`<div class="strategy-card"><label>RESEARCH CONCLUSION</label><b class="${research.no_repeatable_arbitrage?'warn':'good'}">${esc(research.conclusion||'NO REPEATABLE ARBITRAGE FOUND')}</b><div>BOOK EXECUTABLE != FILL</div><div>REAL ORDERS 0 / REAL PNL N/A</div></div>`+Object.entries(research.funnels||{}).map(([key,x])=>`<div class="strategy-card">
     <label>${names[key]||esc(key)}</label>
     <div>EVALUATIONS <b>${x.evaluations??'N/A'}</b></div>
     <div>DEPTH PASSED <b>${x.depth_passed??'N/A'}</b></div>
     <div>FEE PASSED <b>${x.fee_passed??'N/A'}</b></div>
     <div>LATENCY SURVIVED <b>${x.latency_survived??'N/A'}</b></div>
     <div>INDEPENDENT EPISODES <b>${x.independent_episodes??'N/A'}</b></div>
-    <div>COMPLETED <b>${x.completed??'N/A'}</b> / POSITIVE <b>${x.positive_completed??'N/A'}</b></div>
+    <div>ATTEMPTS <b>${x.shadow_attempts??'N/A'}</b></div>
+    <div>LEG 1 BOOK EXEC <b>${x.leg_1_book_executable??'N/A'}</b></div>
+    <div>BOTH BOOK EXEC <b>${x.both_legs_book_executable??'N/A'}</b></div>
+    <div>ORPHAN <b>${x.orphaned??0}</b> / INVALID <b>${x.invalidated??0}</b></div>
   </div>`).join('')||'<span class="na">NO ARBITRAGE AUDIT</span>';
   $('repeatablePatterns').innerHTML=(research.repeatable_patterns||[]).slice(0,12).map(x=>`<div class="near-row">
     <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span><span>${esc(names[x.strategy]||x.strategy||'N/A')}</span>
     <span>${x.independent_episodes??0} EP / ${x.distinct_close_windows??0} WINDOWS</span>
-    <span>${fmt(x.target_size,2)} Q / ${fmt(x.delay_ms,0)}ms</span>
-    <b class="${x.classification==='RESEARCH_CANDIDATE'?'good':'warn'}">${esc(x.classification||'OBSERVED')}</b>
+    <span>${fmt(x.target_size,2)} Q / ${fmt(x.delay_ms,0)}ms / ${esc(x.leg_order||'N/A')}</span>
+    <span>BOOK EXEC ${fmt(x.book_executable_rate==null?null:x.book_executable_rate*100,1)}% / CAP ${fmt(x.profitable_capacity,2)}</span>
+    <b class="${['OUT_OF_SAMPLE_VALIDATED','RESEARCH_CANDIDATE','MAKER_RESEARCH_CANDIDATE'].includes(x.classification)?'good':'warn'}">${esc(x.classification||'OBSERVED')}</b>
   </div>`).join('')||'<div class="empty" style="height:45px">NO INDEPENDENT EPISODE YET</div>';
   $('counterfactualPatterns').innerHTML=(research.counterfactual_patterns||[]).slice(0,12).map(x=>`<div class="near-row">
     <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span><span>${esc(names[x.strategy]||x.strategy||'N/A')}</span>
@@ -344,6 +371,7 @@ function render(d){
   strategyCard('splitSellCard','SPLIT + SELL BOTH','split_sell_lock',d);
   strategyCard('inventoryCard','INVENTORY REBALANCE','inventory_rebalancing_arb',d);
   strategyCard('makerCard','MAKER COMPLETE SET','maker_complete_set_arb',d);
+  renderProbabilityCalibration(d);
   $('splitSellNearMisses').innerHTML=(d.split_sell_near_misses||[]).map(x=>`<div class="near-row">
     <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span>
     <span>${fmt(x.combined_bid_vwap,4)} / NEED ${fmt(x.observed_profit_threshold_bid_sum,4)}</span>

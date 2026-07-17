@@ -15,6 +15,22 @@ def valid_status():
         "counts": {"executed_orders": 0},
         "shadow_execution": {"real_order_submissions": 0, "real_orders": 0, "real_fills": 0},
         "shadow_lifecycle": {"real_order_submissions": 0, "real_orders": 0, "real_fills": 0},
+        "probability_observations": {
+            "pending": 2, "settled": 10, "orphaned": 0,
+            "semantics": "CALIBRATION_ONLY_NOT_ORDERS_OR_PNL",
+        },
+        "arbitrage_research": {
+            "semantics": "RESEARCH_ONLY_NOT_ORDERS_OR_PNL",
+            "no_repeatable_arbitrage": True,
+            "conclusion": "NO REPEATABLE ARBITRAGE FOUND",
+            "funnels": {
+                "paired_lock": {
+                    "shadow_attempts": 3, "leg_1_book_executable": 3,
+                    "both_legs_book_executable": 2, "orphaned": 1,
+                    "invalidated": 0,
+                },
+            },
+        },
         "strategy_counts": {
             "paired_lock": {"evaluations": 10, "accepts": 2, "rejections": 8, "model_evaluations": 0},
             "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19, "model_evaluations": 20, "latest_model_evaluated": True,
@@ -70,6 +86,31 @@ def test_acceptance_passes_all_shadow_invariants():
     assert report["passed"] is True
     assert report["status"] == "PASS"
     assert all(check["passed"] for check in report["checks"])
+
+
+def test_acceptance_rejects_synthetic_fill_or_mixed_probability_semantics():
+    status = valid_status()
+    status["arbitrage_research"]["funnels"]["paired_lock"]["both_legs_filled"] = 2
+    status["probability_observations"]["semantics"] = "ORDERS"
+
+    report = evaluate_status(status)
+
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert failed == {"arbitrage_book_evidence_integrity", "probability_observation_integrity"}
+    assert report["status"] == "FAIL"
+
+
+def test_acceptance_reports_repeatable_arbitrage_evidence_without_calling_it_profit():
+    status = valid_status()
+    status["arbitrage_research"].update(
+        no_repeatable_arbitrage=False,
+        conclusion="REPEATABLE ARBITRAGE CANDIDATE FOUND",
+    )
+
+    report = evaluate_status(status)
+
+    assert report["status"] == "PASS"
+    assert report["metrics"]["arbitrage_research_conclusion"] == "REPEATABLE ARBITRAGE CANDIDATE FOUND"
 
 
 def test_acceptance_fails_drift_and_real_order_submission():

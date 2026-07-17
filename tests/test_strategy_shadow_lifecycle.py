@@ -70,6 +70,15 @@ def prediction(event_id="prediction-1", strategy="late_window_directional_ev",
     }
 
 
+def probability_observation(event_id="observation-1",
+                            strategy="late_window_directional_ev"):
+    row = prediction(event_id, strategy)
+    row["event_type"] = "shadow_prediction_observation"
+    row["opens_position"] = False
+    row["observation_semantics"] = "PROBABILITY_CALIBRATION_NOT_ORDER"
+    return row
+
+
 def test_repeated_accepts_open_one_position(tmp_path):
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "complete.jsonl")
     assert lifecycle.consume(accepted(), {"m1": market()}) is True
@@ -399,6 +408,29 @@ def test_rejected_fixed_horizon_prediction_is_captured_without_opening_trade(tmp
     assert stored["origin_decision"] == "REJECT"
     assert stored["estimated_up_probability"] == 0.7
     assert stored["calibration_horizon_seconds"] == 90
+
+
+def test_dedicated_probability_observation_is_captured_without_opening_trade(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+
+    assert lifecycle.capture_prediction(
+        probability_observation(), {"m1": market()}
+    ) is True
+
+    assert lifecycle.data["positions"] == {}
+    stored = next(iter(lifecycle.data["probability_predictions"].values()))
+    assert stored["source_event_type"] == "shadow_prediction_observation"
+    assert stored["opens_position"] is False
+    assert stored["observation_semantics"] == "PROBABILITY_CALIBRATION_NOT_ORDER"
+
+
+def test_probability_observation_cannot_claim_to_open_position(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    row = probability_observation("bad-observation")
+    row["opens_position"] = True
+
+    assert lifecycle.capture_prediction(row, {"m1": market()}) is False
+    assert lifecycle.data["probability_predictions"] == {}
 
 
 def test_prediction_capture_is_one_up_sample_per_market_model_and_horizon(tmp_path):

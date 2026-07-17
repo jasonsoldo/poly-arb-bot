@@ -129,10 +129,20 @@ def test_dashboard_renders_real_arbitrage_funnel_and_repeatability_evidence():
     ):
         assert f'id="{element_id}"' in source
     for label in (
-        "ARBITRAGE EXECUTION FUNNEL", "REPEATABLE PATTERN RESEARCH",
+        "ARBITRAGE DISCOVERY FUNNEL", "REPEATABLE PATTERN RESEARCH",
         "INDEPENDENT EPISODES", "LATENCY SURVIVED", "SIZE + DELAY COUNTERFACTUALS",
         "RESEARCH ONLY / NOT ORDERS OR PNL",
     ):
         assert label in source
     assert "arbitrage_research" in source
     assert "repeatable_patterns" in source
+
+
+def test_dashboard_separates_probability_observation_from_strict_execution():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    assert 'id="probabilityCalibration"' in source
+    assert "PROBABILITY CALIBRATION / OBSERVATION ONLY" in source
+    assert "CALIBRATION ONLY / NOT ORDERS OR PNL" in source
+    assert "probability_observations" in source
+    assert "origin_accepted" in source
+    assert "origin_rejected" in source

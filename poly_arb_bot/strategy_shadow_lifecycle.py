@@ -321,11 +321,13 @@ class StrategyShadowLifecycle:
     def capture_prediction(self, row, markets):
         strategy = row.get("strategy")
         market_id = row.get("market_id")
+        event_type = row.get("event_type")
         if (
-            row.get("event_type") != "shadow_eval"
+            event_type not in {"shadow_eval", "shadow_prediction_observation"}
             or strategy not in {"late_window_directional_ev", "low_price_lottery_ev"}
             or row.get("outcome") != "Up"
             or market_id not in markets
+            or (event_type == "shadow_prediction_observation" and row.get("opens_position") is not False)
         ):
             return False
         timeframe = row.get("timeframe") or markets[market_id].get("interval")
@@ -358,6 +360,11 @@ class StrategyShadowLifecycle:
         self.data["probability_predictions"][prediction_id] = {
             "event_id": prediction_id,
             "source_event_id": row.get("event_id"),
+            "source_event_type": event_type,
+            "opens_position": False,
+            "observation_semantics": row.get(
+                "observation_semantics", "PROBABILITY_CALIBRATION_NOT_ORDER",
+            ),
             "strategy": strategy,
             "strategy_config_version": row.get("config_version"),
             "strategy_config_hash": row.get("config_hash"),

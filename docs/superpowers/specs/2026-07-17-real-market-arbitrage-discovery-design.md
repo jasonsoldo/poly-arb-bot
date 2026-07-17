@@ -18,6 +18,33 @@ The system remains `SHADOW / DRY RUN`. It submits no real orders.
 - Do not use configured fill probabilities as observed execution results.
 - Do not optimize arbitrary rules until they fit the same data used for evaluation.
 
+## Runtime Planes
+
+The always-on process separates observation from execution so that strict trading
+gates do not suppress research samples and research samples do not become fake
+trades.
+
+### Full-Market Research Observation
+
+Every active market is evaluated on live book changes. Structural arbitrage stores
+the fixed size/delay grid. Directional and lottery models emit scheduled prediction
+observations for every eligible market/time bucket and attach the official outcome
+after settlement. These observations ignore portfolio loss and position-count
+limits because they open no position, but they still require valid source data and
+record missing-input reasons. They count toward calibration, never PnL or fills.
+
+### Strict Shadow Execution
+
+Only candidates passing their unchanged time, depth, freshness, fee, slippage,
+model, and net-EV gates create Shadow positions or execution attempts. Increasing
+research sample size is not a reason to loosen execution gates.
+
+### Structural Arbitrage Discovery
+
+The C++ engine enumerates complete-set structures on every real CLOB mutation,
+including near misses and delayed outcomes. It is independent of directional and
+lottery acceptance and cannot inherit their inventory or PnL labels.
+
 ## Official Market Primitives
 
 The implementation uses the current official Polymarket interfaces:
@@ -123,6 +150,17 @@ families above. It evaluates observed execution delays:
 0ms, 50ms, 100ms, 250ms
 ```
 
+Sequential taker families evaluate both leg orders independently:
+
+```text
+UP_THEN_DOWN
+DOWN_THEN_UP
+```
+
+Leg order is part of the episode and configuration identity. Results from the two
+orders cannot be pooled before reporting their separate survival, orphan, and PnL
+statistics.
+
 The delay grid is research output. The deployable delay assumption must later be
 bounded by measured order API acknowledgement and fill-confirmation latency, not
 the engine's internal evaluation latency.
@@ -154,7 +192,9 @@ An observed leg passes only when:
 - the book is fresh, synchronized, and uncrossed;
 - the actual VWAP and rounded fee preserve the strategy's locked budget.
 
-Both legs filled is true only when both observed legs pass. A session change,
+Both legs book-executable is true only when both observed legs pass. This is a
+real-market delayed-book observation, not proof that an unsubmitted order filled.
+A session change,
 generation change, market expiry, stale book, missing snapshot, or invalid fee
 schedule invalidates the attempt.
 
@@ -166,7 +206,7 @@ is unavailable, the entire leg-1 cost is treated as loss.
 
 Every event records per-leg:
 
-- requested quantity and filled quantity;
+- requested quantity and book-executable quantity;
 - best price and multi-level VWAP;
 - gross cost or proceeds;
 - raw fee and officially rounded fee;
@@ -194,7 +234,7 @@ The C++ producer writes:
 - `arb_episode_started` and `arb_episode_ended`;
 - `arb_shadow_attempt`;
 - `arb_shadow_leg_result`;
-- `arb_shadow_completed`;
+- `arb_shadow_book_executable`;
 - `arb_shadow_orphaned`;
 - `arb_shadow_invalidated`;
 - `arb_maker_trade_through_observed`;
@@ -204,8 +244,10 @@ All events carry stable IDs and canonical market identity. Every event explicitl
 contains `real_order_submissions=0`, `real_orders=0`, and `real_fills=0`.
 
 The existing Python paired executor must stop turning `shadow_opportunity` into a
-completed trade through default `filled/filled` environment values. Only canonical
-C++ observed execution events count toward arbitrage completion statistics.
+completed trade through default `filled/filled` environment values. Canonical C++
+events count as book-executable Shadow observations, not fills. Only separately
+approved authenticated order acknowledgements and fill events may increment real
+fill statistics.
 
 ## Compact Feature Dataset
 
@@ -238,7 +280,7 @@ Data is split chronologically by close window:
 Required statistics include:
 
 - independent episode and close-window counts;
-- observed both-leg completion rate and Wilson 95% interval;
+- observed both-leg book-executable rate and Wilson 95% interval;
 - orphan and invalidation rates;
 - mean and median conservative PnL;
 - 95% confidence interval for mean PnL;
@@ -264,7 +306,7 @@ repeatability.
 
 - at least 20 observed attempts;
 - at least 10 independent close windows;
-- Wilson 95% lower bound for both-leg completion at least 80%;
+- Wilson 95% lower bound for both-leg book execution at least 80%;
 - orphan rate at most 5%;
 - positive conservative total PnL;
 - 95% lower confidence bound of mean per-attempt PnL above zero.
@@ -291,8 +333,8 @@ depth_passed
 post_fee_positive
 independent_episodes
 shadow_attempts
-leg_1_observed
-both_legs_observed
+leg_1_book_executable
+both_legs_book_executable
 orphaned
 invalidated
 completed
@@ -303,7 +345,7 @@ out_of_sample_validated
 ```
 
 Counterfactual observations remain separate and never increment observed attempts,
-fills, completions, or PnL.
+book-executable results, fills, completions, or PnL.
 
 ## Web Dashboard
 

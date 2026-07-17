@@ -822,6 +822,47 @@ def test_web_status_exposes_incremental_arbitrage_research(tmp_path):
     assert research["repeatable_patterns"][0]["classification"] == "OBSERVED"
 
 
+def test_web_arbitrage_research_uses_book_executable_not_fill_semantics():
+    report = web_monitor._empty_arbitrage_research()
+    funnel = report["funnels"]["paired_lock"]
+
+    assert funnel["shadow_attempts"] == 0
+    assert funnel["leg_1_book_executable"] == 0
+    assert funnel["both_legs_book_executable"] == 0
+    assert funnel["orphaned"] == 0
+    assert funnel["invalidated"] == 0
+    assert "both_legs_filled" not in funnel
+    assert report["no_repeatable_arbitrage"] is True
+    assert report["conclusion"] == "NO REPEATABLE ARBITRAGE FOUND"
+
+
+def test_web_merge_keeps_leg_order_and_config_hash_cohorts_separate():
+    base = {
+        "funnels": {}, "counterfactual_patterns": [],
+        "semantics": "RESEARCH_ONLY_NOT_ORDERS_OR_PNL",
+    }
+    first = dict(base, repeatable_patterns=[{
+        "strategy": "paired_lock", "asset": "BTC", "timeframe": "5m",
+        "target_size": 10, "delay_ms": 50, "leg_order": "UP_THEN_DOWN",
+        "config_hash": "a", "independent_episodes": 20,
+        "distinct_close_windows": 12, "classification": "OUT_OF_SAMPLE_VALIDATED",
+        "profitable_capacity": 10,
+    }])
+    second = dict(base, repeatable_patterns=[{
+        "strategy": "paired_lock", "asset": "BTC", "timeframe": "5m",
+        "target_size": 10, "delay_ms": 50, "leg_order": "DOWN_THEN_UP",
+        "config_hash": "a", "independent_episodes": 2,
+        "distinct_close_windows": 2, "classification": "OBSERVED",
+        "profitable_capacity": None,
+    }])
+
+    merged = web_monitor._merge_arbitrage_research([first, second])
+
+    assert len(merged["repeatable_patterns"]) == 2
+    assert merged["repeatable_patterns"][0]["classification"] == "OUT_OF_SAMPLE_VALIDATED"
+    assert merged["no_repeatable_arbitrage"] is False
+
+
 def test_web_status_separates_engine_session_counts_and_legacy_inventory(tmp_path):
     data = tmp_path / "data"
     state = tmp_path / "state"
@@ -994,7 +1035,9 @@ def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
         "calibration_mode": True,
         "portfolio_limits_enforced": False,
         "risk_mode": "CALIBRATION_UNTHROTTLED",
-        "probability_predictions": {"pending": {"market_id": "m1"}},
+        "probability_predictions": {"pending": {
+            "market_id": "m1", "strategy": "late_window_directional_ev",
+        }},
         "completed_predictions": ["p1:complete", "p2:complete"],
         "probability_calibration": {
             "late_window_directional_ev": {
@@ -1025,6 +1068,12 @@ def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
     assert lifecycle["calibration_bypasses"] == {"lottery_consecutive_loss_limit": 7}
     assert lifecycle["pending_predictions"] == 1
     assert lifecycle["completed_predictions"] == 2
+    assert status["probability_observations"]["pending"] == 1
+    assert status["probability_observations"]["settled"] == 2
+    assert status["probability_observations"]["semantics"] == "CALIBRATION_ONLY_NOT_ORDERS_OR_PNL"
+    assert status["probability_observations"]["by_strategy"]["late_window_directional_ev"] == {
+        "pending": 1, "settled": 2,
+    }
     calibration = status["probability_calibration"]["late_window_directional_ev"]
     assert calibration["samples"] == 2
     assert calibration["brier_score"] == .34
