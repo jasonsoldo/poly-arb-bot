@@ -216,7 +216,7 @@ def test_stale_dedicated_profit_exit_cannot_close_a_newer_position(tmp_path):
         "event_id": "old-exit",
         "entry_event_id": "old-entry",
         "event_type": "shadow_probability_profit_exit_book_executable",
-        "ts": 1010,
+        "ts": 999,
         "exit_fill_quantity": 10,
         "exit_vwap": .90,
         "exit_total_fee": 0,
@@ -263,6 +263,43 @@ def test_current_generation_profit_exit_reprices_position_after_entry_id_rebind(
     complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
     assert complete["entry_event_id"] == "current-entry"
     assert complete["exit_event_id"] == "current-exit"
+    assert complete["realized_simulated_pnl"] == .37
+
+
+def test_new_session_profit_exit_reprices_position_kept_across_restart(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", log, profit_exit_min_pnl=.10,
+    )
+    entry = accepted("old-session-entry", outcome="Down")
+    entry.update({
+        "config_version": "shadow-buy-rules-v8",
+        "generation": 4,
+        "session": 7,
+    })
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    exit_quote = {
+        **entry,
+        "event_id": "new-session-exit",
+        "entry_event_id": "new-session-cpp-entry",
+        "event_type": "shadow_probability_profit_exit_book_executable",
+        "generation": 1,
+        "session": 8,
+        "ts": 1010,
+        "exit_fill_quantity": 10,
+        "exit_vwap": .45,
+        "exit_total_fee": .02,
+        "exit_execution_buffer": .01,
+        "exit_depth_ok": True,
+        "exit_book_fresh": True,
+        "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+    }
+
+    assert lifecycle.consume(exit_quote, {"m1": market()}) is True
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["entry_event_id"] == "old-session-entry"
+    assert complete["exit_source_entry_event_id"] == "new-session-cpp-entry"
     assert complete["realized_simulated_pnl"] == .37
 
 

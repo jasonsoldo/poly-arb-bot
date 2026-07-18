@@ -611,18 +611,6 @@ class StrategyShadowLifecycle:
         position = self.data["positions"].get(key)
         if not position or position.get("terminal_hedged"):
             return False
-        entry_event_id = row.get("entry_event_id")
-        if entry_event_id and entry_event_id != position.get("event_id"):
-            position_generation = position.get("generation")
-            position_session = position.get("session")
-            current_identity = (
-                position_generation is not None
-                and position_session is not None
-                and row.get("generation") == position_generation
-                and row.get("session") == position_session
-            )
-            if not current_identity:
-                return False
         if float(row.get("ts") or 0) <= float(position.get("entry_ts") or 0):
             return False
         size = float(position.get("target_size") or 0)
@@ -649,6 +637,7 @@ class StrategyShadowLifecycle:
             **position,
             "event_id": complete_id,
             "entry_event_id": position["event_id"],
+            "exit_source_entry_event_id": row.get("entry_event_id"),
             "exit_event_id": row["event_id"],
             "event_type": "shadow_complete",
             "timestamp": float(row.get("ts") or time.time()),
