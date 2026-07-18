@@ -19,6 +19,10 @@ class ClobBook:
     latency_ms: int
     timestamp_ms: int
     fee_rate: Optional[float] = None
+    min_order_size: Optional[float] = None
+    tick_size: Optional[float] = None
+    fee_exponent: Optional[float] = None
+    fee_taker_only: Optional[bool] = None
 
     @property
     def best_bid(self) -> Optional[float]:
@@ -57,12 +61,18 @@ class PolymarketClobClient:
             raise RuntimeError(f"CLOB book rejected token {token_id}: {data['error']}")
         bids = self._levels(data.get("bids", []), reverse=True)
         asks = self._levels(data.get("asks", []), reverse=False)
+        fee_rate, min_order_size, tick_size, fee_exponent, fee_taker_only = self._book_metadata(data)
         return ClobBook(
             token_id=token_id,
             bids=bids,
             asks=asks,
             latency_ms=response.elapsed_ms,
             timestamp_ms=int(time.time() * 1000),
+            fee_rate=fee_rate,
+            min_order_size=min_order_size,
+            tick_size=tick_size,
+            fee_exponent=fee_exponent,
+            fee_taker_only=fee_taker_only,
         )
 
     def get_books(self, token_ids: List[str]) -> Dict[str, ClobBook]:
@@ -70,16 +80,12 @@ class PolymarketClobClient:
         books = {}
         for data in response.data if isinstance(response.data, list) else []:
             token_id = str(data.get("asset_id") or "")
-            schedule = data.get("fee_schedule") if isinstance(data.get("fee_schedule"), dict) else {}
-            fee_value = schedule.get("rate", data.get("taker_base_fee"))
-            try:
-                fee_rate = float(fee_value) if fee_value is not None else None
-            except (TypeError, ValueError):
-                fee_rate = None
+            fee_rate, min_order_size, tick_size, fee_exponent, fee_taker_only = self._book_metadata(data)
             books[token_id] = ClobBook(
                 token_id, self._levels(data.get("bids", []), reverse=True),
                 self._levels(data.get("asks", []), reverse=False), response.elapsed_ms,
-                int(time.time() * 1000), fee_rate,
+                int(time.time() * 1000), fee_rate, min_order_size, tick_size,
+                fee_exponent, fee_taker_only,
             )
         return books
 
@@ -115,3 +121,25 @@ class PolymarketClobClient:
             size = row.get("size") if isinstance(row, dict) else row[1]
             levels.append(ClobLevel(float(price), float(size)))
         return sorted(levels, key=lambda level: level.price, reverse=reverse)
+
+    @staticmethod
+    def _book_metadata(data: Dict):
+        schedule = data.get("fee_schedule") if isinstance(data.get("fee_schedule"), dict) else {}
+
+        def number(*values):
+            for value in values:
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        fee_rate = number(schedule.get("rate"), schedule.get("r"), data.get("taker_base_fee"))
+        min_order_size = number(data.get("min_order_size"), data.get("mos"))
+        tick_size = number(data.get("tick_size"), data.get("mts"))
+        fee_exponent = number(schedule.get("exponent"), schedule.get("e"))
+        taker_value = schedule.get("taker_only", schedule.get("to"))
+        fee_taker_only = taker_value if isinstance(taker_value, bool) else None
+        return fee_rate, min_order_size, tick_size, fee_exponent, fee_taker_only

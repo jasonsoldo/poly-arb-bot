@@ -4,6 +4,7 @@ from dataclasses import replace
 from poly_arb_bot.cli import (
     enrich_open_prices,
     market_refresh_delay,
+    merge_validated_market_metadata,
     restore_cached_open_prices,
     scan_updown_markets,
     write_market_payload_atomic,
@@ -129,6 +130,32 @@ def test_cached_official_open_price_survives_transient_endpoint_failure(tmp_path
 
     assert restored[0].open_price == 64765.026
     assert restored[0].open_price_source == "polymarket_crypto_price_api"
+
+
+def test_enrichment_merge_preserves_validated_clob_sizing_metadata():
+    validated = _spec(
+        fee_rate=0.07,
+        min_order_size=5,
+        tick_size=0.01,
+        fee_exponent=1,
+        fee_taker_only=True,
+    )
+    enriched = _spec(
+        open_price=64765.026,
+        open_price_source="polymarket_crypto_price_api",
+        open_price_capture_mode="official_open_price_api",
+        open_price_source_timestamp_ms=1784099400000,
+    )
+
+    merged = merge_validated_market_metadata([validated], [enriched])
+
+    assert merged == [replace(
+        validated,
+        open_price=64765.026,
+        open_price_source="polymarket_crypto_price_api",
+        open_price_capture_mode="official_open_price_api",
+        open_price_source_timestamp_ms=1784099400000,
+    )]
 
 
 def test_market_refresh_delay_scans_immediately_after_next_market_starts(tmp_path):

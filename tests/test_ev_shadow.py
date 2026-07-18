@@ -124,7 +124,7 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
     assert all(row["event_id"].startswith("paired-1:") for row in rows)
     assert all(row["real_order_submissions"] == 0 for row in rows)
     assert all(row["target_size"] == 10 for row in rows)
-    assert all(row["config_version"] == "shadow-buy-rules-v8" for row in rows)
+    assert all(row["config_version"] == "shadow-buy-rules-v9" for row in rows)
 
 
 def test_shadow_calibration_can_evaluate_directional_outside_terminal_window(monkeypatch):

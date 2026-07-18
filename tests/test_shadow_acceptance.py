@@ -6,6 +6,13 @@ from poly_arb_bot.shadow_acceptance import evaluate_status
 
 
 def valid_status():
+    sizing = {
+        "decision": "REJECT", "sizing_mode": "real_market_dynamic_v1",
+        "requested_max_size": 100, "market_minimum_size": 5,
+        "shadow_capital_usd": 1000, "dynamic_target_size": 0,
+        "dynamic_all_in_cost": None, "dynamic_maximum_loss": None,
+        "capital_budget_usd": 20, "size_binding_constraint": None,
+    }
     return {
         "clob_readiness": {"discovered_markets": 4, "paired_markets_ready": 3, "not_ready": 1},
         "shadow_report": {
@@ -51,9 +58,14 @@ def valid_status():
             },
         },
         "strategy_latest": {
-            "late_window_directional_ev": {"estimated_probability": 0.6},
-            "low_price_lottery_ev": {"estimated_probability": 0.6},
-            "paired_lock": {"locked_profit": -0.1},
+            "late_window_directional_ev": {**sizing, "estimated_probability": 0.6},
+            "low_price_lottery_ev": {**sizing, "estimated_probability": 0.6},
+            "paired_lock": {**sizing, "locked_profit": -0.1},
+        },
+        "dynamic_sizing": {
+            "active_positions": 0, "active_capital_usd": 0,
+            "maximum_loss_usd": 0, "invalid_active_positions": 0,
+            "semantics": "REAL_MARKET_BOOK_SIZED_SHADOW_NOT_ORDERS",
         },
         "performance": {"completed": 0},
         "performance_by_strategy": {
@@ -86,6 +98,18 @@ def test_acceptance_passes_all_shadow_invariants():
     assert report["passed"] is True
     assert report["status"] == "PASS"
     assert all(check["passed"] for check in report["checks"])
+
+
+def test_acceptance_fails_missing_or_invalid_dynamic_sizing_evidence():
+    status = valid_status()
+    del status["strategy_latest"]["paired_lock"]["sizing_mode"]
+    status["dynamic_sizing"]["invalid_active_positions"] = 1
+
+    report = evaluate_status(status)
+
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert "dynamic_sizing_integrity" in failed
+    assert report["status"] == "FAIL"
 
 
 def test_acceptance_rejects_synthetic_fill_or_mixed_probability_semantics():

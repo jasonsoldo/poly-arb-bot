@@ -262,9 +262,10 @@ function strategyCard(id,title,key,d){
     detail='REAL ASK ENTRY / FUTURE REAL BID EXIT / BOOK EXECUTABLE != FILL';
   }
   const positive=['ACCEPT','ENTRY_EXECUTABLE','EXIT_EXECUTABLE'].includes(latest.decision);
+  const sizing=`DYNAMIC SIZE ${fmt(latest.dynamic_target_size,2)} / ALL-IN COST ${money(latest.dynamic_all_in_cost)} / CAPITAL BUDGET ${money(latest.capital_budget_usd)} / MAXIMUM LOSS ${money(latest.dynamic_maximum_loss)}<br>MARKET MINIMUM ${fmt(latest.market_minimum_size,2)} / SIZE LIMIT ${esc(latest.size_binding_constraint||'N/A')}`;
   $(id).innerHTML=`<label>${title}</label><b class="${positive?'good':'warn'}">${latest.decision||'NO EVALUATION'}</b>
     <div>SESSION EVAL ${session.evaluations??0} / ACCEPT ${session.accepts??0} / REJECT ${session.rejections??0}</div>
-    <div>${detail}</div><div class="${latest.decision==='ACCEPT'?'good':'warn'}">${esc(latest.reason||'N/A')}</div>
+    <div>${detail}</div><div>${sizing}</div><div class="${latest.decision==='ACCEPT'?'good':'warn'}">${esc(latest.reason||'N/A')}</div>
     <div class="history sub">HISTORY EVAL ${hist.evaluations??0} / SETTLED ${perf.completed??0} / PNL ${money(perf.simulated_pnl)}<br>TOP ${esc(reasons||'N/A')}</div>`;
 }
 function renderProbabilityCalibration(d){
@@ -337,7 +338,9 @@ function render(d){
   $('scoreBreakdown').innerHTML=Object.entries({DEPTH:checks.depth,FRESH:checks.freshness,'BOOK SYNC':checks.book_sync,'LEG RISK':checks.leg_risk,'NET COST':checks.net_cost}).map(([k,v])=>`<div class="check ${v==='PASS'?'good':v==='FAIL'?'warn':''}"><label>${k}</label>${v||'N/A'}</div>`).join('');
   $('pairAudit').innerHTML=`<div><label>GROSS COST / FEES / BUFFER</label><b>${money(pair.gross_cost)} / ${money((pair.up_fee??0)+(pair.down_fee??0))} / ${money(pair.buffer)}</b></div>
     <div><label>NET COST</label><b>${money(pair.net_cost)}</b></div><div><label>GUARANTEED PAYOUT</label><b>${money(pair.guaranteed_payout)}</b></div>
-    <div><label>LOCKED PROFIT</label><b>${money(pair.locked_profit)}</b></div><div><label>DECISION</label><b class="${pair.decision==='ACCEPT'?'good':'warn'}">${pair.decision||'N/A'}<small class="sub">${esc(pair.reason||'N/A')}</small></b></div>`;
+    <div><label>LOCKED PROFIT</label><b>${money(pair.locked_profit)}</b></div><div><label>DYNAMIC SIZE / MARKET MINIMUM</label><b>${fmt(pair.dynamic_target_size,2)} / ${fmt(pair.market_minimum_size,2)}</b></div>
+    <div><label>CAPITAL BUDGET / MAXIMUM LOSS</label><b>${money(pair.capital_budget_usd)} / ${money(pair.dynamic_maximum_loss)}</b></div><div><label>SIZE LIMIT</label><b>${esc(pair.size_binding_constraint||'N/A')}</b></div>
+    <div><label>DECISION</label><b class="${pair.decision==='ACCEPT'?'good':'warn'}">${pair.decision||'N/A'}<small class="sub">${esc(pair.reason||'N/A')}</small></b></div>`;
 
   strategyCard('directionalCard','DIRECTIONAL EV','late_window_directional_ev',d);
   strategyCard('lotteryCard','LOW-PRICE LOTTERY','low_price_lottery_ev',d);
@@ -365,7 +368,8 @@ function render(d){
   $('rejectionCoverage').textContent=`SHOWN ${shownCount} / TOTAL ${totalReject} / OTHER ${totalReject-shownCount}`;
 
   const cr=d.clob_readiness||{},execution=d.shadow_execution||{};
-  const healthRows=[['DISCOVERED',cr.discovered_markets],['PAIRED MARKETS READY',cr.paired_markets_ready],['NOT READY',cr.not_ready],['WAIT UP',cr.waiting_up_snapshot],['WAIT DOWN',cr.waiting_down_snapshot],['SUBSCRIPTION GEN',health.subscription_generation],['WS SESSION',health.ws_session_id],['RESYNCS',health.resyncs],['MAKER GEOMETRY',c.maker_quote_geometry_candidates],['TRADE EVENTS',c.maker_trade_events],['ONE-LEG THROUGH',c.maker_single_leg_trade_throughs],['BOTH-LEGS THROUGH',c.maker_both_leg_trade_throughs],['AUDIT QUEUE',health.strategy_audit_queue],['BACKPRESSURE',health.strategy_audit_backpressure],['EXECUTION STATE',execution.state||'IDLE'],['REAL FILLS',execution.real_fills??0]];
+  const dyn=d.dynamic_sizing||{};
+  const healthRows=[['DISCOVERED',cr.discovered_markets],['PAIRED MARKETS READY',cr.paired_markets_ready],['NOT READY',cr.not_ready],['WAIT UP',cr.waiting_up_snapshot],['WAIT DOWN',cr.waiting_down_snapshot],['DYNAMIC POSITIONS',dyn.active_positions],['ACTIVE CAPITAL',money(dyn.active_capital_usd)],['MAXIMUM LOSS',money(dyn.maximum_loss_usd)],['SUBSCRIPTION GEN',health.subscription_generation],['WS SESSION',health.ws_session_id],['RESYNCS',health.resyncs],['MAKER GEOMETRY',c.maker_quote_geometry_candidates],['TRADE EVENTS',c.maker_trade_events],['ONE-LEG THROUGH',c.maker_single_leg_trade_throughs],['BOTH-LEGS THROUGH',c.maker_both_leg_trade_throughs],['AUDIT QUEUE',health.strategy_audit_queue],['BACKPRESSURE',health.strategy_audit_backpressure],['EXECUTION STATE',execution.state||'IDLE'],['REAL FILLS',execution.real_fills??0]];
   $('health').innerHTML=healthRows.map(x=>`<div class="health-row"><span>${x[0]}</span><b>${x[1]??'N/A'}</b></div>`).join('');
 
   const maxEquity=Math.max(1,...(d.equity_curve||[]).map(x=>Math.abs(Number(x.equity)||0))),pnl=Number(p.simulated_pnl||0);

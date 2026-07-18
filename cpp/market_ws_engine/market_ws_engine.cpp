@@ -9,6 +9,7 @@
 #include <boost/property_tree/ptree.hpp>
 #include "../reference_ipc/latest_value_client.hpp"
 #include "../strategy/complete_set_arb.hpp"
+#include "../strategy/dynamic_position_sizing.hpp"
 #include "../strategy/ev_strategy.hpp"
 #include "../strategy/microstructure_reversion.hpp"
 #include "../strategy/observed_arb.hpp"
@@ -25,6 +26,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -55,7 +57,8 @@ struct Market {
     std::string condition_id, asset, interval, window;
     std::string settlement_source, title, open_price_source, open_price_capture_mode;
     std::optional<double> open_price, open_price_source_timestamp_ms;
-    double fee = .07, start_ts = 0, close_ts = 0, active_since = 0, last_audit = 0;
+    double fee = .07, min_order_size = 0, tick_size = 0;
+    double start_ts = 0, close_ts = 0, active_since = 0, last_audit = 0;
     double split_sell_active_since = 0, split_sell_last_audit = 0;
     double arb_research_last_audit = 0, arb_research_last_evaluated = 0;
     std::array<bool, 32> arb_research_qualified{};
@@ -91,6 +94,8 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
         const auto& row = item.second;
         Market market(row.get<std::string>("up_token_id"), row.get<std::string>("down_token_id"));
         market.fee = row.get<double>("fee_rate");
+        market.min_order_size = row.get<double>("min_order_size");
+        market.tick_size = row.get<double>("tick_size");
         market.close_ts = row.get<double>("close_ts", 0);
         if (const auto value = row.get_optional<double>("start_ts")) market.start_ts = *value;
         market.condition_id = row.get<std::string>("condition_id", row.get<std::string>("market_id", ""));
@@ -111,6 +116,8 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
         if (market.close_ts <= now_seconds()) continue;
         if (market.up == market.down || tokens.count(market.up) || tokens.count(market.down)) throw std::runtime_error("duplicate market token");
         if (market.fee <= 0) throw std::runtime_error("invalid market fee");
+        if (market.min_order_size <= 0 || market.tick_size <= 0)
+            throw std::runtime_error("invalid market sizing metadata");
         tokens[market.up] = true; tokens[market.down] = true;
         markets[row.get<std::string>("market_id")] = market;
     }
@@ -192,6 +199,10 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"directional_window_4h_min", environment_value("DIRECTIONAL_WINDOW_4H_MIN", "10")},
         {"directional_window_4h_max", environment_value("DIRECTIONAL_WINDOW_4H_MAX", "45")},
         {"directional_settlement_buffer", environment_value("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002")},
+        {"directional_fractional_kelly", environment_value("DIRECTIONAL_FRACTIONAL_KELLY", "0.10")},
+        {"directional_max_capital_fraction", environment_value("DIRECTIONAL_MAX_CAPITAL_FRACTION", "0.02")},
+        {"directional_max_quantity", environment_value("DIRECTIONAL_MAX_QUANTITY", "100")},
+        {"directional_probability_haircut", environment_value("DIRECTIONAL_PROBABILITY_HAIRCUT", "0.02")},
         {"imbalance_z", environment_value("MODEL_IMBALANCE_Z", "0.25")},
         {"inventory_max_complement_gap", environment_value("INVENTORY_MAX_COMPLEMENT_GAP", "0.03")},
         {"inventory_max_initial_price", environment_value("INVENTORY_MAX_INITIAL_PRICE", "0.20")},
@@ -211,6 +222,10 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"lottery_momentum_z_per_bps", environment_value("LOTTERY_MOMENTUM_Z_PER_BPS", "0.001")},
         {"lottery_imbalance_z", environment_value("LOTTERY_IMBALANCE_Z", "0.10")},
         {"lottery_market_blend", environment_value("LOTTERY_MARKET_BLEND", "0.50")},
+        {"lottery_fractional_kelly", environment_value("LOTTERY_FRACTIONAL_KELLY", "0.025")},
+        {"lottery_max_capital_fraction", environment_value("LOTTERY_MAX_CAPITAL_FRACTION", "0.005")},
+        {"lottery_max_quantity", environment_value("LOTTERY_MAX_QUANTITY", "100")},
+        {"lottery_probability_haircut", environment_value("LOTTERY_PROBABILITY_HAIRCUT", "0.05")},
         {"maximum_book_age_ms", environment_value("CLOB_MAX_BOOK_AGE_MS", "750")},
         {"maximum_clock_skew_ms", environment_value("MAX_CLOCK_SKEW_MS", "250")},
         {"maximum_reference_age_ms", environment_value("REFERENCE_MAX_AGE_MS", "3000")},
@@ -229,6 +244,7 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"probability_reference", "settlement_reference"},
         {"shadow_buffer_per_share", environment_value("SHADOW_BUFFER_PER_SHARE", "0.002")},
         {"shadow_min_profit", environment_value("SHADOW_MIN_PROFIT", "0.01")},
+        {"shadow_sizing_capital_usd", environment_value("SHADOW_SIZING_CAPITAL_USD", "1000")},
         {"shadow_profit_exit_buffer_per_share", environment_value(
             "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE", "0.001")},
         {"shadow_size", environment_value("SHADOW_SIZE", "10")},
@@ -242,17 +258,26 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
                 key == "maximum_reference_age_ms" || key == "maximum_book_age_ms" ||
                 key == "maximum_clock_skew_ms" || key == "minimum_model_sample_span_seconds" ||
                 key == "probability_reference" ||
+                key == "shadow_sizing_capital_usd" ||
                 key == "shadow_profit_exit_buffer_per_share";
             if (strategy_name == "late_window_directional_ev") return common ||
                 key == "directional_min_net_ev" || key == "directional_latency_buffer" ||
-                key == "directional_settlement_buffer" || key == "directional_min_probability" ||
-                key == "directional_enforce_time_window" ||
+                 key == "directional_settlement_buffer" || key == "directional_min_probability" ||
+                 key == "directional_enforce_time_window" ||
+                 key == "directional_fractional_kelly" ||
+                 key == "directional_max_capital_fraction" ||
+                 key == "directional_max_quantity" ||
+                 key == "directional_probability_haircut" ||
                 key.rfind("directional_window_", 0) == 0 || key == "momentum_z_per_bps" ||
                 key == "imbalance_z";
             if (strategy_name == "low_price_lottery_ev") return common ||
                 key == "lottery_min_price" || key == "lottery_max_price" ||
                 key == "lottery_min_net_ev" || key == "lottery_model_buffer" ||
-                key == "lottery_execution_buffer" || key == "lottery_distance_weight" ||
+                 key == "lottery_execution_buffer" || key == "lottery_distance_weight" ||
+                 key == "lottery_fractional_kelly" ||
+                 key == "lottery_max_capital_fraction" ||
+                 key == "lottery_max_quantity" ||
+                 key == "lottery_probability_haircut" ||
                 key == "lottery_momentum_z_per_bps" || key == "lottery_imbalance_z" ||
                 key == "lottery_market_blend";
             if (strategy_name == "inventory_rebalancing_arb") return common ||
@@ -286,7 +311,9 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
 std::string paired_config_hash(double size, double fallback_fee, double buffer_per_share,
                                double min_profit, double leg_interval_us,
                                double execution_half_life_us, double orphan_loss_per_share,
-                               double min_expected_value) {
+                               double min_expected_value, double shadow_capital_usd,
+                               double maximum_capital_fraction, double maximum_quantity,
+                               double minimum_locked_roi) {
     std::ostringstream encoded;
     encoded << std::setprecision(17)
             << "{\"buffer_per_share\":" << buffer_per_share
@@ -297,8 +324,13 @@ std::string paired_config_hash(double size, double fallback_fee, double buffer_p
             << ",\"maximum_seconds_to_close\":7200"
             << ",\"minimum_expected_execution_value\":" << min_expected_value
             << ",\"minimum_locked_profit\":" << min_profit
+            << ",\"minimum_locked_roi\":" << minimum_locked_roi
             << ",\"minimum_seconds_to_close\":20"
             << ",\"orphan_loss_per_share\":" << orphan_loss_per_share
+            << ",\"shadow_capital_usd\":" << shadow_capital_usd
+            << ",\"maximum_capital_fraction\":" << maximum_capital_fraction
+            << ",\"maximum_quantity\":" << maximum_quantity
+            << ",\"sizing_mode\":\"real_market_dynamic_v1\""
             << ",\"target_size\":" << size << '}';
     return sha256_hex(encoded.str());
 }
@@ -588,7 +620,9 @@ public:
         audit_ << std::setprecision(15);
         paired_config_hash_ = paired_config_hash(
             size_, fallback_fee_, buffer_per_share_, min_profit_, leg_interval_us_,
-            execution_half_life_us_, orphan_loss_per_share_, min_expected_value_);
+            execution_half_life_us_, orphan_loss_per_share_, min_expected_value_,
+            shadow_sizing_capital_usd_, paired_max_capital_fraction_,
+            paired_max_quantity_, paired_min_locked_roi_);
         inventory_strategy_config_hash_ = sha256_hex(
             inventory_strategy_config_hash_ + "|" + std::to_string(size_) + "|" +
             std::to_string(buffer_per_share_) + "|" + std::to_string(min_profit_));
@@ -688,6 +722,53 @@ private:
             ? lottery_strategy_config_hash_ : directional_strategy_config_hash_;
     }
 
+    double probability_input_quality(
+            const strategy::ProbabilityInput& model_input,
+            const ReferenceView& reference,
+            const std::optional<double>& estimated_probability) const {
+        if (!estimated_probability) return 0;
+        return std::clamp(
+            std::min(model_input.model_sample_count / 120.0, 1.0) *
+                (1 - std::min(reference.divergence_bps.value_or(0) / 100, 1.0)),
+            0.0, 1.0);
+    }
+
+    sizing::ProbabilityConfig probability_sizing_config(
+            const std::string& strategy_name, const Market& market,
+            double fee_rate) const {
+        const bool lottery = strategy_name == "low_price_lottery_ev";
+        sizing::ProbabilityConfig config;
+        config.shadow_capital_usd = shadow_sizing_capital_usd_;
+        config.fractional_kelly = lottery
+            ? lottery_fractional_kelly_ : directional_fractional_kelly_;
+        config.maximum_capital_fraction = lottery
+            ? lottery_max_capital_fraction_ : directional_max_capital_fraction_;
+        config.probability_haircut = lottery
+            ? lottery_probability_haircut_ : directional_probability_haircut_;
+        config.maximum_quantity = lottery
+            ? lottery_max_quantity_ : directional_max_quantity_;
+        config.minimum_order_size = market.min_order_size;
+        config.maximum_slippage_per_share = strategy_config_.maximum_slippage;
+        config.minimum_net_ev_per_share = lottery
+            ? strategy_config_.lottery_min_net_ev : strategy_config_.directional_min_net_ev;
+        config.fee_rate = fee_rate;
+        config.execution_buffer_per_share = lottery
+            ? strategy_config_.lottery_model_buffer + strategy_config_.lottery_execution_buffer
+            : strategy_config_.directional_latency_buffer + strategy_config_.directional_settlement_buffer;
+        return config;
+    }
+
+    static void apply_sizing_rejection(
+            strategy::Decision& decision, const sizing::Result& sizing_result) {
+        if (sizing_result.accepted) return;
+        const std::string reason = sizing_result.reason.empty()
+            ? "dynamic_size_unavailable" : sizing_result.reason;
+        strategy::append_reason(decision.blocking_reasons, reason);
+        decision.decision = "REJECT";
+        if (decision.reason.empty() || decision.reason == "positive_net_ev")
+            decision.reason = reason;
+    }
+
     static std::string probability_position_key(
             const std::string& strategy_name, const std::string& market_id,
             const std::string& outcome) {
@@ -696,8 +777,8 @@ private:
 
     void remember_probability_shadow_position(
             const std::string& market_id, const std::string& outcome,
-            const strategy::EvaluationInput& input,
-            const strategy::Decision& decision, const std::string& event_id,
+            const strategy::Decision& decision,
+            const sizing::Result& sizing_result, const std::string& event_id,
             double timestamp) {
         if (decision.decision != "ACCEPT" ||
             (decision.strategy != "late_window_directional_ev" &&
@@ -705,9 +786,11 @@ private:
         const std::string key = probability_position_key(
             decision.strategy, market_id, outcome);
         if (active_probability_shadow_positions_.count(key)) return;
+        if (!sizing_result.accepted || sizing_result.dynamic_target_size <= 0) return;
         active_probability_shadow_positions_[key] = {
-            decision.strategy, market_id, outcome, event_id, size_,
-            size_ * (input.expected_fill_price + input.fee_per_share), timestamp,
+            decision.strategy, market_id, outcome, event_id,
+            sizing_result.dynamic_target_size,
+            sizing_result.dynamic_all_in_cost, timestamp,
         };
     }
 
@@ -773,7 +856,7 @@ private:
             << ",\"exit_observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\""
             << ",\"simulated_fill\":false,\"decision\":\"OBSERVED\""
             << ",\"reason\":\"profit_target_book_executable\""
-            << ",\"config_version\":\"shadow-buy-rules-v8\""
+            << ",\"config_version\":\"shadow-buy-rules-v9\""
             << ",\"config_hash\":\"" << strategy_hash_for(strategy_name) << "\""
             << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
         if (!strategy_audit_.enqueue(out.str())) {
@@ -854,17 +937,12 @@ private:
                 else if (!asset->momentum_bps_30s) probability_block_reason = "momentum_unavailable";
                 else probability_block_reason = "probability_model_unavailable";
             }
-            const auto up = buy_vwap(up_book, size_);
-            const auto down = buy_vwap(down_book, size_);
             const double rate = market.fee > 0 ? market.fee : fallback_fee_;
             std::map<std::string, strategy::EvaluationInput> directional_inputs;
             for (const std::string outcome : {"Up", "Down"}) {
                 const bool is_up = outcome == "Up";
                 const Book& book = is_up ? up_book : down_book;
-                const auto fill = is_up ? up : down;
                 const double ask = best_ask(book);
-                const double fee = std::round(fill.first * rate * fill.second * (1 - fill.second) * 100000) / 100000;
-                const double slippage = ask > 0 ? std::max(0.0, fill.second - ask) : 1e9;
                 const std::optional<double> directional_raw_probability = !directional_probability.estimated_probability
                     ? std::nullopt
                     : is_up ? directional_probability.estimated_probability
@@ -873,42 +951,60 @@ private:
                     ? std::nullopt
                     : is_up ? lottery_probability.estimated_probability
                             : std::optional<double>(1 - *lottery_probability.estimated_probability);
-                strategy::EvaluationInput input;
-                input.timeframe = market.interval;
-                input.expected_fill_price = fill.second;
-                input.seconds_to_close = seconds_to_close;
-                input.price_to_beat = opening_price;
-                input.fee_per_share = fee / std::max(size_, 1e-9);
-                input.slippage_per_share = slippage;
-                input.liquidity = available_ask_depth(book);
-                input.book_age_ms = book_age_ms;
-                input.reference_age_ms = reference.reference_age_ms;
-                input.clock_skew_ms = reference.clock_skew_ms;
-                input.market_active = market.close_ts > timestamp;
-                input.market_tradable = market.accepting_orders;
-                input.target_depth_ok = fill.first >= size_;
-                input.momentum_bps_30s = asset ? asset->momentum_bps_30s : std::nullopt;
-                input.order_book_imbalance = book_imbalance(book);
-                input.reference_quorum_met = reference.quorum;
-                input.reference_block_reason = reference.reason;
-                input.settlement_source_verified = reference.settlement_verified;
-                input.probability_block_reason = probability_block_reason;
-                input.minimum_liquidity = strategy_config_.minimum_liquidity;
-                input.maximum_slippage = strategy_config_.maximum_slippage;
-                input.maximum_reference_age_ms = reference.maximum_reference_age_ms;
-                input.maximum_book_age_ms = strategy_config_.maximum_book_age_ms;
-                input.maximum_clock_skew_ms = strategy_config_.maximum_clock_skew_ms;
                 for (const std::string strategy_name : {"late_window_directional_ev", "low_price_lottery_ev"}) {
-                    input.strategy = strategy_name;
                     const bool is_lottery = strategy_name == "low_price_lottery_ev";
                     const auto raw_probability = is_lottery
                         ? lottery_raw_probability : directional_raw_probability;
+                    strategy::EvaluationInput input;
+                    input.strategy = strategy_name;
                     input.estimated_probability = is_lottery
                         ? strategy::lottery_market_blend_probability(raw_probability, ask, strategy_config_)
                         : raw_probability;
+                    const double input_quality = probability_input_quality(
+                        probability_input, reference, input.estimated_probability);
+                    const auto sizing_result = sizing::size_probability_position(
+                        book.asks, input.estimated_probability.value_or(
+                            std::numeric_limits<double>::quiet_NaN()),
+                        input_quality,
+                        probability_sizing_config(strategy_name, market, rate));
+                    const double evaluation_quantity = sizing_result.accepted
+                        ? sizing_result.dynamic_target_size : market.min_order_size;
+                    const auto fill = buy_vwap(book, evaluation_quantity);
+                    const double fee = sizing_result.accepted
+                        ? sizing_result.dynamic_fee
+                        : std::round(fill.first * rate * fill.second *
+                            (1 - fill.second) * 100000) / 100000;
+                    input.timeframe = market.interval;
+                    input.expected_fill_price = sizing_result.accepted
+                        ? sizing_result.dynamic_vwap : fill.second;
+                    input.seconds_to_close = seconds_to_close;
+                    input.price_to_beat = opening_price;
+                    input.fee_per_share = fee / std::max(evaluation_quantity, 1e-9);
+                    // VWAP already includes depth slippage; the solver enforces its limit.
+                    input.slippage_per_share = 0;
+                    input.liquidity = available_ask_depth(book);
+                    input.book_age_ms = book_age_ms;
+                    input.reference_age_ms = reference.reference_age_ms;
+                    input.clock_skew_ms = reference.clock_skew_ms;
+                    input.market_active = market.close_ts > timestamp;
+                    input.market_tradable = market.accepting_orders;
+                    input.target_depth_ok = sizing_result.accepted &&
+                        fill.first + 1e-9 >= evaluation_quantity;
+                    input.momentum_bps_30s = asset ? asset->momentum_bps_30s : std::nullopt;
+                    input.order_book_imbalance = book_imbalance(book);
+                    input.reference_quorum_met = reference.quorum;
+                    input.reference_block_reason = reference.reason;
+                    input.settlement_source_verified = reference.settlement_verified;
+                    input.probability_block_reason = probability_block_reason;
+                    input.minimum_liquidity = strategy_config_.minimum_liquidity;
+                    input.maximum_slippage = strategy_config_.maximum_slippage;
+                    input.maximum_reference_age_ms = reference.maximum_reference_age_ms;
+                    input.maximum_book_age_ms = strategy_config_.maximum_book_age_ms;
+                    input.maximum_clock_skew_ms = strategy_config_.maximum_clock_skew_ms;
                     strategy::Decision decision = strategy_name == "late_window_directional_ev"
                         ? strategy::evaluate_directional(input, strategy_config_)
                         : strategy::evaluate_lottery(input, strategy_config_);
+                    apply_sizing_rejection(decision, sizing_result);
                     if (!is_lottery) {
                         directional_inputs[outcome] = input;
                     }
@@ -930,7 +1026,7 @@ private:
                                 emit_strategy_audit(item.first, market, outcome, input, probability_input,
                                     is_lottery ? lottery_probability : directional_probability,
                                     raw_probability, reference, decision, timestamp, ask,
-                                    book, rate,
+                                    book, rate, sizing_result,
                                     "shadow_prediction_observation", horizon->second)) {
                                 probability_observations_emitted_.insert(observation_key);
                             }
@@ -945,7 +1041,7 @@ private:
                     emit_strategy_audit(item.first, market, outcome, input, probability_input,
                                         is_lottery ? lottery_probability : directional_probability,
                                         raw_probability, reference, decision, timestamp, ask,
-                                        book, rate);
+                                        book, rate, sizing_result);
                 }
             }
             emit_complete_set_evaluations(
@@ -1145,6 +1241,7 @@ private:
                              const ReferenceView& reference, const strategy::Decision& decision,
                              double timestamp, double market_price,
                              const Book& outcome_book, double fee_rate,
+                             const sizing::Result& sizing_result,
                              const std::string& event_type = "shadow_eval",
                              double calibration_horizon_seconds = 0) {
         const unsigned long long sequence = ++strategy_evaluation_sequence_;
@@ -1157,12 +1254,14 @@ private:
             if (value && std::isfinite(*value)) out << *value;
             else out << "null";
         };
-        const auto exit_fill = sell_vwap(outcome_book, size_);
+        const double target_size = sizing_result.accepted
+            ? sizing_result.dynamic_target_size : 0;
+        const auto exit_fill = sell_vwap(outcome_book, target_size);
         const double exit_fee = std::round(
             exit_fill.first * fee_rate * exit_fill.second *
             (1 - exit_fill.second) * 100000
         ) / 100000;
-        const double exit_buffer = size_ * profit_exit_buffer_per_share_;
+        const double exit_buffer = target_size * profit_exit_buffer_per_share_;
         const bool exit_book_fresh = input.book_age_ms <= input.maximum_book_age_ms;
         out << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
             << ",\"event_id\":\"" << reference_ipc::escaped(event_id)
@@ -1180,7 +1279,11 @@ private:
         out << ",\"raw_estimated_probability\":"; optional(raw_estimated_probability);
         out << ",\"market_implied_probability\":" << market_price << ",\"gross_edge\":";
         optional(decision.gross_edge);
-        out << ",\"fees\":" << input.fee_per_share << ",\"slippage\":" << input.slippage_per_share
+        out << ",\"fees\":" << input.fee_per_share << ",\"slippage\":";
+        if (sizing_result.accepted)
+            out << std::max(0.0, sizing_result.dynamic_vwap - market_price);
+        else out << "null";
+        out
             << ",\"latency_risk_buffer\":" << strategy_config_.directional_latency_buffer
             << ",\"settlement_risk_buffer\":" << strategy_config_.directional_settlement_buffer
             << ",\"model_uncertainty_buffer\":" << strategy_config_.lottery_model_buffer
@@ -1254,10 +1357,7 @@ private:
         out << ",\"up_momentum_z\":"; optional(model.up_momentum_z);
         out << ",\"up_imbalance_z\":"; optional(model.up_imbalance_z);
         out << ",\"up_final_model_z\":"; optional(model.up_final_model_z);
-        const double confidence = input.estimated_probability
-            ? std::clamp(std::min(model_input.model_sample_count / 120.0, 1.0) *
-                (1 - std::min(reference.divergence_bps.value_or(0) / 100, 1.0)), 0.0, 1.0)
-            : 0;
+        const double confidence = sizing_result.input_quality_score;
         out << ",\"confidence\":";
         if (input.estimated_probability) out << confidence; else out << "null";
         out << ",\"input_quality_score\":";
@@ -1284,13 +1384,46 @@ private:
             if (index) out << ',';
             out << '"' << reference_ipc::escaped(decision.blocking_reasons[index]) << '"';
         }
-        out << "],\"target_size\":" << size_
+        out << "],\"sizing_mode\":\"real_market_dynamic_v1\""
+            << ",\"requested_max_size\":" << sizing_result.requested_max_size
+            << ",\"dynamic_target_size\":" << sizing_result.dynamic_target_size
+            << ",\"market_minimum_size\":" << sizing_result.market_minimum_size
+            << ",\"executable_depth_size\":" << sizing_result.executable_depth_size
+            << ",\"slippage_limited_size\":" << sizing_result.slippage_limited_size
+            << ",\"capital_limited_size\":" << sizing_result.capital_limited_size
+            << ",\"shadow_capital_usd\":" << sizing_result.shadow_capital_usd
+            << ",\"capital_budget_usd\":" << sizing_result.capital_budget_usd
+            << ",\"input_quality_score\":" << sizing_result.input_quality_score
+            << ",\"conservative_probability\":";
+        if (input.estimated_probability) out << sizing_result.conservative_probability;
+        else out << "null";
+        out << ",\"probability_haircut\":" << sizing_result.probability_haircut
+            << ",\"full_kelly_fraction\":" << sizing_result.full_kelly_fraction
+            << ",\"applied_kelly_fraction\":" << sizing_result.applied_kelly_fraction
+            << ",\"dynamic_vwap\":";
+        if (sizing_result.accepted) out << sizing_result.dynamic_vwap; else out << "null";
+        out << ",\"dynamic_fee\":";
+        if (sizing_result.accepted) out << sizing_result.dynamic_fee; else out << "null";
+        out << ",\"dynamic_buffer\":";
+        if (sizing_result.accepted) out << sizing_result.dynamic_buffer; else out << "null";
+        out << ",\"dynamic_all_in_cost\":";
+        if (sizing_result.accepted) out << sizing_result.dynamic_all_in_cost; else out << "null";
+        out << ",\"dynamic_all_in_price\":";
+        if (sizing_result.accepted) out << sizing_result.dynamic_all_in_price; else out << "null";
+        out << ",\"dynamic_expected_profit\":";
+        if (sizing_result.accepted) out << sizing_result.dynamic_expected_profit; else out << "null";
+        out << ",\"dynamic_maximum_loss\":";
+        if (sizing_result.accepted) out << sizing_result.dynamic_maximum_loss; else out << "null";
+        out << ",\"size_binding_constraint\":";
+        if (sizing_result.size_binding_constraint.empty()) out << "null";
+        else out << '"' << reference_ipc::escaped(sizing_result.size_binding_constraint) << '"';
+        out << ",\"target_size\":" << target_size
             << ",\"exit_fill_quantity\":" << exit_fill.first
             << ",\"exit_vwap\":" << exit_fill.second
             << ",\"exit_total_fee\":" << exit_fee
             << ",\"exit_execution_buffer\":" << exit_buffer
             << ",\"exit_depth_ok\":"
-            << (exit_fill.first >= size_ ? "true" : "false")
+            << (target_size > 0 && exit_fill.first >= target_size ? "true" : "false")
             << ",\"exit_book_fresh\":"
             << (exit_book_fresh ? "true" : "false")
             << ",\"exit_observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\"";
@@ -1299,7 +1432,7 @@ private:
                 << ",\"observation_semantics\":\"PROBABILITY_CALIBRATION_NOT_ORDER\""
                 << ",\"calibration_horizon_seconds\":" << calibration_horizon_seconds;
         }
-        out << ",\"config_version\":\"shadow-buy-rules-v8\""
+        out << ",\"config_version\":\"shadow-buy-rules-v9\""
             << ",\"config_hash\":\"" << strategy_hash_for(decision.strategy) << "\""
             << ",\"reference_sequence\":" << reference_snapshot_.sequence
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
@@ -1309,7 +1442,7 @@ private:
         else if (event_type == "shadow_eval") {
             record_session_strategy(decision.strategy, decision.decision);
             remember_probability_shadow_position(
-                market_id, outcome, input, decision, event_id, timestamp);
+                market_id, outcome, decision, sizing_result, event_id, timestamp);
         }
         return queued;
     }
@@ -2201,9 +2334,7 @@ private:
             const double source_timestamp_age_ms = std::max(
                 std::abs(timestamp * 1000 - up_book.source_timestamp_ms),
                 std::abs(timestamp * 1000 - down_book.source_timestamp_ms));
-            auto up = buy_vwap(up_book, size_), down = buy_vwap(down_book, size_);
             const double up_best_ask = best_ask(up_book), down_best_ask = best_ask(down_book);
-            const bool fok = up.first >= size_ && down.first >= size_;
             const double rate = item.second.fee > 0 ? item.second.fee : fallback_fee_;
             evaluate_microstructure_reversion(
                 item.first, item.second, "Up", item.second.up, up_book, rate,
@@ -2219,19 +2350,53 @@ private:
                 item.first, item.second, up_book, down_book, rate,
                 books_synced, timestamp
             );
-            const double up_fee = std::round(up.first * rate * up.second * (1 - up.second) * 100000) / 100000;
-            const double down_fee = std::round(down.first * rate * down.second * (1 - down.second) * 100000) / 100000;
-            const double gross_cost = size_ * (up.second + down.second), buffer = size_ * buffer_per_share_;
-            const double net_cost = gross_cost + up_fee + down_fee + buffer, profit = fok ? size_ - net_cost : 0;
-            const double leg_1_fill_probability = books_synced ? std::min(1.0, up.first / size_) : 0;
+            sizing::PairedConfig paired_sizing_config;
+            paired_sizing_config.shadow_capital_usd = shadow_sizing_capital_usd_;
+            paired_sizing_config.maximum_capital_fraction = paired_max_capital_fraction_;
+            paired_sizing_config.maximum_quantity = paired_max_quantity_;
+            paired_sizing_config.minimum_order_size = item.second.min_order_size;
+            paired_sizing_config.maximum_slippage_per_share = strategy_config_.maximum_slippage;
+            paired_sizing_config.fee_rate = rate;
+            paired_sizing_config.execution_buffer_per_share = buffer_per_share_;
+            paired_sizing_config.minimum_locked_profit = min_profit_;
+            paired_sizing_config.minimum_locked_roi = paired_min_locked_roi_;
+            const auto sizing_result = sizing::size_paired_lock(
+                up_book.asks, down_book.asks, paired_sizing_config);
+            const double target_size = sizing_result.accepted
+                ? sizing_result.dynamic_target_size : item.second.min_order_size;
+            const auto up = buy_vwap(up_book, target_size);
+            const auto down = buy_vwap(down_book, target_size);
+            const bool fok = sizing_result.accepted &&
+                up.first + 1e-9 >= target_size && down.first + 1e-9 >= target_size;
+            const double up_fee = sizing_result.accepted
+                ? sizing_result.up_fee
+                : std::round(up.first * rate * up.second * (1 - up.second) * 100000) / 100000;
+            const double down_fee = sizing_result.accepted
+                ? sizing_result.down_fee
+                : std::round(down.first * rate * down.second * (1 - down.second) * 100000) / 100000;
+            const double gross_cost = target_size * (up.second + down.second);
+            const double buffer = target_size * buffer_per_share_;
+            const double net_cost = gross_cost + up_fee + down_fee + buffer;
+            const double profit = fok ? target_size - net_cost : 0;
+            const double leg_1_fill_probability = books_synced && target_size > 0
+                ? std::min(1.0, up.first / target_size) : 0;
             const double latency_decay = std::exp(-leg_interval_us_ / std::max(1.0, execution_half_life_us_));
-            const double leg_2_fill_probability = books_synced ? std::min(1.0, down.first / size_) * latency_decay : 0;
-            const double orphan_leg_loss = size_ * orphan_loss_per_share_;
+            const double leg_2_fill_probability = books_synced && target_size > 0
+                ? std::min(1.0, down.first / target_size) * latency_decay : 0;
+            const double orphan_leg_loss = target_size * orphan_loss_per_share_;
             const double both_fill_probability = leg_1_fill_probability * leg_2_fill_probability;
             const double expected_execution_value = both_fill_probability * profit - leg_1_fill_probability * (1 - leg_2_fill_probability) * orphan_leg_loss;
-            const bool good = fok && books_synced && seconds_to_close >= 20 && seconds_to_close <= 7200
+            const bool good = sizing_result.accepted && fok && books_synced && seconds_to_close >= 20 && seconds_to_close <= 7200
                               && profit >= min_profit_ && expected_execution_value >= min_expected_value_;
-            const std::string reason = !books_synced ? "clob_book_stale" : seconds_to_close < 20 ? "closing_window" : seconds_to_close > 7200 ? "too_early" : up.first < size_ ? "up_depth" : down.first < size_ ? "down_depth" : profit < min_profit_ ? "net_cost_above_threshold" : expected_execution_value < min_expected_value_ ? "execution_value_below_threshold" : "opportunity";
+            const std::string reason = !books_synced ? "clob_book_stale"
+                : seconds_to_close < 20 ? "closing_window"
+                : seconds_to_close > 7200 ? "too_early"
+                : !sizing_result.accepted ? sizing_result.reason
+                : up.first < target_size ? "up_depth"
+                : down.first < target_size ? "down_depth"
+                : profit < min_profit_ ? "net_cost_above_threshold"
+                : expected_execution_value < min_expected_value_ ? "execution_value_below_threshold"
+                : "opportunity";
             const bool paired_was_active = item.second.active_since > 0;
             if (good && !paired_was_active) item.second.active_since = timestamp;
             if (!good) item.second.active_since = 0;
@@ -2250,7 +2415,8 @@ private:
                                    << "\",\"close_ts\":" << item.second.close_ts
                                    << ",\"generation\":" << generation_ << ",\"session\":" << ws_session_id_
                                    << ",\"reason\":\"" << reason << "\",\"fok\":" << (fok ? "true" : "false")
-                                   << ",\"seconds_to_close\":" << seconds_to_close << ",\"size\":" << size_
+                                   << ",\"seconds_to_close\":" << seconds_to_close
+                                   << ",\"size\":" << (sizing_result.accepted ? target_size : 0)
                                    << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
                                    << ",\"clock_skew_ms\":" << source_timestamp_age_ms
                                    << ",\"clock_skew_basis\":\"clob_source_timestamp_age_diagnostic\",\"source_age_ms\":" << source_timestamp_age_ms
@@ -2271,7 +2437,7 @@ private:
                                    << ",\"up_fee\":" << up_fee << ",\"down_fee\":" << down_fee
                                    << ",\"fee_rate\":" << rate
                                    << ",\"gross_cost\":" << gross_cost << ",\"buffer\":" << buffer
-                                   << ",\"net_cost\":" << net_cost << ",\"guaranteed_payout\":" << size_
+                                   << ",\"net_cost\":" << net_cost << ",\"guaranteed_payout\":" << (fok ? target_size : 0)
                                    << ",\"locked_profit\":" << profit << ",\"locked_roi\":" << (net_cost > 0 ? profit / net_cost : 0)
                                    << ",\"leg_1_fill_probability\":" << leg_1_fill_probability
                                    << ",\"leg_2_fill_probability\":" << leg_2_fill_probability
@@ -2280,7 +2446,28 @@ private:
                                    << ",\"expected_execution_value\":" << expected_execution_value
                                    << ",\"execution_model\":\"configured_latency_stress\""
                                    << ",\"books_synced\":" << (books_synced ? "true" : "false")
-                                   << ",\"config_version\":\"paired-lock-shadow-v2\",\"config_hash\":\""
+                                   << ",\"sizing_mode\":\"real_market_dynamic_v1\""
+                                   << ",\"requested_max_size\":" << sizing_result.requested_max_size
+                                   << ",\"dynamic_target_size\":" << sizing_result.dynamic_target_size
+                                   << ",\"market_minimum_size\":" << sizing_result.market_minimum_size
+                                   << ",\"executable_depth_size\":" << sizing_result.executable_depth_size
+                                   << ",\"slippage_limited_size\":" << sizing_result.slippage_limited_size
+                                   << ",\"capital_limited_size\":" << sizing_result.capital_limited_size
+                                   << ",\"shadow_capital_usd\":" << sizing_result.shadow_capital_usd
+                                   << ",\"capital_budget_usd\":" << sizing_result.capital_budget_usd
+                                   << ",\"input_quality_score\":null,\"conservative_probability\":null"
+                                   << ",\"probability_haircut\":null,\"full_kelly_fraction\":null"
+                                   << ",\"applied_kelly_fraction\":null"
+                                   << ",\"dynamic_vwap\":null,\"dynamic_fee\":" << sizing_result.dynamic_fee
+                                   << ",\"dynamic_buffer\":" << sizing_result.dynamic_buffer
+                                   << ",\"dynamic_all_in_cost\":" << sizing_result.dynamic_all_in_cost
+                                   << ",\"dynamic_all_in_price\":" << sizing_result.dynamic_all_in_price
+                                   << ",\"dynamic_expected_profit\":" << sizing_result.dynamic_expected_profit
+                                   << ",\"dynamic_maximum_loss\":" << sizing_result.dynamic_maximum_loss
+                                   << ",\"size_binding_constraint\":";
+                if (sizing_result.size_binding_constraint.empty()) audit_ << "null";
+                else audit_ << '"' << reference_ipc::escaped(sizing_result.size_binding_constraint) << '"';
+                audit_ << ",\"config_version\":\"paired-lock-shadow-v3\",\"config_hash\":\""
                                    << paired_config_hash_ << "\",\"decision\":\""
                                    << (good ? "ACCEPT" : "REJECT")
                                    << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
@@ -2304,16 +2491,16 @@ private:
                        << "\",\"window\":\"" << reference_ipc::escaped(item.second.window)
                        << "\",\"generation\":" << generation_ << ",\"session\":" << ws_session_id_
                        << ",\"subscription_generation\":" << generation_ << ",\"ws_session_id\":" << ws_session_id_
-                       << ",\"decision\":\"ACCEPT\",\"reason\":\"opportunity\",\"target_size\":" << size_
+                       << ",\"decision\":\"ACCEPT\",\"reason\":\"opportunity\",\"target_size\":" << target_size
                        << ",\"up_vwap\":" << up.second << ",\"down_vwap\":" << down.second
-                       << ",\"up_cost\":" << size_ * up.second << ",\"down_cost\":" << size_ * down.second
+                       << ",\"up_cost\":" << target_size * up.second << ",\"down_cost\":" << target_size * down.second
                        << ",\"gross_cost\":" << gross_cost << ",\"up_fee\":" << up_fee << ",\"down_fee\":" << down_fee
                        << ",\"total_fees\":" << up_fee + down_fee << ",\"fee_rate\":" << rate
                        << ",\"execution_buffer\":" << buffer << ",\"buffer\":" << buffer
-                       << ",\"net_cost\":" << net_cost << ",\"guaranteed_payout\":" << size_
+                       << ",\"net_cost\":" << net_cost << ",\"guaranteed_payout\":" << target_size
                        << ",\"locked_profit\":" << profit << ",\"locked_roi\":" << (net_cost > 0 ? profit / net_cost : 0)
-                       << ",\"up_depth_ok\":" << (up.first >= size_ ? "true" : "false")
-                       << ",\"down_depth_ok\":" << (down.first >= size_ ? "true" : "false")
+                       << ",\"up_depth_ok\":" << (up.first >= target_size ? "true" : "false")
+                       << ",\"down_depth_ok\":" << (down.first >= target_size ? "true" : "false")
                        << ",\"fok\":true,\"books_ready\":true,\"books_fresh\":true,\"books_synced\":true"
                        << ",\"up_age_ms\":" << up_age_ms << ",\"down_age_ms\":" << down_age_ms
                        << ",\"book_skew_ms\":" << std::abs(up_book.source_timestamp_ms - down_book.source_timestamp_ms)
@@ -2325,7 +2512,24 @@ private:
                        << ",\"execution_model\":\"configured_latency_stress\""
                        << ",\"seconds_to_close\":" << seconds_to_close
                        << ",\"duration_ms\":" << (timestamp - item.second.active_since) * 1000
-                       << ",\"config_version\":\"paired-lock-shadow-v2\",\"config_hash\":\"" << paired_config_hash_
+                        << ",\"sizing_mode\":\"real_market_dynamic_v1\""
+                        << ",\"requested_max_size\":" << sizing_result.requested_max_size
+                        << ",\"dynamic_target_size\":" << target_size
+                        << ",\"market_minimum_size\":" << sizing_result.market_minimum_size
+                        << ",\"executable_depth_size\":" << sizing_result.executable_depth_size
+                        << ",\"slippage_limited_size\":" << sizing_result.slippage_limited_size
+                        << ",\"capital_limited_size\":" << sizing_result.capital_limited_size
+                        << ",\"shadow_capital_usd\":" << sizing_result.shadow_capital_usd
+                        << ",\"capital_budget_usd\":" << sizing_result.capital_budget_usd
+                        << ",\"dynamic_fee\":" << sizing_result.dynamic_fee
+                        << ",\"dynamic_buffer\":" << sizing_result.dynamic_buffer
+                        << ",\"dynamic_all_in_cost\":" << sizing_result.dynamic_all_in_cost
+                        << ",\"dynamic_all_in_price\":" << sizing_result.dynamic_all_in_price
+                        << ",\"dynamic_expected_profit\":" << sizing_result.dynamic_expected_profit
+                        << ",\"dynamic_maximum_loss\":" << sizing_result.dynamic_maximum_loss
+                        << ",\"size_binding_constraint\":\""
+                       << reference_ipc::escaped(sizing_result.size_binding_constraint) << "\""
+                       << ",\"config_version\":\"paired-lock-shadow-v3\",\"config_hash\":\"" << paired_config_hash_
                        << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n" << std::flush;
             }
 
@@ -2841,6 +3045,30 @@ private:
     BoundedAuditWriter strategy_audit_;
     std::string markets_path_, health_path_, run_id_;
     strategy::Config strategy_config_ = strategy_config_from_environment();
+    double shadow_sizing_capital_usd_ = environment_double(
+        "SHADOW_SIZING_CAPITAL_USD", "1000");
+    double directional_fractional_kelly_ = environment_double(
+        "DIRECTIONAL_FRACTIONAL_KELLY", "0.10");
+    double directional_max_capital_fraction_ = environment_double(
+        "DIRECTIONAL_MAX_CAPITAL_FRACTION", "0.02");
+    double directional_probability_haircut_ = environment_double(
+        "DIRECTIONAL_PROBABILITY_HAIRCUT", "0.02");
+    double directional_max_quantity_ = environment_double(
+        "DIRECTIONAL_MAX_QUANTITY", "100");
+    double lottery_fractional_kelly_ = environment_double(
+        "LOTTERY_FRACTIONAL_KELLY", "0.025");
+    double lottery_max_capital_fraction_ = environment_double(
+        "LOTTERY_MAX_CAPITAL_FRACTION", "0.005");
+    double lottery_probability_haircut_ = environment_double(
+        "LOTTERY_PROBABILITY_HAIRCUT", "0.05");
+    double lottery_max_quantity_ = environment_double(
+        "LOTTERY_MAX_QUANTITY", "100");
+    double paired_max_capital_fraction_ = environment_double(
+        "PAIRED_MAX_CAPITAL_FRACTION", "0.02");
+    double paired_max_quantity_ = environment_double(
+        "PAIRED_MAX_QUANTITY", "100");
+    double paired_min_locked_roi_ = environment_double(
+        "PAIRED_MIN_LOCKED_ROI", "0.001");
     std::map<std::string, complete_set::Inventory> complete_set_inventory_;
     std::map<std::string, std::string> active_arb_episodes_;
     std::map<std::string, PendingArbObservation> pending_arb_attempts_;

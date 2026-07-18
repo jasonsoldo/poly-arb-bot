@@ -65,6 +65,20 @@ def test_dashboard_renders_three_strategies_without_combining_acceptance():
         assert f'id="{element_id}"' in source
 
 
+def test_dashboard_renders_real_market_dynamic_position_evidence():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    for label in (
+        "DYNAMIC SIZE", "CAPITAL BUDGET", "MAXIMUM LOSS",
+        "MARKET MINIMUM", "SIZE LIMIT",
+    ):
+        assert label in source
+    for field in (
+        "dynamic_target_size", "dynamic_all_in_cost", "capital_budget_usd",
+        "dynamic_maximum_loss", "market_minimum_size", "size_binding_constraint",
+    ):
+        assert field in source
+
+
 def test_dashboard_separates_primary_strategy_cards_from_arbitrage_observers():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for strategy in ("BUY BOTH + MERGE", "SPLIT + SELL BOTH", "MAKER COMPLETE SET"):

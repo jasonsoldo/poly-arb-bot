@@ -51,6 +51,12 @@ g++ -std=c++17 -O3 -Wall -Wextra \
 echo "built and tested build/complete_set_arb_test"
 
 g++ -std=c++17 -O3 -Wall -Wextra \
+  cpp/strategy/dynamic_position_sizing_test.cpp \
+  -o build/dynamic_position_sizing_test
+./build/dynamic_position_sizing_test
+echo "built and tested build/dynamic_position_sizing_test"
+
+g++ -std=c++17 -O3 -Wall -Wextra \
   cpp/strategy/observed_arb_test.cpp \
   -o build/observed_arb_test
 ./build/observed_arb_test

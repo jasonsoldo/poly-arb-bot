@@ -2,6 +2,16 @@
 
 This deployment runs all three strategies in Shadow / Dry Run. It never submits a real order.
 
+## Dynamic Shadow Sizing
+
+`deploy/env.example` defines the Shadow capital base, fractional Kelly scaling,
+strategy capital caps, probability haircuts, quantity caps, and paired-lock ROI
+floor. These are constraints only: every evaluated quantity is still derived
+from the current official Polymarket CLOB depth, multi-level VWAP, market
+minimum order size, fee schedule, slippage, and execution buffers. Missing
+market sizing metadata fails closed. This remains dry-run evidence and never
+enables a real order path.
+
 ## 1. Install dependencies
 
 Ubuntu/Debian:

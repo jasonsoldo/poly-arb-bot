@@ -20,6 +20,14 @@ def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up")
         "market_id": "m1", "asset": "BTC", "timeframe": "5m", "outcome": outcome,
         "decision": "ACCEPT", "expected_fill_price": 0.4, "fees": 0.01,
         "target_size": 10, "ts": 1000, "config_hash": strategy_config()[1],
+        "config_version": "shadow-buy-rules-v9",
+        "sizing_mode": "real_market_dynamic_v1",
+        "dynamic_target_size": 10,
+        "market_minimum_size": 1,
+        "dynamic_all_in_cost": 4.1,
+        "dynamic_maximum_loss": 4.1,
+        "capital_budget_usd": 20,
+        "size_binding_constraint": "capital_budget",
     }
 
 
@@ -30,7 +38,14 @@ def paired(event_id="pair1"):
         "condition_id": "c1", "asset": "BTC", "timeframe": "5m", "window": "current",
         "generation": 3, "session": 7, "evaluation_sequence": 11,
         "net_cost": 9.7, "locked_profit": 0.3, "ts": 1000,
-        "config_version": "paired-lock-shadow-v2", "config_hash": "paired-hash",
+        "config_version": "paired-lock-shadow-v3", "config_hash": "paired-hash",
+        "sizing_mode": "real_market_dynamic_v1",
+        "dynamic_target_size": 10,
+        "market_minimum_size": 1,
+        "dynamic_all_in_cost": 9.7,
+        "dynamic_maximum_loss": 9.7,
+        "capital_budget_usd": 20,
+        "size_binding_constraint": "executable_depth",
     }
 
 
@@ -99,13 +114,52 @@ def test_raw_directional_accept_is_calibration_only_and_does_not_open_position(t
     assert lifecycle.data["positions"] == {}
 
 
-def test_v8_directional_accept_opens_shadow_position_for_exit_calibration(tmp_path):
+def test_v8_directional_accept_does_not_open_dynamic_shadow_position(tmp_path):
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
     row = accepted()
     row["config_version"] = "shadow-buy-rules-v8"
 
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["positions"] == {}
+
+
+def test_v9_directional_accept_requires_dynamic_sizing_evidence(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    row = accepted()
+    row.pop("dynamic_all_in_cost")
+
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["positions"] == {}
+
+
+def test_v9_directional_accept_uses_exact_dynamic_cost_and_preserves_sizing(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    row = accepted()
+    row.update({
+        "target_size": 7.25,
+        "dynamic_target_size": 7.25,
+        "dynamic_all_in_cost": 2.987654321,
+        "dynamic_maximum_loss": 2.987654321,
+        "capital_budget_usd": 3.0,
+        "size_binding_constraint": "capital_budget",
+    })
+
     assert lifecycle.consume(row, {"m1": market()}) is True
-    assert len(lifecycle.data["positions"]) == 1
+    position = next(iter(lifecycle.data["positions"].values()))
+    assert position["target_size"] == 7.25
+    assert position["entry_cost"] == 2.987654321
+    assert position["dynamic_maximum_loss"] == 2.987654321
+    assert position["sizing_mode"] == "real_market_dynamic_v1"
+    assert position["size_binding_constraint"] == "capital_budget"
+
+
+def test_paired_v3_requires_dynamic_sizing_evidence(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    row = paired()
+    row.pop("sizing_mode")
+
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["positions"] == {}
 
 
 def test_probability_position_exits_on_future_full_bid_depth_after_all_costs(tmp_path):
@@ -114,7 +168,7 @@ def test_probability_position_exits_on_future_full_bid_depth_after_all_costs(tmp
         tmp_path / "state.json", log, profit_exit_min_pnl=.25,
     )
     entry = accepted()
-    entry["config_version"] = "shadow-buy-rules-v8"
+    entry["config_version"] = "shadow-buy-rules-v9"
     entry["generation"] = 2
     entry["session"] = 3
     assert lifecycle.consume(entry, {"m1": market()}) is True
@@ -155,7 +209,7 @@ def test_probability_position_does_not_fake_exit_without_full_bid_depth(tmp_path
         tmp_path / "state.json", log, profit_exit_min_pnl=.25,
     )
     entry = accepted()
-    entry["config_version"] = "shadow-buy-rules-v8"
+    entry["config_version"] = "shadow-buy-rules-v9"
     assert lifecycle.consume(entry, {"m1": market()}) is True
 
     quote = {
@@ -182,7 +236,7 @@ def test_probability_position_keeps_holding_when_net_profit_is_below_target(tmp_
         tmp_path / "state.json", tmp_path / "events.jsonl", profit_exit_min_pnl=.50,
     )
     entry = accepted()
-    entry["config_version"] = "shadow-buy-rules-v8"
+    entry["config_version"] = "shadow-buy-rules-v9"
     assert lifecycle.consume(entry, {"m1": market()}) is True
     quote = {
         **entry,
@@ -208,7 +262,7 @@ def test_stale_dedicated_profit_exit_cannot_close_a_newer_position(tmp_path):
         profit_exit_min_pnl=.10,
     )
     entry = accepted("new-entry")
-    entry["config_version"] = "shadow-buy-rules-v8"
+    entry["config_version"] = "shadow-buy-rules-v9"
     assert lifecycle.consume(entry, {"m1": market()}) is True
 
     stale_exit = {
@@ -237,7 +291,7 @@ def test_current_generation_profit_exit_reprices_position_after_entry_id_rebind(
     )
     entry = accepted("current-entry", outcome="Down")
     entry.update({
-        "config_version": "shadow-buy-rules-v8",
+        "config_version": "shadow-buy-rules-v9",
         "generation": 4,
         "session": 7,
     })
@@ -273,7 +327,7 @@ def test_new_session_profit_exit_reprices_position_kept_across_restart(tmp_path)
     )
     entry = accepted("old-session-entry", outcome="Down")
     entry.update({
-        "config_version": "shadow-buy-rules-v8",
+        "config_version": "shadow-buy-rules-v9",
         "generation": 4,
         "session": 7,
     })
@@ -571,7 +625,7 @@ def test_paired_lock_completes_only_after_official_close_sample(tmp_path):
     assert row["generation"] == 3
     assert row["session"] == 7
     assert row["evaluation_sequence"] == 11
-    assert row["strategy_config_version"] == "paired-lock-shadow-v2"
+    assert row["strategy_config_version"] == "paired-lock-shadow-v3"
     assert row["strategy_config_hash"] == "paired-hash"
     assert row["timestamp"] == 1200
     assert row["real_fills"] == 0

@@ -6,6 +6,7 @@ DEPLOY = Path("deploy/VPS_DEPLOY.md").read_text(encoding="utf-8")
 ROTATE = Path("deploy/poly-arb-bot.logrotate").read_text(encoding="utf-8")
 BUILD_SH = Path("scripts/build_cpp.sh").read_text(encoding="utf-8")
 BUILD_PS1 = Path("scripts/build_cpp.ps1").read_text(encoding="utf-8")
+ENV_EXAMPLE = Path("deploy/env.example").read_text(encoding="utf-8")
 
 
 def test_shadow_loop_removes_stale_reference_socket_and_waits_for_ready():
@@ -59,6 +60,20 @@ def test_cpp_build_scripts_run_strategy_tests_and_build_production_engines():
     for source in ("market_ws_engine", "reference_price_engine"):
         assert f"cpp/{source}/{source}.cpp" in BUILD_SH
         assert f"cpp/{source}/{source}.cpp" in BUILD_PS1
+    assert "dynamic_position_sizing_test" in BUILD_SH
+    assert "dynamic_position_sizing_test" in BUILD_PS1
+
+
+def test_deploy_environment_exposes_real_market_dynamic_sizing_controls():
+    for name in (
+        "SHADOW_SIZING_CAPITAL_USD", "DIRECTIONAL_FRACTIONAL_KELLY",
+        "DIRECTIONAL_MAX_CAPITAL_FRACTION", "DIRECTIONAL_PROBABILITY_HAIRCUT",
+        "DIRECTIONAL_MAX_QUANTITY", "LOTTERY_FRACTIONAL_KELLY",
+        "LOTTERY_MAX_CAPITAL_FRACTION", "LOTTERY_PROBABILITY_HAIRCUT",
+        "LOTTERY_MAX_QUANTITY", "PAIRED_MAX_CAPITAL_FRACTION",
+        "PAIRED_MAX_QUANTITY", "PAIRED_MIN_LOCKED_ROI",
+    ):
+        assert f"{name}=" in ENV_EXAMPLE
 
 
 def test_windows_build_fails_on_native_compile_or_test_error():

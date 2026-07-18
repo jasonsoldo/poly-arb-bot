@@ -68,7 +68,7 @@ def test_paired_opportunity_carries_canonical_identity_cost_and_risk_fields():
         "config_version", "config_hash", "real_order_submissions", "real_fills",
     ):
         assert f'\\"{field}\\":' in SOURCE
-    assert "paired-lock-shadow-v2" in SOURCE
+    assert "paired-lock-shadow-v3" in SOURCE
     assert "paired_config_hash" in SOURCE
 
 
@@ -311,7 +311,7 @@ def test_probability_audit_exposes_real_bid_exit_evidence_and_calibration_window
     ):
         assert f'\\"{field}\\":' in SOURCE
     assert 'BOOK_EXECUTABLE_NOT_FILL' in SOURCE
-    assert 'shadow-buy-rules-v8' in SOURCE
+    assert 'shadow-buy-rules-v9' in SOURCE
 
 
 def test_probability_profit_exit_is_captured_on_each_book_evaluation_before_audit_throttling():
@@ -452,3 +452,35 @@ def test_microstructure_reversion_is_built_and_tested_before_market_engine():
     script = Path("scripts/build_cpp.sh").read_text(encoding="utf-8")
     assert "cpp/strategy/microstructure_reversion_test.cpp" in script
     assert "built and tested build/microstructure_reversion_test" in script
+
+
+def test_real_market_dynamic_sizing_is_used_by_live_shadow_strategies():
+    assert '#include "../strategy/dynamic_position_sizing.hpp"' in SOURCE
+    assert 'row.get<double>("min_order_size")' in SOURCE
+    assert 'row.get<double>("tick_size")' in SOURCE
+    assert "sizing::size_probability_position" in SOURCE
+    assert "sizing::size_paired_lock" in SOURCE
+    for field in (
+        "sizing_mode", "requested_max_size", "dynamic_target_size",
+        "market_minimum_size", "executable_depth_size",
+        "slippage_limited_size", "capital_limited_size",
+        "shadow_capital_usd", "capital_budget_usd", "input_quality_score",
+        "conservative_probability", "probability_haircut",
+        "full_kelly_fraction", "applied_kelly_fraction", "dynamic_vwap",
+        "dynamic_fee", "dynamic_buffer", "dynamic_all_in_cost",
+        "dynamic_all_in_price", "dynamic_expected_profit",
+        "dynamic_maximum_loss", "size_binding_constraint",
+    ):
+        assert f'\\"{field}\\":' in SOURCE
+
+    probability = SOURCE.split("void evaluate_reference_strategies()", 1)[1].split(
+        "void emit_complete_set_evaluations", 1
+    )[0]
+    assert "buy_vwap(up_book, size_)" not in probability
+    assert "buy_vwap(down_book, size_)" not in probability
+
+    paired = SOURCE.split("void evaluate()", 1)[1].split(
+        "void record_session_strategy", 1
+    )[0]
+    assert "sizing::size_paired_lock" in paired
+    assert "counterfactual_sizes_{{1, 2, 5, 10}}" in SOURCE

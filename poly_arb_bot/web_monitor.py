@@ -807,10 +807,19 @@ def build_status(data_dir, log_file, state_file):
         "waiting_up_snapshot": int(shadow_health.get("waiting_up_snapshot", 0)),
         "waiting_down_snapshot": int(shadow_health.get("waiting_down_snapshot", 0)),
     }
-    pair_fields = ("market_id", "up_vwap", "down_vwap", "gross_cost", "up_fee", "down_fee",
-                   "buffer", "net_cost", "guaranteed_payout", "locked_profit",
-                   "expected_execution_value", "decision", "reason")
+    pair_fields = (
+        "market_id", "up_vwap", "down_vwap", "gross_cost", "up_fee", "down_fee",
+        "buffer", "net_cost", "guaranteed_payout", "locked_profit",
+        "expected_execution_value", "decision", "reason", "sizing_mode",
+        "requested_max_size", "dynamic_target_size", "market_minimum_size",
+        "executable_depth_size", "slippage_limited_size", "capital_limited_size",
+        "shadow_capital_usd", "capital_budget_usd", "dynamic_fee",
+        "dynamic_buffer", "dynamic_all_in_cost", "dynamic_all_in_price",
+        "dynamic_expected_profit", "dynamic_maximum_loss",
+        "size_binding_constraint",
+    )
     current_pair = {key: latest_event.get(key) for key in pair_fields} if latest_event else {}
+
     latest_split_sell = next(
         (
             item for item in shadow_events
@@ -869,6 +878,35 @@ def build_status(data_dir, log_file, state_file):
         )
     ]
     active_shadow_positions = len(current_positions)
+    def finite_number(value):
+        try:
+            numeric = float(value)
+            return value is not None and numeric == numeric and abs(numeric) != float("inf")
+        except (TypeError, ValueError):
+            return False
+
+    all_active_positions = list(lifecycle_state.get("positions", {}).values())
+    invalid_dynamic_positions = sum(
+        position.get("sizing_mode") != "real_market_dynamic_v1"
+        or not finite_number(position.get("target_size"))
+        or float(position.get("target_size") or 0) <= 0
+        or not finite_number(position.get("entry_cost"))
+        or float(position.get("entry_cost") or 0) <= 0
+        or not finite_number(position.get("dynamic_maximum_loss"))
+        for position in all_active_positions
+    )
+    dynamic_sizing = {
+        "active_positions": len(all_active_positions),
+        "active_capital_usd": round(sum(
+            float(position.get("entry_cost") or 0) for position in all_active_positions
+        ), 12),
+        "maximum_loss_usd": round(sum(
+            float(position.get("dynamic_maximum_loss") or 0)
+            for position in all_active_positions
+        ), 12),
+        "invalid_active_positions": invalid_dynamic_positions,
+        "semantics": "REAL_MARKET_BOOK_SIZED_SHADOW_NOT_ORDERS",
+    }
     simulated_complete = report["performance"]["completed"]
     locked_complete = sum(
         report["performance_by_strategy"][name]["completed"]
@@ -999,6 +1037,7 @@ def build_status(data_dir, log_file, state_file):
         "strategy_counts": strategy_counts,
         "session_strategy_counts": session_strategy_counts,
         "strategy_latest": strategy_latest,
+        "dynamic_sizing": dynamic_sizing,
         "strategy_recent": strategy_recent,
         "reference_prices": reference_prices,
         "shadow_health": shadow_health,

@@ -44,6 +44,32 @@ def test_scanner_reads_market_fee_schedule():
     assert MarketScanner().spec_from_market(market).fee_rate == 0.05
 
 
+def test_scanner_payload_preserves_real_clob_sizing_metadata():
+    market = {
+        "conditionId": "0xcondition",
+        "question": "Bitcoin Up or Down - July 11, 9:25PM-9:30PM ET",
+        "outcomes": ["Up", "Down"],
+        "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-11T13:30:00Z",
+    }
+    spec = MarketScanner().spec_from_market(market)
+    spec = spec.__class__(
+        **{
+            **spec.__dict__,
+            "min_order_size": 5.0,
+            "tick_size": 0.01,
+            "fee_exponent": 1.0,
+            "fee_taker_only": True,
+        }
+    )
+
+    row = MarketScanner().to_payload([spec])["markets"][0]
+    assert row["min_order_size"] == 5.0
+    assert row["tick_size"] == 0.01
+    assert row["fee_exponent"] == 1.0
+    assert row["fee_taker_only"] is True
+
+
 def test_scanner_reads_official_event_start_time_for_chainlink_anchor():
     event = {"startTime": "2026-07-14T00:35:00Z"}
     market = {

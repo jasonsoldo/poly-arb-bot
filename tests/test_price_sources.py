@@ -24,6 +24,9 @@ class FakeHttp:
                 {
                     "bids": [{"price": "0.40", "size": "10"}],
                     "asks": [{"price": "0.42", "size": "5"}, {"price": "0.44", "size": "20"}],
+                    "min_order_size": "5",
+                    "tick_size": "0.01",
+                    "fee_schedule": {"rate": "0.07", "exponent": "1", "taker_only": True},
                 },
                 5,
                 "url",
@@ -61,6 +64,11 @@ def test_clob_book_expected_buy_price_from_asks():
     assert book.best_ask == 0.42
     assert round(book.expected_buy_price(10), 3) == 0.43
     assert book.ask_liquidity(0.43) == 5
+    assert book.min_order_size == 5
+    assert book.tick_size == 0.01
+    assert book.fee_rate == 0.07
+    assert book.fee_exponent == 1
+    assert book.fee_taker_only is True
 
 
 def test_clob_market_info_uses_v2_endpoint():

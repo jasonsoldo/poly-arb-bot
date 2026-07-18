@@ -1098,3 +1098,50 @@ def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
     assert calibration["origin_rejected"] == 1
     assert calibration["calibration_buckets"]["0.2-0.3"]["realized_up_rate"] == 1
 
+
+def test_web_status_exposes_real_market_dynamic_sizing_and_active_capital(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    state = tmp_path / "state"
+    data.mkdir(); logs.mkdir(); state.mkdir()
+    (data / "live_markets.json").write_text(json.dumps({"markets": [{
+        "market_id": "m1", "asset": "BTC", "interval": "5m",
+    }]}), encoding="utf-8")
+    paired_row = {
+        "ts": time.time(), "event_id": "pair", "event_type": "shadow_eval",
+        "strategy": "paired_lock", "market_id": "m1", "decision": "ACCEPT",
+        "sizing_mode": "real_market_dynamic_v1", "requested_max_size": 100,
+        "dynamic_target_size": 13.5, "market_minimum_size": 5,
+        "dynamic_all_in_cost": 12.4, "dynamic_maximum_loss": 12.4,
+        "capital_budget_usd": 20, "size_binding_constraint": "executable_depth",
+        "up_vwap": .42, "down_vwap": .46, "locked_profit": 1.1,
+    }
+    directional_row = {
+        **paired_row, "event_id": "directional", "strategy": "late_window_directional_ev",
+        "dynamic_target_size": 7.25, "dynamic_all_in_cost": 3.1,
+        "dynamic_maximum_loss": 3.1, "size_binding_constraint": "capital_budget",
+        "config_hash": "directional-dynamic-hash",
+    }
+    (logs / "shadow-audit.jsonl").write_text(json.dumps(paired_row) + "\n", encoding="utf-8")
+    (logs / "strategy-audit.jsonl").write_text(json.dumps(directional_row) + "\n", encoding="utf-8")
+    (state / "strategy-shadow.json").write_text(json.dumps({
+        "positions": {"p1": {
+            "strategy": "late_window_directional_ev", "target_size": 7.25,
+            "entry_cost": 3.1, "dynamic_maximum_loss": 3.1,
+                "sizing_mode": "real_market_dynamic_v1",
+                "size_binding_constraint": "capital_budget",
+                "strategy_config_hash": "directional-dynamic-hash",
+        }},
+        "completed": [], "real_order_submissions": 0, "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+
+    status = build_status(data, logs / "shadow-audit.jsonl", state / "orders.json")
+
+    assert status["current_pair"]["dynamic_target_size"] == 13.5
+    assert status["current_pair"]["dynamic_all_in_cost"] == 12.4
+    assert status["strategy_latest"]["late_window_directional_ev"]["capital_budget_usd"] == 20
+    assert status["dynamic_sizing"]["active_positions"] == 1
+    assert status["dynamic_sizing"]["active_capital_usd"] == 3.1
+    assert status["dynamic_sizing"]["maximum_loss_usd"] == 3.1
+

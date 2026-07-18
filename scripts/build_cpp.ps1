@@ -52,6 +52,14 @@ Assert-NativeSuccess "compile complete_set_arb_test"
 Assert-NativeSuccess "run complete_set_arb_test"
 Write-Host "built and tested build/complete_set_arb_test.exe"
 
+g++ -std=c++17 -O3 -Wall -Wextra `
+  cpp/strategy/dynamic_position_sizing_test.cpp `
+  -o build/dynamic_position_sizing_test.exe
+Assert-NativeSuccess "compile dynamic_position_sizing_test"
+& .\build\dynamic_position_sizing_test.exe
+Assert-NativeSuccess "run dynamic_position_sizing_test"
+Write-Host "built and tested build/dynamic_position_sizing_test.exe"
+
 g++ -std=c++17 -O3 -Wall -Wextra -static -static-libgcc -static-libstdc++ `
   cpp/pnl_curve_engine/pnl_curve_engine.cpp `
   -o build/pnl_curve_engine.exe

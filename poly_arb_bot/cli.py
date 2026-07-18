@@ -240,9 +240,14 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
     clob = PolymarketClobClient()
     diagnostics = {}
     examples = []
+    clob_info_workers = max(1, min(
+        16,
+        len(unique),
+        int(os.getenv("CLOB_MARKET_INFO_CONCURRENCY", "16")),
+    )) if unique else 0
     print(
-        f"CLOB_VALIDATE_START candidates={len(unique)} active_workers={min(8, len(unique))} "
-        f"clob_request_count={1 if unique else 0}", flush=True,
+        f"CLOB_VALIDATE_START candidates={len(unique)} active_workers={clob_info_workers} "
+        f"clob_request_count={1 + len(unique) if unique else 0}", flush=True,
     )
     base_specs = list(unique.values())
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -264,8 +269,10 @@ def scan_updown_markets(output_path: Path, gamma_base_url: str, intervals: str, 
         f"CLOB_VALIDATE_DONE elapsed_ms={elapsed_ms} "
         f"completed_workers={len(unique)} valid={len(valid)} rejected={rejected}", flush=True,
     )
-    enriched_by_id = {spec.market_id: spec for spec in enriched}
-    unique = {spec.market_id: enriched_by_id[spec.market_id] for spec in valid}
+    unique = {
+        spec.market_id: spec
+        for spec in merge_validated_market_metadata(valid, enriched)
+    }
     if remaining() <= 0:
         print(f"SCAN_DEADLINE_EXCEEDED elapsed_ms={int((time.monotonic() - scan_started) * 1000)} kept=true", flush=True)
         return 3
@@ -316,6 +323,23 @@ def restore_cached_open_prices(specs, output_path: Path):
         else:
             restored.append(spec)
     return restored
+
+
+def merge_validated_market_metadata(validated, enriched):
+    enriched_by_id = {spec.market_id: spec for spec in enriched}
+    merged = []
+    for spec in validated:
+        source = enriched_by_id.get(spec.market_id)
+        if source is None:
+            continue
+        merged.append(replace(
+            spec,
+            open_price=source.open_price,
+            open_price_source=source.open_price_source,
+            open_price_capture_mode=source.open_price_capture_mode,
+            open_price_source_timestamp_ms=source.open_price_source_timestamp_ms,
+        ))
+    return merged
 
 
 def enrich_open_prices(specs, client, now_ts, workers=8, remaining=None):
@@ -431,20 +455,95 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
             diagnostics["http_error"] = len(specs)
             examples.append(("", "", str(exc)[:240]))
             return [], len(specs)
+        market_infos = {}
+        market_info_enabled = hasattr(clob, "get_market_info")
+        if market_info_enabled and specs:
+            info_workers = max(1, min(
+                16,
+                len(specs),
+                int(os.getenv("CLOB_MARKET_INFO_CONCURRENCY", "16")),
+            ))
+            with ThreadPoolExecutor(max_workers=info_workers) as executor:
+                futures = {
+                    executor.submit(clob.get_market_info, spec.market_id): spec
+                    for spec in specs
+                }
+                for future in as_completed(futures):
+                    spec = futures[future]
+                    try:
+                        market_infos[spec.market_id] = future.result()
+                    except Exception as exc:
+                        diagnostics["market_info_error"] = diagnostics.get("market_info_error", 0) + 1
+                        examples.append((spec.market_id, "", str(exc)[:240]))
         for spec in specs:
             up_book = books.get(spec.up_token_id)
             down_book = books.get(spec.down_token_id)
             if up_book is None or down_book is None:
                 diagnostics["no_orderbook"] = diagnostics.get("no_orderbook", 0) + 1
                 continue
-            fee_rate = up_book.fee_rate or down_book.fee_rate or spec.fee_rate
-            if fee_rate is None or fee_rate <= 0:
-                diagnostics["fee_schedule_unavailable"] = diagnostics.get("fee_schedule_unavailable", 0) + 1
-                continue
+            if market_info_enabled:
+                info = market_infos.get(spec.market_id)
+                if info is None:
+                    continue
+                token_map = {
+                    str(token.get("o", "")).lower(): str(token.get("t", ""))
+                    for token in info.get("t", [])
+                    if isinstance(token, dict)
+                }
+                if token_map.get("up") != spec.up_token_id or token_map.get("down") != spec.down_token_id:
+                    diagnostics["clob_outcome_mismatch"] = diagnostics.get("clob_outcome_mismatch", 0) + 1
+                    continue
+                fee_data = info.get("fd") if isinstance(info.get("fd"), dict) else {}
+                try:
+                    fee_rate = float(fee_data.get("r"))
+                    fee_exponent = float(fee_data.get("e"))
+                    min_order_size = float(info.get("mos"))
+                    tick_size = float(info.get("mts"))
+                except (TypeError, ValueError):
+                    diagnostics["fee_or_size_metadata_unavailable"] = diagnostics.get(
+                        "fee_or_size_metadata_unavailable", 0
+                    ) + 1
+                    continue
+                fee_taker_only = fee_data.get("to") if isinstance(fee_data.get("to"), bool) else None
+                if (fee_rate <= 0 or fee_exponent <= 0 or min_order_size <= 0 or tick_size <= 0
+                        or fee_taker_only is None):
+                    diagnostics["fee_or_size_metadata_unavailable"] = diagnostics.get(
+                        "fee_or_size_metadata_unavailable", 0
+                    ) + 1
+                    continue
+            else:
+                fee_rate = up_book.fee_rate or down_book.fee_rate or spec.fee_rate
+                if fee_rate is None or fee_rate <= 0:
+                    diagnostics["fee_schedule_unavailable"] = diagnostics.get("fee_schedule_unavailable", 0) + 1
+                    continue
+                minimums = [value for value in (up_book.min_order_size, down_book.min_order_size)
+                            if value is not None and value > 0]
+                ticks = [value for value in (up_book.tick_size, down_book.tick_size)
+                         if value is not None and value > 0]
+                if len(minimums) != 2 or len(ticks) != 2:
+                    diagnostics["market_size_metadata_unavailable"] = diagnostics.get(
+                        "market_size_metadata_unavailable", 0
+                    ) + 1
+                    continue
+                min_order_size = max(minimums)
+                tick_size = max(ticks)
+                fee_exponent = up_book.fee_exponent if up_book.fee_exponent is not None else down_book.fee_exponent
+                fee_taker_only = (
+                    up_book.fee_taker_only
+                    if up_book.fee_taker_only is not None
+                    else down_book.fee_taker_only
+                )
             if not up_book.asks or not down_book.asks:
                 diagnostics["empty_asks"] = diagnostics.get("empty_asks", 0) + 1
                 continue
-            valid.append(replace(spec, fee_rate=fee_rate))
+            valid.append(replace(
+                spec,
+                fee_rate=fee_rate,
+                min_order_size=min_order_size,
+                tick_size=tick_size,
+                fee_exponent=fee_exponent,
+                fee_taker_only=fee_taker_only,
+            ))
         return valid, len(specs) - len(valid)
 
     def validate(spec):
@@ -467,7 +566,32 @@ def filter_specs_with_orderbooks(specs, clob, diagnostics=None, examples=None):
                 fee_rate = 0
             if fee_rate <= 0:
                 return None, "fee_schedule_unavailable", (spec.market_id, "", "CLOB fee schedule unavailable")
-            spec = replace(spec, up_token_id=up_token_id, down_token_id=down_token_id, fee_rate=fee_rate)
+            try:
+                min_order_size = float(info.get("mos"))
+                tick_size = float(info.get("mts"))
+            except (TypeError, ValueError):
+                return None, "market_size_metadata_unavailable", (
+                    spec.market_id, "", "CLOB minimum order or tick size unavailable"
+                )
+            if min_order_size <= 0 or tick_size <= 0:
+                return None, "market_size_metadata_unavailable", (
+                    spec.market_id, "", "CLOB minimum order or tick size invalid"
+                )
+            try:
+                fee_exponent = float(fee_data["e"]) if fee_data.get("e") is not None else None
+            except (TypeError, ValueError):
+                fee_exponent = None
+            fee_taker_only = fee_data.get("to") if isinstance(fee_data.get("to"), bool) else None
+            spec = replace(
+                spec,
+                up_token_id=up_token_id,
+                down_token_id=down_token_id,
+                fee_rate=fee_rate,
+                min_order_size=min_order_size,
+                tick_size=tick_size,
+                fee_exponent=fee_exponent,
+                fee_taker_only=fee_taker_only,
+            )
             up_book = clob.get_book(spec.up_token_id)
             down_book = clob.get_book(spec.down_token_id)
             if not up_book.asks or not down_book.asks:

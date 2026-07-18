@@ -79,6 +79,36 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
         for section in (execution, lifecycle)
         for field in ("real_order_submissions", "real_orders", "real_fills")
     )
+    def valid_dynamic_latest(row):
+        if row.get("sizing_mode") != "real_market_dynamic_v1":
+            return False
+        try:
+            requested = float(row.get("requested_max_size"))
+            minimum = float(row.get("market_minimum_size"))
+            capital = float(row.get("shadow_capital_usd"))
+        except (TypeError, ValueError):
+            return False
+        if requested <= 0 or minimum <= 0 or capital <= 0:
+            return False
+        if row.get("decision") != "ACCEPT":
+            return True
+        try:
+            target = float(row.get("dynamic_target_size"))
+            cost = float(row.get("dynamic_all_in_cost"))
+            maximum_loss = float(row.get("dynamic_maximum_loss"))
+        except (TypeError, ValueError):
+            return False
+        return (
+            target + 1e-9 >= minimum and cost > 0 and maximum_loss > 0
+            and bool(row.get("size_binding_constraint"))
+        )
+    dynamic_sizing = status.get("dynamic_sizing", {})
+    dynamic_sizing_integrity = (
+        all(valid_dynamic_latest(status.get("strategy_latest", {}).get(name, {}))
+            for name in strategy_names)
+        and dynamic_sizing.get("invalid_active_positions") == 0
+        and dynamic_sizing.get("semantics") == "REAL_MARKET_BOOK_SIZED_SHADOW_NOT_ORDERS"
+    )
     checks = [
         {"name": "analytics_ready", "passed": not status.get("analytics_refreshing", False)},
         {"name": "market_data_present", "passed": market_data_present},
@@ -113,6 +143,7 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
          probability_observations.get("semantics") == "CALIBRATION_ONLY_NOT_ORDERS_OR_PNL"},
         {"name": "arbitrage_book_evidence_integrity", "passed":
          arbitrage_book_evidence_integrity},
+        {"name": "dynamic_sizing_integrity", "passed": dynamic_sizing_integrity},
         {"name": "event_deduplication", "passed": shadow.get("duplicate_events", 0) == 0},
         {"name": "three_strategy_evaluations",
          "passed": all(row.get("evaluations", 0) > 0 for row in strategy_rows)},
@@ -154,7 +185,10 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                         "max_book_resyncs_per_hour": max_book_resyncs_per_hour,
                         "arbitrage_research_conclusion": arbitrage_research.get(
                             "conclusion", "NO REPEATABLE ARBITRAGE FOUND"
-                        )}}
+                        ),
+                        "dynamic_active_positions": dynamic_sizing.get("active_positions"),
+                        "dynamic_active_capital_usd": dynamic_sizing.get("active_capital_usd"),
+                        "dynamic_maximum_loss_usd": dynamic_sizing.get("maximum_loss_usd")}}
 
 
 def run(data_dir=Path("data"), log_file=Path("logs/shadow-audit.jsonl"), state_file=Path("state/orders.json"),

@@ -495,11 +495,12 @@ class StrategyShadowLifecycle:
         if strategy not in {"late_window_directional_ev", "low_price_lottery_ev", "paired_lock"}:
             return False
         hedged = row.get("event_type") == "shadow_hedged_opportunity"
-        if (
-            row.get("event_type") == "shadow_eval"
-            and row.get("config_version") == "shadow-buy-rules-v7"
-            and strategy in {"late_window_directional_ev", "low_price_lottery_ev"}
-        ):
+        probability_strategy = strategy in {
+            "late_window_directional_ev", "low_price_lottery_ev",
+        }
+        if not hedged and probability_strategy and row.get("config_version") != "shadow-buy-rules-v9":
+            return False
+        if strategy == "paired_lock" and row.get("config_version") != "paired-lock-shadow-v3":
             return False
         accepted = row.get("decision") == "ACCEPT" or (
             strategy == "paired_lock" and row.get("event_type") == "shadow_opportunity"
@@ -509,16 +510,44 @@ class StrategyShadowLifecycle:
         key = self._key(row)
         if key in self.data["positions"]:
             return False
-        size = float(row.get("main_size", row.get("target_size", 10)))
+        dynamic = not hedged and (probability_strategy or strategy == "paired_lock")
+        if dynamic:
+            required = (
+                "dynamic_target_size", "market_minimum_size",
+                "dynamic_all_in_cost", "dynamic_maximum_loss",
+                "capital_budget_usd", "size_binding_constraint",
+            )
+            if row.get("sizing_mode") != "real_market_dynamic_v1" or any(
+                row.get(field) is None for field in required
+            ):
+                return False
+            try:
+                size = float(row["dynamic_target_size"])
+                minimum_size = float(row["market_minimum_size"])
+                entry_cost = float(row["dynamic_all_in_cost"])
+                maximum_loss = float(row["dynamic_maximum_loss"])
+                capital_budget = float(row["capital_budget_usd"])
+            except (TypeError, ValueError):
+                return False
+            if not all(math.isfinite(value) for value in (
+                size, minimum_size, entry_cost, maximum_loss, capital_budget,
+            )) or size <= 0 or minimum_size <= 0 or size + 1e-9 < minimum_size or entry_cost <= 0:
+                return False
+        else:
+            size = float(row.get("main_size", row.get("target_size", 0)))
+            maximum_loss = None
+            capital_budget = None
         market = markets[row["market_id"]]
         paired = strategy == "paired_lock"
-        fill = None if paired else float(row.get("main_expected_fill_price", row["expected_fill_price"] if "expected_fill_price" in row else 0))
-        fees = 0.0 if paired else float(row.get("fees", row.get("total_fees", 0)))
-        entry_cost = (
-            float(row["net_cost"]) if paired
-            else float(row["total_cost"]) if hedged
-            else size * (fill + fees)
-        )
+        fill = None if paired else float(row.get(
+            "main_expected_fill_price",
+            row.get("dynamic_vwap", row.get("expected_fill_price", 0)),
+        ))
+        fees = 0.0 if paired else float(row.get(
+            "dynamic_fee", row.get("fees", row.get("total_fees", 0)),
+        ))
+        if not dynamic:
+            entry_cost = float(row["total_cost"]) if hedged else size * (fill + fees)
         block_reason = self._portfolio_block_reason(row, market, entry_cost)
         if block_reason and not self.calibration_mode:
             return self._reject(row, block_reason)
@@ -549,6 +578,12 @@ class StrategyShadowLifecycle:
             "hedge_strategy": row.get("hedge_strategy"),
             "terminal_hedged": hedged,
             "entry_cost": round(entry_cost, 12),
+            "sizing_mode": row.get("sizing_mode"),
+            "market_minimum_size": row.get("market_minimum_size"),
+            "dynamic_target_size": row.get("dynamic_target_size"),
+            "dynamic_maximum_loss": maximum_loss,
+            "capital_budget_usd": capital_budget,
+            "size_binding_constraint": row.get("size_binding_constraint"),
             "price_to_beat": row.get("price_to_beat"),
             "condition_id": row.get("condition_id"), "window": row.get("window"),
             "generation": row.get("generation"), "session": row.get("session"),

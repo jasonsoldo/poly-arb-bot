@@ -26,7 +26,7 @@ BINANCE_SYMBOLS = {
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
-STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v8"
+STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v9"
 
 
 def strategy_config(strategy=None):

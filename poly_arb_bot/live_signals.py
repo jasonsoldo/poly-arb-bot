@@ -26,6 +26,10 @@ class LiveMarketSpec:
     open_price_source: Optional[str] = None
     open_price_capture_mode: Optional[str] = None
     open_price_source_timestamp_ms: Optional[float] = None
+    min_order_size: Optional[float] = None
+    tick_size: Optional[float] = None
+    fee_exponent: Optional[float] = None
+    fee_taker_only: Optional[bool] = None
     max_allowed_price: float = 0.99
 
 
