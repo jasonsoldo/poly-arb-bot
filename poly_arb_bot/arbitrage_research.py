@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import time
 from pathlib import Path
 
 
@@ -158,7 +159,8 @@ def _empty_state():
 
 
 class IncrementalArbitrageResearch:
-    def __init__(self, audit_path, execution_path=None, state_path=None):
+    def __init__(self, audit_path, execution_path=None, state_path=None,
+                 save_interval_seconds=30, clock=time.monotonic):
         self.audit_path = Path(audit_path)
         self.execution_path = Path(execution_path) if execution_path else None
         self.state_path = Path(state_path) if state_path else None
@@ -178,6 +180,10 @@ class IncrementalArbitrageResearch:
         self._migrate_legacy_patterns()
         self._seen_order = list(self.state.get("seen", []))[-MAX_SEEN_EVENTS:]
         self._seen = set(self._seen_order)
+        self._save_interval_seconds = max(0, save_interval_seconds)
+        self._clock = clock
+        self._last_saved_at = None
+        self._dirty = False
 
     def _migrate_legacy_patterns(self):
         patterns = self.state["patterns"]
@@ -592,8 +598,14 @@ class IncrementalArbitrageResearch:
         changed = self._consume_file(
             self.execution_path, "execution", self._consume_execution,
         ) or changed
-        if changed:
+        self._dirty = self._dirty or changed
+        now = self._clock()
+        if self._dirty and (
+                self._last_saved_at is None
+                or now - self._last_saved_at >= self._save_interval_seconds):
             self._save()
+            self._dirty = False
+            self._last_saved_at = now
         return self.report()
 
     def report(self):

@@ -56,12 +56,15 @@ struct Market {
     std::optional<double> open_price, open_price_source_timestamp_ms;
     double fee = .07, start_ts = 0, close_ts = 0, active_since = 0, last_audit = 0;
     double split_sell_active_since = 0, split_sell_last_audit = 0;
-    double arb_research_last_audit = 0;
+    double arb_research_last_audit = 0, arb_research_last_evaluated = 0;
     std::array<bool, 32> arb_research_qualified{};
     unsigned long long arb_research_up_version = 0;
     unsigned long long arb_research_down_version = 0;
     bool arb_research_books_synced = false;
     bool arb_research_initialized = false;
+    unsigned long long last_book_evaluation_up_version = 0;
+    unsigned long long last_book_evaluation_down_version = 0;
+    unsigned long long last_book_evaluation_time_bucket = 0;
     unsigned long long last_strategy_up_version = 0, last_strategy_down_version = 0;
     unsigned long long last_strategy_reference_revision = 0, last_strategy_time_bucket = 0;
     bool accepting_orders = true;
@@ -1716,6 +1719,10 @@ private:
             bool books_synced, double timestamp) {
         if (!audit_) return;
         const bool periodic_audit = timestamp - market.arb_research_last_audit >= 60;
+        if (market.arb_research_initialized && !periodic_audit &&
+                timestamp - market.arb_research_last_evaluated <
+                    counterfactual_min_interval_seconds_) return;
+        market.arb_research_last_evaluated = timestamp;
         if (market.arb_research_initialized &&
                 up_book.version == market.arb_research_up_version &&
                 down_book.version == market.arb_research_down_version &&
@@ -1873,6 +1880,17 @@ private:
                 }
                 continue;
             }
+            const auto time_bucket = static_cast<unsigned long long>(
+                timestamp / book_evaluation_interval_seconds_);
+            const bool book_changed =
+                up_book.version != item.second.last_book_evaluation_up_version ||
+                down_book.version != item.second.last_book_evaluation_down_version;
+            if (!book_changed &&
+                    time_bucket == item.second.last_book_evaluation_time_bucket)
+                continue;
+            item.second.last_book_evaluation_up_version = up_book.version;
+            item.second.last_book_evaluation_down_version = down_book.version;
+            item.second.last_book_evaluation_time_bucket = time_bucket;
             const double up_age_ms = std::max(0.0, (timestamp - up_book.updated_at) * 1000);
             const double down_age_ms = std::max(0.0, (timestamp - down_book.updated_at) * 1000);
             const double book_state_age_ms = std::max(up_age_ms, down_age_ms);
@@ -2527,6 +2545,8 @@ private:
         "MAKER_OBSERVATION_WINDOW_SECONDS", "30");
     const std::array<double, 4> counterfactual_sizes_{{1, 2, 5, 10}};
     const std::array<double, 4> counterfactual_delays_us_{{0, 50000, 100000, 250000}};
+    static constexpr double book_evaluation_interval_seconds_ = 0.25;
+    static constexpr double counterfactual_min_interval_seconds_ = 0.1;
     std::string inventory_state_path_ = environment_value(
         "COMPLETE_SET_INVENTORY_STATE_PATH", "state/complete-set-inventory.json");
     std::string directional_strategy_config_hash_ = strategy_config_hash("late_window_directional_ev");

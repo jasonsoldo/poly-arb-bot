@@ -376,3 +376,23 @@ def test_engine_emits_bounded_multi_size_latency_counterfactual_research():
     assert "!qualification_changed && !periodic_audit" in SOURCE
     assert "arb_research_up_version" in SOURCE
     assert "up_book.version == market.arb_research_up_version" in SOURCE
+
+
+def test_book_evaluation_is_event_driven_and_counterfactual_grid_is_rate_limited():
+    assert "last_book_evaluation_up_version" in SOURCE
+    assert "last_book_evaluation_down_version" in SOURCE
+    assert "last_book_evaluation_time_bucket" in SOURCE
+    evaluate = SOURCE.split("void evaluate()", 1)[1].split(
+        "void record_session_strategy", 1
+    )[0]
+    skip = "time_bucket == item.second.last_book_evaluation_time_bucket"
+    assert "if (!book_changed &&" in evaluate
+    assert skip in evaluate
+    assert evaluate.index(skip) < evaluate.index("emit_arbitrage_counterfactual(")
+    assert evaluate.index(skip) < evaluate.index("update_observed_arbitrage(")
+
+    counterfactual = SOURCE.split("void emit_arbitrage_counterfactual(", 1)[1].split(
+        "\n    void evaluate()", 1
+    )[0]
+    assert "arb_research_last_evaluated" in counterfactual
+    assert "counterfactual_min_interval_seconds_" in counterfactual

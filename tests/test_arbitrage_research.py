@@ -409,6 +409,35 @@ def test_empty_research_reports_no_repeatable_arbitrage(tmp_path):
     assert result["conclusion"] == "NO REPEATABLE ARBITRAGE FOUND"
 
 
+def test_persistent_state_is_batched_without_delaying_live_report(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    state = tmp_path / "state.json"
+    now = [100.0]
+    audit.write_text(json.dumps(_row("a1", "ACCEPT", 1)) + "\n")
+    tracker = IncrementalArbitrageResearch(
+        audit,
+        state_path=state,
+        save_interval_seconds=30,
+        clock=lambda: now[0],
+    )
+
+    assert tracker.refresh()["funnels"]["paired_lock"]["evaluations"] == 1
+    first_persisted = json.loads(state.read_text(encoding="utf-8"))
+    assert first_persisted["funnels"]["paired_lock"]["evaluations"] == 1
+
+    with audit.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_row("a2", "REJECT", 2)) + "\n")
+    now[0] += 1
+    assert tracker.refresh()["funnels"]["paired_lock"]["evaluations"] == 2
+    still_persisted = json.loads(state.read_text(encoding="utf-8"))
+    assert still_persisted["funnels"]["paired_lock"]["evaluations"] == 1
+
+    now[0] += 30
+    tracker.refresh()
+    latest_persisted = json.loads(state.read_text(encoding="utf-8"))
+    assert latest_persisted["funnels"]["paired_lock"]["evaluations"] == 2
+
+
 def test_out_of_sample_validation_uses_later_independent_windows(tmp_path):
     audit = tmp_path / "audit.jsonl"
     rows = []
