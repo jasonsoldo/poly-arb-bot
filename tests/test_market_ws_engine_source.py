@@ -301,6 +301,35 @@ def test_engine_emits_dedicated_non_trading_probability_observations():
     assert "calibration_horizon_seconds" in SOURCE
 
 
+def test_probability_audit_exposes_real_bid_exit_evidence_and_calibration_window_mode():
+    assert "DIRECTIONAL_ENFORCE_TIME_WINDOW" in SOURCE
+    assert "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE" in SOURCE
+    for field in (
+        "exit_fill_quantity", "exit_vwap", "exit_total_fee",
+        "exit_execution_buffer", "exit_depth_ok", "exit_book_fresh",
+        "exit_observation_semantics",
+    ):
+        assert f'\\"{field}\\":' in SOURCE
+    assert 'BOOK_EXECUTABLE_NOT_FILL' in SOURCE
+    assert 'shadow-buy-rules-v8' in SOURCE
+
+
+def test_probability_profit_exit_is_captured_on_each_book_evaluation_before_audit_throttling():
+    assert "active_probability_shadow_positions_" in SOURCE
+    assert "emit_probability_profit_exit" in SOURCE
+    assert 'SHADOW_PROFIT_EXIT_MIN_PNL' in SOURCE
+    assert '\\"event_type\\":\\"shadow_probability_profit_exit_book_executable\\"' in SOURCE
+    assert '\\"observation_semantics\\":\\"BOOK_EXECUTABLE_NOT_FILL\\"' in SOURCE
+    assert '\\"simulated_fill\\":false' in SOURCE
+
+    evaluation = SOURCE.split("void evaluate_reference_strategies()", 1)[1].split(
+        "void emit_complete_set_evaluations", 1
+    )[0]
+    assert evaluation.index("emit_probability_profit_exit") < evaluation.index(
+        "should_emit_strategy"
+    )
+
+
 def test_disconnect_and_market_reload_invalidate_pending_arbitrage_attempts():
     reload_body = SOURCE.split("void reload_markets()", 1)[1].split(
         "void queue_write", 1
@@ -396,3 +425,30 @@ def test_book_evaluation_is_event_driven_and_counterfactual_grid_is_rate_limited
     )[0]
     assert "arb_research_last_evaluated" in counterfactual
     assert "counterfactual_min_interval_seconds_" in counterfactual
+
+
+def test_microstructure_reversion_uses_only_observed_clob_entry_and_future_exit_books():
+    assert '#include "../strategy/microstructure_reversion.hpp"' in SOURCE
+    assert "evaluate_microstructure_reversion" in SOURCE
+    assert "midpoint_history_" in SOURCE
+    assert "microstructure_reversion::evaluate_entry" in SOURCE
+    assert "microstructure_reversion::evaluate_exit" in SOURCE
+    assert '\"strategy\":\"microstructure_reversion\"' in SOURCE
+    for event_type in (
+        "shadow_reversion_eval", "shadow_reversion_candidate",
+        "shadow_reversion_entry_book_executable",
+        "shadow_reversion_exit_book_executable",
+        "shadow_reversion_timeout_exit_book_executable",
+        "shadow_reversion_no_exit", "shadow_reversion_invalidated",
+    ):
+        assert f'\"{event_type}\"' in SOURCE
+    assert '\"observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\"' in SOURCE
+    assert '\"reference_prices_used\":false' in SOURCE
+    assert '\"settlement_probability_used\":false' in SOURCE
+    assert '\"real_order_submissions\":0' in SOURCE
+
+
+def test_microstructure_reversion_is_built_and_tested_before_market_engine():
+    script = Path("scripts/build_cpp.sh").read_text(encoding="utf-8")
+    assert "cpp/strategy/microstructure_reversion_test.cpp" in script
+    assert "built and tested build/microstructure_reversion_test" in script

@@ -147,11 +147,12 @@ footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--m
   </section>
 
   <section class="panel strategies">
-    <h2>PRIMARY STRATEGY STATUS / THREE INDEPENDENT MODELS</h2>
+    <h2>STRATEGY STATUS / INDEPENDENT SEMANTICS</h2>
     <div class="strategy-grid">
       <div class="strategy-card" id="directionalCard"></div>
       <div class="strategy-card" id="lotteryCard"></div>
       <div class="strategy-card" id="pairedCard"></div>
+      <div class="strategy-card" id="reversionCard"></div>
     </div>
     <div class="flow" id="pipelineSteps"></div>
   </section>
@@ -257,8 +258,11 @@ function strategyCard(id,title,key,d){
   if(probability){
     const obs=d.probability_observations?.by_strategy?.[key]||{};
     detail=`OBS PENDING ${obs.pending??0} / SETTLED ${obs.settled??0} / BRIER ${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)} / CALIBRATION ONLY`;
+  }else if(key==='microstructure_reversion'){
+    detail='REAL ASK ENTRY / FUTURE REAL BID EXIT / BOOK EXECUTABLE != FILL';
   }
-  $(id).innerHTML=`<label>${title}</label><b class="${latest.decision==='ACCEPT'?'good':'warn'}">${latest.decision||'NO EVALUATION'}</b>
+  const positive=['ACCEPT','ENTRY_EXECUTABLE','EXIT_EXECUTABLE'].includes(latest.decision);
+  $(id).innerHTML=`<label>${title}</label><b class="${positive?'good':'warn'}">${latest.decision||'NO EVALUATION'}</b>
     <div>SESSION EVAL ${session.evaluations??0} / ACCEPT ${session.accepts??0} / REJECT ${session.rejections??0}</div>
     <div>${detail}</div><div class="${latest.decision==='ACCEPT'?'good':'warn'}">${esc(latest.reason||'N/A')}</div>
     <div class="history sub">HISTORY EVAL ${hist.evaluations??0} / SETTLED ${perf.completed??0} / PNL ${money(perf.simulated_pnl)}<br>TOP ${esc(reasons||'N/A')}</div>`;
@@ -338,6 +342,7 @@ function render(d){
   strategyCard('directionalCard','DIRECTIONAL EV','late_window_directional_ev',d);
   strategyCard('lotteryCard','LOW-PRICE LOTTERY','low_price_lottery_ev',d);
   strategyCard('pairedCard','BUY BOTH + MERGE','paired_lock',d);
+  strategyCard('reversionCard','DISCOUNT BUY + PROFIT EXIT','microstructure_reversion',d);
   renderProbabilityCalibration(d);
   $('splitSellNearMisses').innerHTML=(d.split_sell_near_misses||[]).map(x=>`<div class="near-row">
     <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span>

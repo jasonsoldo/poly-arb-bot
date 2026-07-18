@@ -41,7 +41,8 @@ ARBITRAGE_OBSERVERS = (
     "split_sell_lock",
     "maker_complete_set_arb",
 )
-STRATEGIES = PRIMARY_STRATEGIES + ARBITRAGE_OBSERVERS
+CLOB_REVERSION_STRATEGIES = ("microstructure_reversion",)
+STRATEGIES = PRIMARY_STRATEGIES + ARBITRAGE_OBSERVERS + CLOB_REVERSION_STRATEGIES
 
 
 def _report_cache_key(path, execution_path=None):
@@ -451,7 +452,7 @@ def _strategy_counts(paths):
                             event_type = row.get("event_type")
                             if strategy not in state["counts"] or event_type not in {
                                 "shadow_eval", "shadow_maker_quote_eval",
-                                "shadow_split_sell_eval",
+                                "shadow_split_sell_eval", "shadow_reversion_eval",
                             }:
                                 continue
                             event_id = row.get("event_id")
@@ -612,6 +613,11 @@ def build_status(data_dir, log_file, state_file):
     shadow_events = [item for item in events if item.get("event_type") in {
         "shadow_eval", "shadow_opportunity", "shadow_maker_quote_eval",
         "shadow_split_sell_eval", "shadow_split_sell_opportunity",
+        "shadow_reversion_eval", "shadow_reversion_candidate",
+        "shadow_reversion_entry_book_executable",
+        "shadow_reversion_exit_book_executable",
+        "shadow_reversion_timeout_exit_book_executable",
+        "shadow_reversion_no_exit", "shadow_reversion_invalidated",
     }]
     paired_events = [item for item in shadow_events if item.get("strategy", "paired_lock") == "paired_lock"]
     latest_shadow = {}
@@ -771,6 +777,11 @@ def build_status(data_dir, log_file, state_file):
         if item.get("event_type") not in {
             "shadow_eval", "shadow_maker_quote_eval", "shadow_split_sell_eval",
             "shadow_split_sell_opportunity",
+            "shadow_reversion_eval", "shadow_reversion_candidate",
+            "shadow_reversion_entry_book_executable",
+            "shadow_reversion_exit_book_executable",
+            "shadow_reversion_timeout_exit_book_executable",
+            "shadow_reversion_no_exit", "shadow_reversion_invalidated",
         }:
             continue
         strategy = item.get("strategy", "paired_lock")

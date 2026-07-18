@@ -56,6 +56,12 @@ g++ -std=c++17 -O3 -Wall -Wextra \
 ./build/observed_arb_test
 echo "built and tested build/observed_arb_test"
 
+g++ -std=c++17 -O3 -Wall -Wextra \
+  cpp/strategy/microstructure_reversion_test.cpp \
+  -o build/microstructure_reversion_test
+./build/microstructure_reversion_test
+echo "built and tested build/microstructure_reversion_test"
+
 g++ -std=c++17 -O3 -Wall -Wextra -static -static-libgcc -static-libstdc++ \
   cpp/pnl_curve_engine/pnl_curve_engine.cpp \
   -o build/pnl_curve_engine

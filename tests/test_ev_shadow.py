@@ -124,7 +124,32 @@ def test_paired_event_produces_independent_directional_and_lottery_audits():
     assert all(row["event_id"].startswith("paired-1:") for row in rows)
     assert all(row["real_order_submissions"] == 0 for row in rows)
     assert all(row["target_size"] == 10 for row in rows)
-    assert all(row["config_version"] == "shadow-buy-rules-v7" for row in rows)
+    assert all(row["config_version"] == "shadow-buy-rules-v8" for row in rows)
+
+
+def test_shadow_calibration_can_evaluate_directional_outside_terminal_window(monkeypatch):
+    monkeypatch.setenv("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0")
+    rows = evaluate_market_event(event(), market(), venue(), now=1000.0)
+    directional = [
+        row for row in rows
+        if row["strategy"] == "late_window_directional_ev"
+    ]
+
+    assert directional
+    assert all("outside_time_window" not in row["blocking_reasons"] for row in directional)
+
+
+def test_shadow_calibration_disables_directional_terminal_window_by_default(monkeypatch):
+    monkeypatch.delenv("DIRECTIONAL_ENFORCE_TIME_WINDOW", raising=False)
+    values, _ = ev_shadow.strategy_config("late_window_directional_ev")
+    rows = evaluate_market_event(event(), market(), venue(), now=1000.0)
+    directional = [
+        row for row in rows
+        if row["strategy"] == "late_window_directional_ev"
+    ]
+
+    assert values["directional_enforce_time_window"] == "0"
+    assert all("outside_time_window" not in row["blocking_reasons"] for row in directional)
 
 
 def test_terminal_high_confidence_signal_emits_hedged_combination():

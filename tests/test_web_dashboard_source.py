@@ -111,6 +111,15 @@ def test_dashboard_renders_latest_asset_pnl_from_completed_shadow_data():
     assert "NO COMPLETED SHADOW TRADE" in source
 
 
+def test_dashboard_separates_real_book_reversion_from_probability_and_locked_arb():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    assert 'id="reversionCard"' in source
+    assert "DISCOUNT BUY + PROFIT EXIT" in source
+    assert "REAL ASK ENTRY / FUTURE REAL BID EXIT" in source
+    assert "BOOK EXECUTABLE != FILL" in source
+    assert "microstructure_reversion" in source
+
+
 def test_dashboard_shows_unknown_analytics_while_background_refresh_runs():
     source = Path("web/index.html").read_text(encoding="utf-8")
     assert "analytics_refreshing" in source

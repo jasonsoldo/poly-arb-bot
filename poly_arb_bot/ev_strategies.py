@@ -113,10 +113,13 @@ def _common_rejections(row):
     return reasons
 
 
-def evaluate_directional(row, min_net_ev=.015, min_probability=.90, windows=None):
+def evaluate_directional(row, min_net_ev=.015, min_probability=.90, windows=None,
+                         enforce_time_window=True):
     reasons = _common_rejections(row)
     window = (windows or directional_windows()).get(row.timeframe)
-    if not window or not window[0] <= row.seconds_to_close <= window[1]:
+    if enforce_time_window and (
+        not window or not window[0] <= row.seconds_to_close <= window[1]
+    ):
         _append_reason(reasons, "outside_time_window")
     if row.estimated_probability is not None and row.estimated_probability < min_probability:
         _append_reason(reasons, "model_confidence_below_threshold")

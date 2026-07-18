@@ -130,7 +130,10 @@ def python_result(case):
         order_book_imbalance=.1, confidence=.8, settlement_source_verified=True,
         probability_block_reason=case.get("probability_block_reason"),
     )
-    decision = evaluate_directional(row) if case["strategy"] == "late_window_directional_ev" else evaluate_lottery(row)
+    decision = evaluate_directional(
+        row,
+        enforce_time_window=case.get("directional_enforce_time_window", True),
+    ) if case["strategy"] == "late_window_directional_ev" else evaluate_lottery(row)
     return {
         "decision": decision.decision,
         "reason": decision.reason,

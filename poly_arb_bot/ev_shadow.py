@@ -26,13 +26,14 @@ BINANCE_SYMBOLS = {
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
-STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v7"
+STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v8"
 
 
 def strategy_config(strategy=None):
     values = {
         "directional_min_net_ev": os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015"),
         "directional_min_probability": os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0.90"),
+        "directional_enforce_time_window": os.getenv("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0"),
         "directional_window_5m_min": os.getenv("DIRECTIONAL_WINDOW_5M_MIN", "5"),
         "directional_window_5m_max": os.getenv("DIRECTIONAL_WINDOW_5M_MAX", "15"),
         "directional_window_15m_min": os.getenv("DIRECTIONAL_WINDOW_15M_MIN", "5"),
@@ -61,6 +62,9 @@ def strategy_config(strategy=None):
         "lottery_imbalance_z": os.getenv("LOTTERY_IMBALANCE_Z", "0.10"),
         "lottery_market_blend": os.getenv("LOTTERY_MARKET_BLEND", "0.50"),
         "minimum_model_sample_span_seconds": os.getenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"),
+        "shadow_profit_exit_buffer_per_share": os.getenv(
+            "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE", "0.001"
+        ),
         "terminal_hedge_max_reversal_loss": os.getenv("TERMINAL_HEDGE_MAX_REVERSAL_LOSS", "1.0"),
         "terminal_hedge_min_expected_pnl": os.getenv("TERMINAL_HEDGE_MIN_EXPECTED_PNL", "0.05"),
         "terminal_hedge_max_size_ratio": os.getenv("TERMINAL_HEDGE_MAX_SIZE_RATIO", "1.0"),
@@ -71,6 +75,7 @@ def strategy_config(strategy=None):
             "coinbase_reference_max_age_ms", "minimum_liquidity", "maximum_slippage",
             "maximum_reference_age_ms", "maximum_book_age_ms", "maximum_clock_skew_ms",
             "minimum_model_sample_span_seconds", "probability_reference",
+            "shadow_profit_exit_buffer_per_share",
             "terminal_hedge_max_reversal_loss", "terminal_hedge_min_expected_pnl",
             "terminal_hedge_max_size_ratio",
         }
@@ -78,6 +83,7 @@ def strategy_config(strategy=None):
             "late_window_directional_ev": {
                 "directional_min_net_ev", "directional_latency_buffer",
                 "directional_settlement_buffer", "directional_min_probability",
+                "directional_enforce_time_window",
                 "directional_window_5m_min", "directional_window_5m_max",
                 "directional_window_15m_min", "directional_window_15m_max",
                 "directional_window_1h_min", "directional_window_1h_max",
@@ -503,6 +509,10 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                     input_row,
                     float(os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015")),
                     float(os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0.90")),
+                    enforce_time_window=(
+                        os.getenv("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0").strip().lower()
+                        not in {"0", "false", "no", "off"}
+                    ),
                 )
             else:
                 result = evaluator(
@@ -805,6 +815,10 @@ def _verify_cpp_strategy_row(row):
             value,
             float(os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015")),
             float(os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0.90")),
+            enforce_time_window=(
+                os.getenv("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0").strip().lower()
+                not in {"0", "false", "no", "off"}
+            ),
         )
     else:
         decision = evaluate_lottery(

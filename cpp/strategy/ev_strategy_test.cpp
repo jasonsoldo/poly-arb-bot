@@ -105,8 +105,12 @@ int main() {
         value.reference_block_reason = row.get<std::string>("reference_block_reason", "");
         value.target_depth_ok = row.get<bool>("target_depth_ok", true);
         value.probability_block_reason = row.get<std::string>("probability_block_reason", "");
+        strategy::Config config;
+        config.directional_enforce_time_window = row.get<bool>(
+            "directional_enforce_time_window", true);
         const auto output = value.strategy == "late_window_directional_ev"
-            ? strategy::evaluate_directional(value) : strategy::evaluate_lottery(value);
+            ? strategy::evaluate_directional(value, config)
+            : strategy::evaluate_lottery(value, config);
         std::cout << "{\"decision\":\"" << output.decision << "\",\"reason\":\""
                   << output.reason << "\",\"gross_edge\":";
         write_optional(output.gross_edge);

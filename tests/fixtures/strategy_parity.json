@@ -43,6 +43,16 @@
     "seconds_to_close": 21
   },
   {
+    "name": "directional_calibration_without_time_window",
+    "mode": "evaluate",
+    "strategy": "late_window_directional_ev",
+    "timeframe": "5m",
+    "expected_fill_price": 0.56,
+    "estimated_probability": 0.95,
+    "seconds_to_close": 240,
+    "directional_enforce_time_window": false
+  },
+  {
     "name": "directional_reference_blocked",
     "mode": "evaluate",
     "strategy": "late_window_directional_ev",

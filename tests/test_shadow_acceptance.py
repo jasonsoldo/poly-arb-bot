@@ -255,10 +255,12 @@ def test_acceptance_marks_missing_latency_samples_incomplete():
     assert report["status"] == "INCOMPLETE"
 
 
-def test_acceptance_fails_reconnect_or_book_resync_storm():
+def test_acceptance_fails_reconnect_or_book_resync_storm(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
     status = valid_status()
     status["shadow_health"].update(
-        engine_started_at=time.time() - 3600,
+        engine_started_at=now - 3600,
         ws_session_id=14,
         full_resyncs=61,
     )

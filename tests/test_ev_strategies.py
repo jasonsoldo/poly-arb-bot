@@ -32,6 +32,16 @@ def test_late_window_directional_accepts_positive_net_ev():
     assert result.strategy == "late_window_directional_ev"
 
 
+def test_directional_time_window_can_be_disabled_for_shadow_calibration():
+    row = base(seconds_to_close=240)
+
+    assert evaluate_directional(row).reason == "outside_time_window"
+    result = evaluate_directional(row, enforce_time_window=False)
+
+    assert result.decision == "ACCEPT"
+    assert "outside_time_window" not in result.blocking_reasons
+
+
 def test_directional_fails_closed_without_reference_quorum():
     result = evaluate_directional(base(reference=reference(False)))
     assert result.decision == "REJECT"

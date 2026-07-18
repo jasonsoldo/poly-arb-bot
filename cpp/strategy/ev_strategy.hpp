@@ -12,6 +12,7 @@ namespace strategy {
 struct Config {
     double directional_min_net_ev = .015;
     double directional_min_probability = .90;
+    bool directional_enforce_time_window = true;
     double directional_latency_buffer = .003;
     double directional_settlement_buffer = .002;
     double lottery_min_price = .01;
@@ -296,7 +297,9 @@ inline std::optional<std::pair<int, int>> directional_window(
 inline Decision evaluate_directional(const EvaluationInput& row, const Config& config = {}) {
     auto reasons = common_rejections(row);
     const auto window = directional_window(row.timeframe, config);
-    if (!window || row.seconds_to_close < window->first || row.seconds_to_close > window->second)
+    if (config.directional_enforce_time_window &&
+            (!window || row.seconds_to_close < window->first ||
+             row.seconds_to_close > window->second))
         append_reason(reasons, "outside_time_window");
     if (row.estimated_probability && *row.estimated_probability < config.directional_min_probability)
         append_reason(reasons, "model_confidence_below_threshold");

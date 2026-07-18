@@ -87,7 +87,7 @@ def test_repeated_accepts_open_one_position(tmp_path):
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["entry_cost"] == 4.1
     assert position["real_order_submissions"] == 0
-    assert position["config_version"] == "shadow-portfolio-v6"
+    assert position["config_version"] == "shadow-portfolio-v7"
     assert len(position["config_hash"]) == 64
 
 
@@ -97,6 +97,137 @@ def test_raw_directional_accept_is_calibration_only_and_does_not_open_position(t
     row["config_version"] = "shadow-buy-rules-v7"
     assert lifecycle.consume(row, {"m1": market()}) is False
     assert lifecycle.data["positions"] == {}
+
+
+def test_v8_directional_accept_opens_shadow_position_for_exit_calibration(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    row = accepted()
+    row["config_version"] = "shadow-buy-rules-v8"
+
+    assert lifecycle.consume(row, {"m1": market()}) is True
+    assert len(lifecycle.data["positions"]) == 1
+
+
+def test_probability_position_exits_on_future_full_bid_depth_after_all_costs(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", log, profit_exit_min_pnl=.25,
+    )
+    entry = accepted()
+    entry["config_version"] = "shadow-buy-rules-v8"
+    entry["generation"] = 2
+    entry["session"] = 3
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    quote = {
+        **entry,
+        "event_id": "future-book-1",
+        "event_type": "shadow_probability_profit_exit_book_executable",
+        "decision": "REJECT",
+        "reason": "net_ev_below_threshold",
+        "ts": 1010,
+        "generation": 4,
+        "session": 9,
+        "exit_fill_quantity": 10,
+        "exit_vwap": .45,
+        "exit_total_fee": .02,
+        "exit_execution_buffer": .01,
+        "exit_depth_ok": True,
+        "exit_book_fresh": True,
+        "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+    }
+
+    assert lifecycle.consume(quote, {"m1": market()}) is True
+    assert lifecycle.data["positions"] == {}
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["event_type"] == "shadow_complete"
+    assert complete["completion_reason"] == "profit_target_book_executable"
+    assert complete["exit_vwap"] == .45
+    assert complete["exit_net_proceeds"] == 4.47
+    assert complete["realized_simulated_pnl"] == .37
+    assert complete["real_orders"] == 0
+    assert complete["real_fills"] == 0
+
+
+def test_probability_position_does_not_fake_exit_without_full_bid_depth(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", log, profit_exit_min_pnl=.25,
+    )
+    entry = accepted()
+    entry["config_version"] = "shadow-buy-rules-v8"
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    quote = {
+        **entry,
+        "event_id": "partial-book",
+        "decision": "REJECT",
+        "ts": 1010,
+        "exit_fill_quantity": 9.9,
+        "exit_vwap": .90,
+        "exit_total_fee": 0,
+        "exit_execution_buffer": 0,
+        "exit_depth_ok": False,
+        "exit_book_fresh": True,
+        "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+    }
+
+    assert lifecycle.consume(quote, {"m1": market()}) is False
+    assert len(lifecycle.data["positions"]) == 1
+    assert not log.exists() or "shadow_complete" not in log.read_text(encoding="utf-8")
+
+
+def test_probability_position_keeps_holding_when_net_profit_is_below_target(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl", profit_exit_min_pnl=.50,
+    )
+    entry = accepted()
+    entry["config_version"] = "shadow-buy-rules-v8"
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+    quote = {
+        **entry,
+        "event_id": "small-profit",
+        "decision": "REJECT",
+        "ts": 1010,
+        "exit_fill_quantity": 10,
+        "exit_vwap": .45,
+        "exit_total_fee": .02,
+        "exit_execution_buffer": .01,
+        "exit_depth_ok": True,
+        "exit_book_fresh": True,
+        "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+    }
+
+    assert lifecycle.consume(quote, {"m1": market()}) is False
+    assert len(lifecycle.data["positions"]) == 1
+
+
+def test_stale_dedicated_profit_exit_cannot_close_a_newer_position(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+        profit_exit_min_pnl=.10,
+    )
+    entry = accepted("new-entry")
+    entry["config_version"] = "shadow-buy-rules-v8"
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    stale_exit = {
+        **entry,
+        "event_id": "old-exit",
+        "entry_event_id": "old-entry",
+        "event_type": "shadow_probability_profit_exit_book_executable",
+        "ts": 1010,
+        "exit_fill_quantity": 10,
+        "exit_vwap": .90,
+        "exit_total_fee": 0,
+        "exit_execution_buffer": 0,
+        "exit_depth_ok": True,
+        "exit_book_fresh": True,
+        "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+    }
+
+    assert lifecycle.consume(stale_exit, {"m1": market()}) is False
+    assert len(lifecycle.data["positions"]) == 1
 
 
 def test_terminal_hedge_opens_one_combined_position(tmp_path):

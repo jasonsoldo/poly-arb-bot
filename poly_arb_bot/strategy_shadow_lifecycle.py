@@ -53,7 +53,8 @@ class PortfolioLimits:
 
 class StrategyShadowLifecycle:
     def __init__(self, state_path, log_path, limits=None, orphan_after_seconds=None,
-                 checkpoint_interval_seconds=5, calibration_mode=None):
+                 checkpoint_interval_seconds=5, calibration_mode=None,
+                 profit_exit_min_pnl=None):
         self.state_path = Path(state_path)
         self.logger = JsonlLogger(Path(log_path))
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,13 +75,18 @@ class StrategyShadowLifecycle:
                 str(DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS),
             )
         )
+        self.profit_exit_min_pnl = float(
+            profit_exit_min_pnl
+            if profit_exit_min_pnl is not None
+            else os.getenv("SHADOW_PROFIT_EXIT_MIN_PNL", "0.10")
+        )
         self.probability_calibration_horizons = {
             timeframe: float(os.getenv(
                 f"MODEL_CALIBRATION_HORIZON_{timeframe.upper()}", str(default),
             ))
             for timeframe, default in DEFAULT_CALIBRATION_HORIZONS.items()
         }
-        self.config_version = "shadow-portfolio-v6"
+        self.config_version = "shadow-portfolio-v7"
         self.strategy_config_hash = strategy_config()[1]
         self.strategy_config_hashes = {
             strategy: strategy_config(strategy)[1]
@@ -90,6 +96,7 @@ class StrategyShadowLifecycle:
             "calibration_mode": self.calibration_mode,
             "limits": asdict(self.limits),
             "probability_calibration_horizons": self.probability_calibration_horizons,
+            "profit_exit_min_pnl": self.profit_exit_min_pnl,
         }
         self.config_hash = hashlib.sha256(
             json.dumps(config_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -117,6 +124,7 @@ class StrategyShadowLifecycle:
         self.data["config_version"] = self.config_version
         self.data["config_hash"] = self.config_hash
         self.data["probability_calibration_horizons"] = self.probability_calibration_horizons
+        self.data["profit_exit_min_pnl"] = self.profit_exit_min_pnl
         self._mark_dirty()
         self._backfill_completed_trades()
         self.refresh_risk_status()
@@ -476,6 +484,8 @@ class StrategyShadowLifecycle:
 
     def consume(self, row, markets):
         strategy = row.get("strategy")
+        if self._try_profit_exit(row):
+            return True
         if strategy == "split_sell_lock":
             return self._consume_split_sell(row)
         if strategy == "inventory_rebalancing_arb":
@@ -583,6 +593,88 @@ class StrategyShadowLifecycle:
         }
         self._mark_dirty()
         self._save()
+        return True
+
+    def _try_profit_exit(self, row):
+        if (
+            row.get("event_type") not in {
+                "shadow_eval",
+                "shadow_probability_profit_exit_book_executable",
+            }
+            or row.get("strategy") not in {
+                "late_window_directional_ev", "low_price_lottery_ev",
+            }
+            or row.get("exit_observation_semantics") != "BOOK_EXECUTABLE_NOT_FILL"
+        ):
+            return False
+        key = self._key(row)
+        position = self.data["positions"].get(key)
+        if not position or position.get("terminal_hedged"):
+            return False
+        entry_event_id = row.get("entry_event_id")
+        if entry_event_id and entry_event_id != position.get("event_id"):
+            return False
+        if float(row.get("ts") or 0) <= float(position.get("entry_ts") or 0):
+            return False
+        size = float(position.get("target_size") or 0)
+        fill_quantity = float(row.get("exit_fill_quantity") or 0)
+        if (
+            size <= 0
+            or row.get("exit_depth_ok") is not True
+            or row.get("exit_book_fresh") is not True
+            or fill_quantity + 1e-12 < size
+        ):
+            return False
+        exit_vwap = float(row.get("exit_vwap") or 0)
+        if not math.isfinite(exit_vwap) or exit_vwap <= 0:
+            return False
+        exit_fee = float(row.get("exit_total_fee") or 0)
+        exit_buffer = float(row.get("exit_execution_buffer") or 0)
+        exit_net_proceeds = round(size * exit_vwap - exit_fee - exit_buffer, 12)
+        pnl = round(exit_net_proceeds - float(position["entry_cost"]), 12)
+        if pnl + 1e-12 < self.profit_exit_min_pnl:
+            return False
+
+        complete_id = f'{position["event_id"]}:profit-exit:{row["event_id"]}'
+        complete = {
+            **position,
+            "event_id": complete_id,
+            "entry_event_id": position["event_id"],
+            "exit_event_id": row["event_id"],
+            "event_type": "shadow_complete",
+            "timestamp": float(row.get("ts") or time.time()),
+            "ts": float(row.get("ts") or time.time()),
+            "lifecycle_state": "COMPLETE",
+            "completion_reason": "profit_target_book_executable",
+            "exit_fill_quantity": fill_quantity,
+            "exit_vwap": exit_vwap,
+            "exit_total_fee": exit_fee,
+            "exit_execution_buffer": exit_buffer,
+            "exit_net_proceeds": exit_net_proceeds,
+            "payout": exit_net_proceeds,
+            "realized_simulated_pnl": pnl,
+            "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+            "simulated_fill": False,
+            "real_order_submissions": 0,
+            "real_orders": 0,
+            "real_fills": 0,
+        }
+        self.logger.write("shadow_complete", complete)
+        self.data["completed"] = (self.data["completed"] + [complete_id])[-20000:]
+        self.data["completed_trades"] = (
+            self.data["completed_trades"] + [{
+                "event_id": complete_id,
+                "strategy": position["strategy"],
+                "market_id": position["market_id"],
+                "ts": complete["ts"],
+                "pnl": pnl,
+                "strategy_config_hash": position.get("strategy_config_hash"),
+            }]
+        )[-20000:]
+        del self.data["positions"][key]
+        self.refresh_risk_status()
+        self._mark_dirty()
+        self._save(force=True)
         return True
 
     def _consume_split_sell(self, row):

@@ -10,6 +10,7 @@
 #include "../reference_ipc/latest_value_client.hpp"
 #include "../strategy/complete_set_arb.hpp"
 #include "../strategy/ev_strategy.hpp"
+#include "../strategy/microstructure_reversion.hpp"
 #include "../strategy/observed_arb.hpp"
 #include <openssl/sha.h>
 #include <algorithm>
@@ -136,6 +137,8 @@ strategy::Config strategy_config_from_environment() {
     strategy::Config config;
     config.directional_min_net_ev = environment_double("DIRECTIONAL_MIN_NET_EV", "0.015");
     config.directional_min_probability = environment_double("DIRECTIONAL_MIN_PROBABILITY", "0.90");
+    config.directional_enforce_time_window =
+        environment_value("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0") != "0";
     config.directional_latency_buffer = environment_double("DIRECTIONAL_LATENCY_BUFFER", "0.003");
     config.directional_settlement_buffer = environment_double("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002");
     config.lottery_min_price = environment_double("LOTTERY_MIN_PRICE", "0.01");
@@ -179,6 +182,7 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"directional_latency_buffer", environment_value("DIRECTIONAL_LATENCY_BUFFER", "0.003")},
         {"directional_min_net_ev", environment_value("DIRECTIONAL_MIN_NET_EV", "0.015")},
         {"directional_min_probability", environment_value("DIRECTIONAL_MIN_PROBABILITY", "0.90")},
+        {"directional_enforce_time_window", environment_value("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0")},
         {"directional_window_5m_min", environment_value("DIRECTIONAL_WINDOW_5M_MIN", "5")},
         {"directional_window_5m_max", environment_value("DIRECTIONAL_WINDOW_5M_MAX", "15")},
         {"directional_window_15m_min", environment_value("DIRECTIONAL_WINDOW_15M_MIN", "5")},
@@ -225,6 +229,8 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"probability_reference", "settlement_reference"},
         {"shadow_buffer_per_share", environment_value("SHADOW_BUFFER_PER_SHARE", "0.002")},
         {"shadow_min_profit", environment_value("SHADOW_MIN_PROFIT", "0.01")},
+        {"shadow_profit_exit_buffer_per_share", environment_value(
+            "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE", "0.001")},
         {"shadow_size", environment_value("SHADOW_SIZE", "10")},
         {"split_sell_buffer_per_share", environment_value(
             "SPLIT_SELL_BUFFER_PER_SHARE", "0.003")},
@@ -235,10 +241,12 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
                 key == "minimum_liquidity" || key == "maximum_slippage" ||
                 key == "maximum_reference_age_ms" || key == "maximum_book_age_ms" ||
                 key == "maximum_clock_skew_ms" || key == "minimum_model_sample_span_seconds" ||
-                key == "probability_reference";
+                key == "probability_reference" ||
+                key == "shadow_profit_exit_buffer_per_share";
             if (strategy_name == "late_window_directional_ev") return common ||
                 key == "directional_min_net_ev" || key == "directional_latency_buffer" ||
                 key == "directional_settlement_buffer" || key == "directional_min_probability" ||
+                key == "directional_enforce_time_window" ||
                 key.rfind("directional_window_", 0) == 0 || key == "momentum_z_per_bps" ||
                 key == "imbalance_z";
             if (strategy_name == "low_price_lottery_ev") return common ||
@@ -358,6 +366,11 @@ struct MakerQuoteObservation {
     double up_bid = 0, down_bid = 0, created_at = 0;
     bool up_trade_through = false, down_trade_through = false;
     unsigned long long generation = 0, session = 0;
+};
+
+struct ProbabilityShadowPosition {
+    std::string strategy, market_id, outcome, entry_event_id;
+    double quantity = 0, entry_cost = 0, entry_ts = 0;
 };
 
 ReferenceView build_reference_view(const reference_ipc::AssetSnapshot& asset,
@@ -585,12 +598,19 @@ public:
         split_sell_strategy_config_hash_ = sha256_hex(
             paired_config_hash_ + "|split_sell_v2|" +
             std::to_string(split_sell_buffer_per_share_));
+        reversion_strategy_config_hash_ = sha256_hex(
+            "microstructure-reversion-shadow-v1|" + std::to_string(size_) + "|" +
+            std::to_string(reversion_lookback_ms_) + "|" +
+            std::to_string(reversion_minimum_discount_per_share_) + "|" +
+            std::to_string(reversion_maximum_holding_ms_) + "|" +
+            std::to_string(reversion_minimum_profit_));
         load_complete_set_inventory();
         strategy_accept_heartbeat_seconds_ = environment_double("STRATEGY_ACCEPT_AUDIT_HEARTBEAT_SECONDS", "5");
         strategy_reject_heartbeat_seconds_ = environment_double("STRATEGY_REJECT_AUDIT_HEARTBEAT_SECONDS", "60");
         for (const std::string strategy : {
                  "late_window_directional_ev", "low_price_lottery_ev",
-                 "paired_lock", "split_sell_lock", "maker_complete_set_arb",
+                 "paired_lock", "microstructure_reversion", "split_sell_lock",
+                 "maker_complete_set_arb",
              }) {
             session_strategy_counts_[strategy];
         }
@@ -666,6 +686,102 @@ private:
     const std::string& strategy_hash_for(const std::string& strategy_name) const {
         return strategy_name == "low_price_lottery_ev"
             ? lottery_strategy_config_hash_ : directional_strategy_config_hash_;
+    }
+
+    static std::string probability_position_key(
+            const std::string& strategy_name, const std::string& market_id,
+            const std::string& outcome) {
+        return strategy_name + "|" + market_id + "|" + outcome;
+    }
+
+    void remember_probability_shadow_position(
+            const std::string& market_id, const std::string& outcome,
+            const strategy::EvaluationInput& input,
+            const strategy::Decision& decision, const std::string& event_id,
+            double timestamp) {
+        if (decision.decision != "ACCEPT" ||
+            (decision.strategy != "late_window_directional_ev" &&
+             decision.strategy != "low_price_lottery_ev")) return;
+        const std::string key = probability_position_key(
+            decision.strategy, market_id, outcome);
+        if (active_probability_shadow_positions_.count(key)) return;
+        active_probability_shadow_positions_[key] = {
+            decision.strategy, market_id, outcome, event_id, size_,
+            size_ * (input.expected_fill_price + input.fee_per_share), timestamp,
+        };
+    }
+
+    bool emit_probability_profit_exit(
+            const std::string& market_id, const Market& market,
+            const std::string& outcome, const Book& outcome_book,
+            const strategy::EvaluationInput& input,
+            const std::string& strategy_name, double fee_rate,
+            double timestamp) {
+        const std::string key = probability_position_key(
+            strategy_name, market_id, outcome);
+        const auto found = active_probability_shadow_positions_.find(key);
+        if (found == active_probability_shadow_positions_.end()) return false;
+        const ProbabilityShadowPosition& position = found->second;
+        if (timestamp <= position.entry_ts ||
+            input.book_age_ms > input.maximum_book_age_ms) return false;
+        const auto exit_fill = sell_vwap(outcome_book, position.quantity);
+        if (exit_fill.first + 1e-12 < position.quantity || exit_fill.second <= 0)
+            return false;
+        const double exit_fee = std::round(
+            exit_fill.first * fee_rate * exit_fill.second *
+            (1 - exit_fill.second) * 100000) / 100000;
+        const double exit_buffer = position.quantity * profit_exit_buffer_per_share_;
+        const double net_proceeds =
+            position.quantity * exit_fill.second - exit_fee - exit_buffer;
+        const double profit = net_proceeds - position.entry_cost;
+        if (profit + 1e-12 < profit_exit_min_pnl_) return false;
+
+        const unsigned long long sequence = ++strategy_evaluation_sequence_;
+        const std::string event_id = run_id_ + ":" +
+            std::to_string(generation_) + ":" +
+            std::to_string(ws_session_id_) + ":" + market_id + ":" +
+            strategy_name + ":profit-exit:" + std::to_string(sequence);
+        std::ostringstream out;
+        out << std::setprecision(15)
+            << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
+            << ",\"event_id\":\"" << reference_ipc::escaped(event_id)
+            << "\",\"entry_event_id\":\""
+            << reference_ipc::escaped(position.entry_event_id)
+            << "\",\"event_type\":\"shadow_probability_profit_exit_book_executable\""
+            << ",\"strategy\":\"" << reference_ipc::escaped(strategy_name)
+            << "\",\"market_id\":\"" << reference_ipc::escaped(market_id)
+            << "\",\"condition_id\":\""
+            << reference_ipc::escaped(market.condition_id)
+            << "\",\"asset\":\"" << reference_ipc::escaped(market.asset)
+            << "\",\"timeframe\":\"" << reference_ipc::escaped(market.interval)
+            << "\",\"window\":\"" << reference_ipc::escaped(market.window)
+            << "\",\"outcome\":\"" << reference_ipc::escaped(outcome)
+            << "\",\"generation\":" << generation_
+            << ",\"session\":" << ws_session_id_
+            << ",\"evaluation_sequence\":" << sequence
+            << ",\"target_size\":" << position.quantity
+            << ",\"entry_cost\":" << position.entry_cost
+            << ",\"exit_fill_quantity\":" << exit_fill.first
+            << ",\"exit_vwap\":" << exit_fill.second
+            << ",\"exit_total_fee\":" << exit_fee
+            << ",\"exit_execution_buffer\":" << exit_buffer
+            << ",\"exit_net_proceeds\":" << net_proceeds
+            << ",\"expected_profit\":" << profit
+            << ",\"minimum_profit\":" << profit_exit_min_pnl_
+            << ",\"exit_depth_ok\":true,\"exit_book_fresh\":true"
+            << ",\"observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\""
+            << ",\"exit_observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\""
+            << ",\"simulated_fill\":false,\"decision\":\"OBSERVED\""
+            << ",\"reason\":\"profit_target_book_executable\""
+            << ",\"config_version\":\"shadow-buy-rules-v8\""
+            << ",\"config_hash\":\"" << strategy_hash_for(strategy_name) << "\""
+            << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
+        if (!strategy_audit_.enqueue(out.str())) {
+            ++strategy_audit_backpressure_;
+            return false;
+        }
+        active_probability_shadow_positions_.erase(found);
+        return true;
     }
 
     void evaluate_reference_strategies() {
@@ -814,16 +930,22 @@ private:
                                 emit_strategy_audit(item.first, market, outcome, input, probability_input,
                                     is_lottery ? lottery_probability : directional_probability,
                                     raw_probability, reference, decision, timestamp, ask,
+                                    book, rate,
                                     "shadow_prediction_observation", horizon->second)) {
                                 probability_observations_emitted_.insert(observation_key);
                             }
                         }
                     }
+                    const bool profit_exit_emitted = emit_probability_profit_exit(
+                        item.first, market, outcome, book, input, strategy_name,
+                        rate, timestamp);
+                    if (profit_exit_emitted) continue;
                     const std::string key = item.first + "|" + strategy_name + "|" + outcome;
                     if (!should_emit_strategy(key, decision, timestamp)) continue;
                     emit_strategy_audit(item.first, market, outcome, input, probability_input,
                                         is_lottery ? lottery_probability : directional_probability,
-                                        raw_probability, reference, decision, timestamp, ask);
+                                        raw_probability, reference, decision, timestamp, ask,
+                                        book, rate);
                 }
             }
             emit_complete_set_evaluations(
@@ -1022,6 +1144,7 @@ private:
                              const std::optional<double>& raw_estimated_probability,
                              const ReferenceView& reference, const strategy::Decision& decision,
                              double timestamp, double market_price,
+                             const Book& outcome_book, double fee_rate,
                              const std::string& event_type = "shadow_eval",
                              double calibration_horizon_seconds = 0) {
         const unsigned long long sequence = ++strategy_evaluation_sequence_;
@@ -1034,6 +1157,13 @@ private:
             if (value && std::isfinite(*value)) out << *value;
             else out << "null";
         };
+        const auto exit_fill = sell_vwap(outcome_book, size_);
+        const double exit_fee = std::round(
+            exit_fill.first * fee_rate * exit_fill.second *
+            (1 - exit_fill.second) * 100000
+        ) / 100000;
+        const double exit_buffer = size_ * profit_exit_buffer_per_share_;
+        const bool exit_book_fresh = input.book_age_ms <= input.maximum_book_age_ms;
         out << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
             << ",\"event_id\":\"" << reference_ipc::escaped(event_id)
             << "\",\"event_type\":\"" << event_type << "\",\"strategy\":\"" << decision.strategy
@@ -1154,20 +1284,33 @@ private:
             if (index) out << ',';
             out << '"' << reference_ipc::escaped(decision.blocking_reasons[index]) << '"';
         }
-        out << "],\"target_size\":" << size_;
+        out << "],\"target_size\":" << size_
+            << ",\"exit_fill_quantity\":" << exit_fill.first
+            << ",\"exit_vwap\":" << exit_fill.second
+            << ",\"exit_total_fee\":" << exit_fee
+            << ",\"exit_execution_buffer\":" << exit_buffer
+            << ",\"exit_depth_ok\":"
+            << (exit_fill.first >= size_ ? "true" : "false")
+            << ",\"exit_book_fresh\":"
+            << (exit_book_fresh ? "true" : "false")
+            << ",\"exit_observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\"";
         if (event_type == "shadow_prediction_observation") {
             out << ",\"opens_position\":false"
                 << ",\"observation_semantics\":\"PROBABILITY_CALIBRATION_NOT_ORDER\""
                 << ",\"calibration_horizon_seconds\":" << calibration_horizon_seconds;
         }
-        out << ",\"config_version\":\"shadow-buy-rules-v7\""
+        out << ",\"config_version\":\"shadow-buy-rules-v8\""
             << ",\"config_hash\":\"" << strategy_hash_for(decision.strategy) << "\""
             << ",\"reference_sequence\":" << reference_snapshot_.sequence
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""
             << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
         const bool queued = strategy_audit_.enqueue(out.str());
         if (!queued) ++strategy_audit_backpressure_;
-        else if (event_type == "shadow_eval") record_session_strategy(decision.strategy, decision.decision);
+        else if (event_type == "shadow_eval") {
+            record_session_strategy(decision.strategy, decision.decision);
+            remember_probability_shadow_position(
+                market_id, outcome, input, decision, event_id, timestamp);
+        }
         return queued;
     }
 
@@ -1857,6 +2000,163 @@ private:
         queue_arb_audit(record.str());
     }
 
+    microstructure_reversion::BookFill reversion_fill(
+            const Book& book, double quantity, double rate, bool buy,
+            double age_ms) const {
+        const auto fill = buy ? buy_vwap(book, quantity) : sell_vwap(book, quantity);
+        const double fee = std::round(
+            fill.first * rate * fill.second * (1 - fill.second) * 100000
+        ) / 100000;
+        return {
+            quantity, fill.first, fill.second, fill.first * fill.second, fee,
+            age_ms, book.ws_snapshot, age_ms <= 750, crossed(book),
+            book.generation, ws_session_id_,
+        };
+    }
+
+    void emit_reversion_audit(
+            const char* event_type, const std::string& market_id,
+            const Market& market, const std::string& outcome,
+            const std::string& decision, const std::string& reason,
+            double timestamp, double anchor, double entry_vwap,
+            double exit_vwap, double entry_cost, double net_exit,
+            double net_profit) {
+        const unsigned long long sequence = ++strategy_evaluation_sequence_;
+        std::ostringstream out;
+        out << std::setprecision(15)
+            << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
+            << ",\"event_id\":\"" << run_id_ << ':' << generation_ << ':'
+            << ws_session_id_ << ':' << market_id << ":reversion:" << sequence
+            << R"(","event_type":")" << event_type
+            << R"(","strategy":"microstructure_reversion","market_id":")"
+            << reference_ipc::escaped(market_id)
+            << "\",\"condition_id\":\""
+            << reference_ipc::escaped(market.condition_id)
+            << "\",\"asset\":\"" << reference_ipc::escaped(market.asset)
+            << "\",\"timeframe\":\"" << reference_ipc::escaped(market.interval)
+            << "\",\"window\":\"" << reference_ipc::escaped(market.window)
+            << "\",\"outcome\":\"" << reference_ipc::escaped(outcome)
+            << "\",\"generation\":" << generation_ << ",\"session\":"
+            << ws_session_id_ << ",\"evaluation_sequence\":" << sequence
+            << ",\"target_size\":" << size_ << ",\"robust_anchor\":" << anchor
+            << ",\"entry_vwap\":" << entry_vwap << ",\"exit_vwap\":"
+            << exit_vwap << ",\"entry_total_cost\":" << entry_cost
+            << ",\"net_exit_value\":" << net_exit << ",\"net_profit\":"
+            << net_profit << ",\"decision\":\""
+            << reference_ipc::escaped(decision) << "\",\"reason\":\""
+            << reference_ipc::escaped(reason)
+            << R"(","observation_semantics":"BOOK_EXECUTABLE_NOT_FILL")"
+            << R"(,"reference_prices_used":false,"settlement_probability_used":false)"
+            << R"(,"simulated_fill":false,"config_version":"microstructure-reversion-shadow-v1")"
+            << ",\"config_hash\":\"" << reversion_strategy_config_hash_
+            << R"(","real_order_submissions":0,"real_orders":0,"real_fills":0})"
+            << '\n';
+        if (!strategy_audit_.enqueue(out.str())) ++strategy_audit_backpressure_;
+    }
+
+    void evaluate_microstructure_reversion(
+            const std::string& market_id, const Market& market,
+            const std::string& outcome, const std::string& token,
+            const Book& book, double rate, double age_ms,
+            double seconds_to_close, double timestamp) {
+        const double observed_us = steady_now_us();
+        const double bid = best_bid(book), ask = best_ask(book);
+        if (bid <= 0 || ask <= 0) return;
+        auto& history = midpoint_history_[token];
+        history.emplace_back(observed_us, (bid + ask) / 2);
+        const double cutoff_us = observed_us - reversion_lookback_ms_ * 1000;
+        while (!history.empty() && history.front().first < cutoff_us)
+            history.pop_front();
+        std::vector<double> midpoints;
+        midpoints.reserve(history.size());
+        for (const auto& sample : history) midpoints.push_back(sample.second);
+        const double anchor = median(midpoints);
+        const std::string key = market_id + "|" + outcome;
+        const auto active = reversion_positions_.find(key);
+        if (active != reversion_positions_.end()) {
+            microstructure_reversion::ExitInput input;
+            input.position = active->second;
+            input.sell = reversion_fill(book, active->second.quantity, rate, false, age_ms);
+            input.exit_execution_buffer =
+                active->second.quantity * reversion_exit_buffer_per_share_;
+            input.observed_us = observed_us;
+            const auto result = microstructure_reversion::evaluate_exit(input);
+            if (result.state == microstructure_reversion::State::HOLDING) return;
+            const char* event_type = "shadow_reversion_no_exit";
+            std::string decision = "NO_EXIT";
+            if (result.state == microstructure_reversion::State::PROFIT_EXIT_BOOK_EXECUTABLE) {
+                event_type = "shadow_reversion_exit_book_executable";
+                decision = "EXIT_EXECUTABLE";
+            } else if (result.state == microstructure_reversion::State::TIMEOUT_EXIT_BOOK_EXECUTABLE) {
+                event_type = "shadow_reversion_timeout_exit_book_executable";
+                decision = "EXIT_EXECUTABLE";
+            } else if (result.state == microstructure_reversion::State::INVALIDATED) {
+                event_type = "shadow_reversion_invalidated";
+                decision = "INVALIDATED";
+            }
+            emit_reversion_audit(
+                event_type, market_id, market, outcome, decision, result.reason,
+                timestamp, active->second.robust_anchor,
+                active->second.entry_vwap, input.sell.vwap,
+                active->second.entry_total_cost, result.net_exit_value,
+                result.net_profit);
+            reversion_positions_.erase(active);
+            return;
+        }
+
+        microstructure_reversion::EntryInput input;
+        input.identity = {
+            run_id_ + ':' + std::to_string(generation_) + ':' +
+                std::to_string(ws_session_id_) + ':' + market_id + ':' + outcome,
+            market_id, market.condition_id, token, generation_, ws_session_id_,
+        };
+        input.outcome = outcome;
+        input.target_size = size_;
+        input.robust_anchor = anchor;
+        input.sample_count = history.size();
+        input.sample_span_ms = history.size() > 1
+            ? (history.back().first - history.front().first) / 1000 : 0;
+        input.minimum_samples = reversion_minimum_samples_;
+        input.minimum_sample_span_ms = reversion_minimum_sample_span_ms_;
+        input.minimum_discount_per_share = reversion_minimum_discount_per_share_;
+        input.maximum_spread = reversion_maximum_spread_;
+        input.spread = ask - bid;
+        input.seconds_to_close = seconds_to_close;
+        input.maximum_holding_ms = reversion_maximum_holding_ms_;
+        input.minimum_exit_margin_seconds = reversion_minimum_exit_margin_seconds_;
+        input.entry_execution_buffer = size_ * reversion_entry_buffer_per_share_;
+        input.minimum_profit = reversion_minimum_profit_;
+        input.buy = reversion_fill(book, size_, rate, true, age_ms);
+        input.observed_us = observed_us;
+        const auto result = microstructure_reversion::evaluate_entry(input);
+        const std::string fingerprint = result.reason;
+        const auto previous = reversion_emission_state_.find(key);
+        const bool periodic = previous == reversion_emission_state_.end() ||
+            previous->second.first != fingerprint ||
+            timestamp - previous->second.second >= 5;
+        if (periodic) {
+            emit_reversion_audit(
+                "shadow_reversion_eval", market_id, market, outcome,
+                result.state == microstructure_reversion::State::ENTRY_BOOK_EXECUTABLE
+                    ? "ACCEPT" : "REJECT",
+                result.reason, timestamp, anchor, input.buy.vwap, 0,
+                result.position.entry_total_cost, 0, 0);
+            reversion_emission_state_[key] = {fingerprint, timestamp};
+        }
+        if (result.state != microstructure_reversion::State::ENTRY_BOOK_EXECUTABLE)
+            return;
+        emit_reversion_audit(
+            "shadow_reversion_candidate", market_id, market, outcome,
+            "OBSERVED", result.reason, timestamp, anchor, input.buy.vwap, 0,
+            result.position.entry_total_cost, 0, 0);
+        emit_reversion_audit(
+            "shadow_reversion_entry_book_executable", market_id, market,
+            outcome, "ENTRY_EXECUTABLE", result.reason, timestamp, anchor,
+            input.buy.vwap, 0, result.position.entry_total_cost, 0, 0);
+        reversion_positions_[key] = result.position;
+        record_session_strategy("microstructure_reversion", "ACCEPT");
+    }
+
     void evaluate() {
         process_due_arb_attempts();
         for (auto& item : markets_) {
@@ -1905,6 +2205,12 @@ private:
             const double up_best_ask = best_ask(up_book), down_best_ask = best_ask(down_book);
             const bool fok = up.first >= size_ && down.first >= size_;
             const double rate = item.second.fee > 0 ? item.second.fee : fallback_fee_;
+            evaluate_microstructure_reversion(
+                item.first, item.second, "Up", item.second.up, up_book, rate,
+                up_age_ms, seconds_to_close, timestamp);
+            evaluate_microstructure_reversion(
+                item.first, item.second, "Down", item.second.down, down_book, rate,
+                down_age_ms, seconds_to_close, timestamp);
             emit_arbitrage_counterfactual(
                 item.first, item.second, up_book, down_book, rate,
                 books_synced, timestamp
@@ -2504,6 +2810,30 @@ private:
     double orphan_loss_per_share_, min_expected_value_, last_activity_;
     double split_sell_buffer_per_share_ = environment_double(
         "SPLIT_SELL_BUFFER_PER_SHARE", "0.003");
+    double profit_exit_buffer_per_share_ = environment_double(
+        "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE", "0.001");
+    double profit_exit_min_pnl_ = environment_double(
+        "SHADOW_PROFIT_EXIT_MIN_PNL", "0.10");
+    double reversion_lookback_ms_ = environment_double(
+        "REVERSION_LOOKBACK_MS", "5000");
+    double reversion_minimum_discount_per_share_ = environment_double(
+        "REVERSION_MINIMUM_DISCOUNT_PER_SHARE", "0.02");
+    double reversion_maximum_holding_ms_ = environment_double(
+        "REVERSION_MAXIMUM_HOLDING_MS", "5000");
+    double reversion_minimum_profit_ = environment_double(
+        "REVERSION_MINIMUM_PROFIT", "0.10");
+    double reversion_minimum_sample_span_ms_ = environment_double(
+        "REVERSION_MINIMUM_SAMPLE_SPAN_MS", "2000");
+    double reversion_maximum_spread_ = environment_double(
+        "REVERSION_MAXIMUM_SPREAD", "0.05");
+    double reversion_minimum_exit_margin_seconds_ = environment_double(
+        "REVERSION_MINIMUM_EXIT_MARGIN_SECONDS", "10");
+    double reversion_entry_buffer_per_share_ = environment_double(
+        "REVERSION_ENTRY_BUFFER_PER_SHARE", "0.001");
+    double reversion_exit_buffer_per_share_ = environment_double(
+        "REVERSION_EXIT_BUFFER_PER_SHARE", "0.001");
+    std::size_t reversion_minimum_samples_ = static_cast<std::size_t>(
+        environment_double("REVERSION_MINIMUM_SAMPLES", "20"));
     unsigned long long book_events_ = 0, price_changes_ = 0;
     unsigned long long stale_price_changes_ignored_ = 0;
     bool stopped_ = false;
@@ -2557,6 +2887,12 @@ private:
     std::map<std::string, std::pair<std::string, double>> strategy_emission_state_;
     std::map<std::string, SessionStrategyCount> session_strategy_counts_;
     std::map<std::string, MakerQuoteObservation> maker_quote_observations_;
+    std::map<std::string, ProbabilityShadowPosition>
+        active_probability_shadow_positions_;
+    std::map<std::string, std::deque<std::pair<double, double>>> midpoint_history_;
+    std::map<std::string, microstructure_reversion::Position> reversion_positions_;
+    std::map<std::string, std::pair<std::string, double>> reversion_emission_state_;
+    std::string reversion_strategy_config_hash_;
     double strategy_accept_heartbeat_seconds_ = 5, strategy_reject_heartbeat_seconds_ = 60;
     double last_health_write_ = 0;
     double engine_started_at_ = now_seconds();

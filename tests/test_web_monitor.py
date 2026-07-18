@@ -1004,6 +1004,33 @@ def test_web_exposes_recent_strategy_breakdown_by_asset_and_reason(tmp_path):
     assert breakdown["by_asset"] == {"BTC": 1, "HYPE": 1}
     assert breakdown["rejection_reasons"] == {"too_early": 1, "insufficient_reference_sources": 1}
 
+
+def test_web_counts_and_exposes_microstructure_reversion_book_evidence(tmp_path):
+    data = tmp_path / "data"; logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (logs / "strategy-audit.jsonl").write_text("\n".join([
+        json.dumps({
+            "ts": time.time() - 1, "event_id": "r1", "event_type": "shadow_reversion_eval",
+            "strategy": "microstructure_reversion", "market_id": "m1", "asset": "BTC",
+            "timeframe": "5m", "decision": "ACCEPT", "reason": "discount_below_anchor",
+        }),
+        json.dumps({
+            "ts": time.time(), "event_id": "r2",
+            "event_type": "shadow_reversion_exit_book_executable",
+            "strategy": "microstructure_reversion", "market_id": "m1", "asset": "BTC",
+            "timeframe": "5m", "decision": "EXIT_EXECUTABLE",
+            "reason": "net_profit_exit_book_executable", "net_profit": .12,
+            "observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+        }),
+    ]) + "\n", encoding="utf-8")
+
+    status = build_status(data, logs / "missing.jsonl", tmp_path / "state.json")
+
+    counts = status["strategy_counts"]["microstructure_reversion"]
+    assert counts["evaluations"] == 1
+    assert counts["accepts"] == 1
+    assert status["strategy_latest"]["microstructure_reversion"]["net_profit"] == .12
+
 def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
     data = tmp_path / "data"
     state = tmp_path / "state"

@@ -30,6 +30,7 @@ def test_cpp_strategy_has_independent_models_and_fail_closed_gates():
     # The helper remains covered as library math, but the market engine no longer
     # combines the two probability strategies into a runtime hedge strategy.
     assert "outside_time_window" in source
+    assert "directional_enforce_time_window" in source
     assert "model_confidence_below_threshold" in source
     assert "directional_min_probability" in source
     assert "entry_price_above_limit" in source
