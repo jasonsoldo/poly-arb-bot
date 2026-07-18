@@ -230,6 +230,42 @@ def test_stale_dedicated_profit_exit_cannot_close_a_newer_position(tmp_path):
     assert len(lifecycle.data["positions"]) == 1
 
 
+def test_current_generation_profit_exit_reprices_position_after_entry_id_rebind(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", log, profit_exit_min_pnl=.10,
+    )
+    entry = accepted("current-entry", outcome="Down")
+    entry.update({
+        "config_version": "shadow-buy-rules-v8",
+        "generation": 4,
+        "session": 7,
+    })
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    exit_quote = {
+        **entry,
+        "event_id": "current-exit",
+        "entry_event_id": "stale-cpp-entry",
+        "event_type": "shadow_probability_profit_exit_book_executable",
+        "ts": 1010,
+        "exit_fill_quantity": 10,
+        "exit_vwap": .45,
+        "exit_total_fee": .02,
+        "exit_execution_buffer": .01,
+        "exit_depth_ok": True,
+        "exit_book_fresh": True,
+        "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+    }
+
+    assert lifecycle.consume(exit_quote, {"m1": market()}) is True
+    assert lifecycle.data["positions"] == {}
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["entry_event_id"] == "current-entry"
+    assert complete["exit_event_id"] == "current-exit"
+    assert complete["realized_simulated_pnl"] == .37
+
+
 def test_terminal_hedge_opens_one_combined_position(tmp_path):
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
     assert lifecycle.consume(hedged(), {"m1": market()}) is True

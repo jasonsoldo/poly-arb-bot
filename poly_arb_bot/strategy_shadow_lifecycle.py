@@ -613,7 +613,16 @@ class StrategyShadowLifecycle:
             return False
         entry_event_id = row.get("entry_event_id")
         if entry_event_id and entry_event_id != position.get("event_id"):
-            return False
+            position_generation = position.get("generation")
+            position_session = position.get("session")
+            current_identity = (
+                position_generation is not None
+                and position_session is not None
+                and row.get("generation") == position_generation
+                and row.get("session") == position_session
+            )
+            if not current_identity:
+                return False
         if float(row.get("ts") or 0) <= float(position.get("entry_ts") or 0):
             return False
         size = float(position.get("target_size") or 0)
