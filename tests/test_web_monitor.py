@@ -1128,9 +1128,10 @@ def test_web_status_exposes_real_market_dynamic_sizing_and_active_capital(tmp_pa
         "positions": {"p1": {
             "strategy": "late_window_directional_ev", "target_size": 7.25,
             "entry_cost": 3.1, "dynamic_maximum_loss": 3.1,
-                "sizing_mode": "real_market_dynamic_v1",
-                "size_binding_constraint": "capital_budget",
-                "strategy_config_hash": "directional-dynamic-hash",
+            "sizing_mode": "real_market_dynamic_v1",
+            "market_minimum_size": 5, "capital_budget_usd": 20,
+            "size_binding_constraint": "capital_budget",
+            "strategy_config_hash": "directional-dynamic-hash",
         }},
         "completed": [], "real_order_submissions": 0, "real_orders": 0,
         "real_fills": 0,
@@ -1144,4 +1145,56 @@ def test_web_status_exposes_real_market_dynamic_sizing_and_active_capital(tmp_pa
     assert status["dynamic_sizing"]["active_positions"] == 1
     assert status["dynamic_sizing"]["active_capital_usd"] == 3.1
     assert status["dynamic_sizing"]["maximum_loss_usd"] == 3.1
+    assert status["dynamic_sizing"]["invalid_active_positions"] == 0
+
+
+def test_web_status_reports_invalid_dynamic_position_fields(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    state = tmp_path / "state"
+    data.mkdir(); logs.mkdir(); state.mkdir()
+    (data / "live_markets.json").write_text(json.dumps({"markets": []}), encoding="utf-8")
+    (logs / "shadow-audit.jsonl").write_text("", encoding="utf-8")
+    (state / "strategy-shadow.json").write_text(json.dumps({
+        "positions": {"legacy": {
+            "strategy": "late_window_directional_ev", "asset": "BTC",
+            "timeframe": "5m", "target_size": 10, "entry_cost": 8,
+        }},
+    }), encoding="utf-8")
+
+    status = build_status(data, logs / "shadow-audit.jsonl", state / "orders.json")
+
+    sizing = status["dynamic_sizing"]
+    assert sizing["invalid_active_positions"] == 1
+    assert sizing["invalid_active_position_reasons"] == {
+        "sizing_mode": 1, "market_minimum_size": 1,
+        "dynamic_maximum_loss": 1, "capital_budget_usd": 1,
+        "size_binding_constraint": 1,
+    }
+    assert sizing["invalid_active_position_details"][0]["position_key"] == "legacy"
+
+
+def test_web_status_rereads_health_after_analytics(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (data / "live_markets.json").write_text(json.dumps({"markets": []}), encoding="utf-8")
+    (logs / "shadow-audit.jsonl").write_text("", encoding="utf-8")
+    health = data / "shadow-health.json"
+    health.write_text(json.dumps({"updated_at": time.time() - 30}), encoding="utf-8")
+    original = web_monitor._report_for_status
+
+    def refresh_health(*args, **kwargs):
+        result = original(*args, **kwargs)
+        health.write_text(json.dumps({
+            "updated_at": time.time(), "ws_connected": True,
+        }), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(web_monitor, "_report_for_status", refresh_health)
+
+    status = build_status(data, logs / "shadow-audit.jsonl", tmp_path / "orders.json")
+
+    assert status["shadow_health"]["stale"] is False
+    assert status["shadow_health"]["age_seconds"] < 5
 

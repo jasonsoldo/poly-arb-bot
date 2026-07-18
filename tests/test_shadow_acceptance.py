@@ -110,6 +110,10 @@ def test_acceptance_fails_missing_or_invalid_dynamic_sizing_evidence():
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
     assert "dynamic_sizing_integrity" in failed
     assert report["status"] == "FAIL"
+    assert report["metrics"]["dynamic_invalid_active_positions"] == 1
+    assert report["metrics"]["dynamic_latest_failures"] == {
+        "paired_lock": ["sizing_mode"]
+    }
 
 
 def test_acceptance_rejects_synthetic_fill_or_mixed_probability_semantics():

@@ -583,6 +583,32 @@ def _strategy_score(event):
             "components": components, "metrics": metrics, "checks": checks}
 
 
+def _dynamic_position_issues(position):
+    issues = []
+    if position.get("sizing_mode") != "real_market_dynamic_v1":
+        issues.append("sizing_mode")
+
+    def positive(field):
+        try:
+            value = float(position.get(field))
+            return value > 0 and value == value and abs(value) != float("inf")
+        except (TypeError, ValueError):
+            return False
+
+    for field in (
+        "target_size", "market_minimum_size", "entry_cost",
+        "dynamic_maximum_loss", "capital_budget_usd",
+    ):
+        if not positive(field):
+            issues.append(field)
+    if positive("target_size") and positive("market_minimum_size"):
+        if float(position["target_size"]) + 1e-9 < float(position["market_minimum_size"]):
+            issues.append("target_size_below_market_minimum")
+    if not position.get("size_binding_constraint"):
+        issues.append("size_binding_constraint")
+    return issues
+
+
 def build_status(data_dir, log_file, state_file):
     snapshot = _json(data_dir / "live_snapshot.json", {"signals": [], "positions": []})
     markets = _json(data_dir / "live_markets.json", {"markets": []}).get("markets", [])
@@ -596,7 +622,8 @@ def build_status(data_dir, log_file, state_file):
     events.sort(key=lambda item: float(item.get("ts", 0)), reverse=True)
     events = [item for item in events if float(item.get("ts", 0)) <= time.time() + 300]
     execution_log = data_dir.parent / "logs" / "shadow-execution.jsonl"
-    shadow_health = _json(data_dir / "shadow-health.json", {})
+    shadow_health_path = data_dir / "shadow-health.json"
+    shadow_health = _json(shadow_health_path, {})
     current_complete_set_hashes = {
         "paired_lock": shadow_health.get("paired_config_hash"),
         "split_sell_lock": shadow_health.get("split_sell_config_hash"),
@@ -671,7 +698,12 @@ def build_status(data_dir, log_file, state_file):
     if reference_prices["stale"]:
         for key in ("binance_btcusdt", "chainlink_btcusd", "divergence_usd", "divergence_bps"):
             reference_prices[key] = None
+    # Analytics can take longer than the health freshness budget on a cold cache.
+    # Re-read the small canonical health snapshot after that work so a healthy
+    # engine is not marked stale because the Web request itself was expensive.
+    shadow_health = _json(shadow_health_path, shadow_health)
     shadow_health_age = time.time() - shadow_health.get("updated_at", 0)
+    shadow_health["age_seconds"] = max(0.0, shadow_health_age)
     shadow_health["stale"] = shadow_health_age > 5
     shadow_health["resyncs"] = int(shadow_health.get("full_resyncs", 0))
     if not shadow_health or shadow_health["stale"] or not shadow_health.get("ws_connected"):
@@ -878,23 +910,28 @@ def build_status(data_dir, log_file, state_file):
         )
     ]
     active_shadow_positions = len(current_positions)
-    def finite_number(value):
-        try:
-            numeric = float(value)
-            return value is not None and numeric == numeric and abs(numeric) != float("inf")
-        except (TypeError, ValueError):
-            return False
-
     all_active_positions = list(lifecycle_state.get("positions", {}).values())
-    invalid_dynamic_positions = sum(
-        position.get("sizing_mode") != "real_market_dynamic_v1"
-        or not finite_number(position.get("target_size"))
-        or float(position.get("target_size") or 0) <= 0
-        or not finite_number(position.get("entry_cost"))
-        or float(position.get("entry_cost") or 0) <= 0
-        or not finite_number(position.get("dynamic_maximum_loss"))
-        for position in all_active_positions
-    )
+    invalid_dynamic_position_details = []
+    for key, position in lifecycle_state.get("positions", {}).items():
+        issues = _dynamic_position_issues(position)
+        if not issues:
+            continue
+        invalid_dynamic_position_details.append({
+            "position_key": key,
+            "strategy": position.get("strategy"),
+            "asset": position.get("asset"),
+            "timeframe": position.get("timeframe"),
+            "outcome": position.get("outcome"),
+            "entry_ts": position.get("entry_ts"),
+            "strategy_config_hash": position.get("strategy_config_hash"),
+            "issues": issues,
+        })
+    invalid_dynamic_positions = len(invalid_dynamic_position_details)
+    invalid_dynamic_position_reasons = dict(Counter(
+        issue
+        for position in invalid_dynamic_position_details
+        for issue in position["issues"]
+    ))
     dynamic_sizing = {
         "active_positions": len(all_active_positions),
         "active_capital_usd": round(sum(
@@ -905,6 +942,8 @@ def build_status(data_dir, log_file, state_file):
             for position in all_active_positions
         ), 12),
         "invalid_active_positions": invalid_dynamic_positions,
+        "invalid_active_position_reasons": invalid_dynamic_position_reasons,
+        "invalid_active_position_details": invalid_dynamic_position_details[:20],
         "semantics": "REAL_MARKET_BOOK_SIZED_SHADOW_NOT_ORDERS",
     }
     simulated_complete = report["performance"]["completed"]

@@ -79,33 +79,46 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
         for section in (execution, lifecycle)
         for field in ("real_order_submissions", "real_orders", "real_fills")
     )
-    def valid_dynamic_latest(row):
+    def dynamic_latest_issues(row):
+        issues = []
         if row.get("sizing_mode") != "real_market_dynamic_v1":
-            return False
+            issues.append("sizing_mode")
         try:
             requested = float(row.get("requested_max_size"))
             minimum = float(row.get("market_minimum_size"))
             capital = float(row.get("shadow_capital_usd"))
         except (TypeError, ValueError):
-            return False
+            return issues + ["requested_maximum_or_capital"]
         if requested <= 0 or minimum <= 0 or capital <= 0:
-            return False
+            issues.append("requested_maximum_or_capital")
         if row.get("decision") != "ACCEPT":
-            return True
+            return issues
         try:
             target = float(row.get("dynamic_target_size"))
             cost = float(row.get("dynamic_all_in_cost"))
             maximum_loss = float(row.get("dynamic_maximum_loss"))
         except (TypeError, ValueError):
-            return False
-        return (
-            target + 1e-9 >= minimum and cost > 0 and maximum_loss > 0
-            and bool(row.get("size_binding_constraint"))
-        )
+            return issues + ["accepted_position_evidence"]
+        if target + 1e-9 < minimum:
+            issues.append("target_size_below_market_minimum")
+        if cost <= 0:
+            issues.append("dynamic_all_in_cost")
+        if maximum_loss <= 0:
+            issues.append("dynamic_maximum_loss")
+        if not row.get("size_binding_constraint"):
+            issues.append("size_binding_constraint")
+        return issues
+
+    dynamic_latest_failures = {
+        name: issues
+        for name in strategy_names
+        if (issues := dynamic_latest_issues(
+            status.get("strategy_latest", {}).get(name, {})
+        ))
+    }
     dynamic_sizing = status.get("dynamic_sizing", {})
     dynamic_sizing_integrity = (
-        all(valid_dynamic_latest(status.get("strategy_latest", {}).get(name, {}))
-            for name in strategy_names)
+        not dynamic_latest_failures
         and dynamic_sizing.get("invalid_active_positions") == 0
         and dynamic_sizing.get("semantics") == "REAL_MARKET_BOOK_SIZED_SHADOW_NOT_ORDERS"
     )
@@ -188,7 +201,18 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                         ),
                         "dynamic_active_positions": dynamic_sizing.get("active_positions"),
                         "dynamic_active_capital_usd": dynamic_sizing.get("active_capital_usd"),
-                        "dynamic_maximum_loss_usd": dynamic_sizing.get("maximum_loss_usd")}}
+                        "dynamic_maximum_loss_usd": dynamic_sizing.get("maximum_loss_usd"),
+                        "dynamic_invalid_active_positions": dynamic_sizing.get(
+                            "invalid_active_positions"
+                        ),
+                        "dynamic_invalid_active_position_reasons": dynamic_sizing.get(
+                            "invalid_active_position_reasons", {}
+                        ),
+                        "dynamic_invalid_active_position_details": dynamic_sizing.get(
+                            "invalid_active_position_details", []
+                        ),
+                        "dynamic_latest_failures": dynamic_latest_failures,
+                        "market_health_age_seconds": health.get("age_seconds")}}
 
 
 def run(data_dir=Path("data"), log_file=Path("logs/shadow-audit.jsonl"), state_file=Path("state/orders.json"),
