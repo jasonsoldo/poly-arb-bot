@@ -3,388 +3,914 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>POLY//HORIZON</title>
+<title>POLY//HORIZON — SHADOW TERMINAL</title>
 <style>
 :root{
-  --bg:#040b09;--panel:#081510;--panel2:#0b1d16;--line:#275141;
-  --line2:#17372b;--text:#dff7e8;--muted:#79a491;--green:#91ffad;
-  --cyan:#62efd0;--yellow:#ffd36b;--pink:#ff79bd;--red:#ff7d83;
+  --bg:#F0F2F4;        --panel:#FDFDFC;     --panel-2:#F0F2F6;
+  --ink:#111113;       --ink-2:#6E7276;     --ink-3:#9BA0A4;
+  --line:#000000;      --line-soft:rgba(0,0,0,.08);
+  --green:#0B9470;     --green-soft:#C6E2E0;--green-bg:#F0FAF6; --green-cell:#DDF0E8;
+  --red:#E80A19;       --red-soft:#F8D7D7;  --red-mid:#EC828D;
+  --orange:#E86D09;    --orange-soft:#FBE3CC;
+  --purple:#5927B7;    --purple-soft:#E2D1FF;--purple-bg:#F4EFFF;
+  --cream:#FCF6D1;     --cream-2:#FFF7DD;
+  --bar:#A2A2A2;
+  --shadow:3px 3px 0 #000;
+  --font-mono:"JetBrains Mono","IBM Plex Mono","SFMono-Regular",Consolas,monospace;
+  --font-display:"Archivo Black","Space Grotesk","Arial Black","Inter",system-ui,sans-serif;
 }
 *{box-sizing:border-box}
-html,body{margin:0;min-height:100%;overflow-x:hidden;background:var(--bg);color:var(--text);font:11px/1.35 Consolas,monospace}
-body{border-top:5px solid #2f3431}
-header{height:58px;background:#020806;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 14px;gap:14px}
-.logo{width:36px;height:36px;display:grid;place-items:center;background:var(--green);color:#020806;font:25px Georgia;border-radius:4px}
-.brand{min-width:170px;color:var(--green);font-size:14px;font-weight:700}
-.sub,label{display:block;color:var(--muted);font-size:8px;font-weight:400}
-.headstats{display:flex;align-self:stretch}
-.headstat{min-width:92px;padding:11px 13px;border-left:1px solid var(--line2)}
-.headstat b{display:block;margin-top:4px;font-size:14px;color:var(--text)}
-.engine{margin-left:auto;text-align:right;color:var(--green)}
-.ticker{height:25px;display:flex;align-items:center;gap:30px;padding:0 14px;border-bottom:1px solid var(--line);color:var(--muted);white-space:nowrap;overflow:hidden}
-.ticker b{color:var(--green)}
-main{padding:8px;max-width:1920px;margin:auto}
-.dashboard{display:grid;grid-template-columns:35% 43% 22%;grid-template-areas:
-  "profile command matrix"
-  "profile strategies matrix"
-  "probability probability probability"
-  "arb arb arb"
-  "equity replay references"
-  "rejections replay health"
-  "legacy pnl latency";gap:7px}
-.panel{border:1px solid var(--line);background:var(--panel);padding:11px;min-width:0;overflow:hidden}
-.panel h2{margin:0 0 9px;color:var(--cyan);font-size:9px;letter-spacing:.11em}
-.profile{grid-area:profile}.command{grid-area:command}.matrix-panel{grid-area:matrix}
-.strategies{grid-area:strategies}.equity-panel{grid-area:equity}.replay{grid-area:replay}
-.probability-panel{grid-area:probability}.arb-research{grid-area:arb}
-.references{grid-area:references}.rejections{grid-area:rejections}.health-panel{grid-area:health}
-.legacy{grid-area:legacy}.pnl-panel{grid-area:pnl}.latency-panel{grid-area:latency}
-.profile-head{display:flex;justify-content:space-between;align-items:start;border-bottom:1px solid var(--line);padding-bottom:8px}
-.tag{border:1px solid var(--green);padding:3px 7px;color:var(--green);font-size:8px}
-.hero{font-size:42px;color:var(--green);margin:18px 0 1px}
-.metrics{display:grid;grid-template-columns:repeat(4,1fr);margin-top:14px;border-block:1px solid var(--line)}
-.metric{padding:9px;border-right:1px solid var(--line)}
-.metric:last-child{border:0}.metric b{display:block;font-size:17px;margin-top:4px}
-.session-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:12px}
-.session-cell{border:1px solid var(--line2);padding:7px;min-height:47px}.session-cell b{display:block;margin-top:4px}
-.command-grid{display:grid;grid-template-columns:1.3fr repeat(5,1fr);gap:12px;align-items:end}
-.command-grid strong{display:block;color:var(--green);font-size:24px;margin-top:4px}
-.pair-title{font-size:15px;font-weight:700;color:var(--text);margin:20px 0 4px}
-.cost-chain{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:5px;margin-top:16px;border-top:1px solid var(--line);padding-top:10px}
-.cost-chain div{min-width:0}.cost-chain b{display:block;margin-top:5px;font-size:13px}
-.checks{display:grid;grid-template-columns:repeat(5,1fr);gap:3px;margin-top:10px}
-.check{border:1px solid var(--line);padding:6px;text-align:center}.check.good{border-color:var(--green)}.check.warn{border-color:var(--yellow)}
-.strategy-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
-.strategy-card{border:1px solid var(--line);padding:7px;min-height:107px;background:var(--panel2)}
-.strategy-card>label{color:var(--cyan)}.strategy-card>b{display:block;margin:5px 0;color:var(--green)}
-.strategy-card .history{margin-top:5px;padding-top:5px;border-top:1px solid var(--line2)}
-.near-misses{margin-top:7px;border-top:1px solid var(--line);padding-top:7px}
-.near-row{display:grid;grid-template-columns:42px 35px 1fr 70px 70px;gap:7px;padding:4px 0;border-bottom:1px solid var(--line2)}
-.flow{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-top:7px}
-.step{border:1px solid var(--line);padding:7px 5px;color:var(--muted);min-height:44px}
-.step.on{border-color:var(--green);color:var(--text)}.step.block{border-color:var(--yellow)}
-.step i{display:block;color:var(--cyan);font-style:normal}
-.chart{height:205px;border-bottom:1px solid var(--line);background:repeating-linear-gradient(0deg,transparent 0 40px,#143127 41px)}
-.chart svg{width:100%;height:100%}.empty{height:100%;display:grid;place-items:center;color:var(--muted)}
-.bar{display:grid;grid-template-columns:145px 1fr 62px;gap:7px;align-items:center;padding:4px 0}
-.track{height:5px;background:#173229}.fill{height:100%;background:var(--cyan)}
-.ledger{max-height:292px;overflow:auto}
-.trade{display:grid;grid-template-columns:1fr 75px 65px 76px;gap:7px;padding:6px 0;border-bottom:1px solid var(--line2)}
-.matrix{width:100%;border-spacing:2px}.matrix td,.matrix th{padding:6px;text-align:center}.matrix td{border:1px solid var(--line)}
-.matrix td:first-child{border:0;text-align:left}.hot{background:#1f533f}.pnl{min-width:68px;white-space:nowrap}
-.refs{display:grid;grid-template-columns:38px repeat(4,minmax(60px,1fr));gap:2px;overflow:auto}
-.refs div{padding:5px;border-bottom:1px solid var(--line2)}
-.health-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}.health-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--line2)}
-.inventory-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}.inventory-summary div{border:1px solid var(--line);padding:7px}
-.inventory-list{max-height:120px;overflow:auto;margin-top:8px}.inventory-row{display:grid;grid-template-columns:42px 34px 1fr 70px 66px;gap:7px;padding:5px 0;border-bottom:1px solid var(--line2)}
-.latency-row{display:grid;grid-template-columns:82px 1fr 50px;gap:7px;align-items:center;padding:5px 0}
-.pnl-meter{display:grid;grid-template-columns:90px 1fr 70px;gap:8px;align-items:center;padding:7px 0}
-.good{color:var(--green)}.warn{color:var(--yellow)}.bad{color:var(--red)}.na{color:var(--muted)}
-footer{margin-top:7px;border-top:1px solid var(--line);padding:7px;color:var(--muted);display:flex;justify-content:space-between}
-@media(max-width:1300px){.dashboard{grid-template-columns:34% 66%;grid-template-areas:"profile command" "profile strategies" "probability probability" "arb arb" "equity matrix" "rejections references" "replay health" "legacy legacy" "pnl latency"}.headstat{min-width:78px;padding-inline:8px}}
-@media(max-width:850px){header{padding-inline:10px}.engine{font-size:9px}.dashboard{display:block}.panel{margin-bottom:7px}.headstats{display:none}.metrics,.session-strip,.inventory-summary{grid-template-columns:1fr 1fr}.strategy-grid{grid-template-columns:1fr}.command-grid{grid-template-columns:1fr 1fr}.cost-chain{grid-template-columns:1fr 1fr}.flow{grid-template-columns:repeat(2,1fr)}.refs{grid-template-columns:38px repeat(4,86px)}}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);
+  font:500 11px/1.4 var(--font-mono);font-variant-numeric:tabular-nums}
+::selection{background:var(--purple-soft)}
+
+/* ============ TOP BAR ============ */
+.topbar{display:flex;align-items:center;gap:12px;padding:5px 10px;background:var(--bg);
+  border-bottom:1px solid var(--line)}
+.logo{width:18px;height:18px;background:var(--purple);color:#fff;display:grid;place-items:center;
+  font:800 11px var(--font-display);border-radius:3px;flex:none}
+.brand{font:800 13px var(--font-display);letter-spacing:-.01em;white-space:nowrap}
+.brand small{display:block;font:600 7px var(--font-mono);color:var(--ink-2);letter-spacing:.14em}
+.chip{font:600 9px var(--font-mono);letter-spacing:.10em;text-transform:uppercase;
+  padding:1px 5px;border:1px solid currentColor;border-radius:0;background:transparent;white-space:nowrap}
+.chip--purple{color:var(--purple);background:var(--purple-bg)}
+.chip--purple-fill{background:var(--purple);color:#fff;border-color:var(--purple)}
+.chip--green{color:var(--green);background:var(--green-bg)}
+.chip--green-fill{background:var(--green);color:#fff;border-color:var(--green)}
+.chip--red-fill{background:var(--red);color:#fff;border-color:var(--red)}
+.chip--red{color:var(--red);background:#FDF0F1}
+.chip--orange{color:var(--orange);background:#FDF6EE}
+.chip--gray{color:var(--ink-2);background:var(--panel-2)}
+.headstats{display:flex;align-self:stretch;margin-left:6px;border-left:1px solid var(--line)}
+.headstat{min-width:78px;padding:2px 10px;border-right:1px solid var(--line-soft);display:flex;flex-direction:column;justify-content:center}
+.headstat label,.lbl{font:600 8px var(--font-mono);color:var(--ink-2);letter-spacing:.12em;text-transform:uppercase}
+.headstat b{font:800 14px var(--font-display);letter-spacing:-.01em;margin-top:1px}
+.top-right{margin-left:auto;display:flex;align-items:center;gap:12px}
+.clock{font:800 16px var(--font-display);letter-spacing:-.01em}
+.clock small{font:600 7px var(--font-mono);color:var(--ink-2);letter-spacing:.1em;vertical-align:super}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;margin-right:4px;vertical-align:1px}
+
+/* ============ RANK BAR / TICKER ============ */
+.rankbar{display:flex;gap:18px;align-items:center;padding:3px 10px;background:var(--panel);
+  border-bottom:1px solid var(--line);font:600 9px var(--font-mono);letter-spacing:.08em;
+  text-transform:uppercase;color:var(--ink-2);white-space:nowrap;overflow:hidden}
+.rankbar b{color:var(--ink)}
+.ticker{display:flex;align-items:center;gap:0;background:var(--panel);border-bottom:1px solid var(--line);
+  height:22px;overflow:hidden;white-space:nowrap}
+.ticker .live{flex:none;background:var(--red);color:#fff;font:700 9px var(--font-mono);
+  letter-spacing:.1em;padding:0 8px;height:100%;display:flex;align-items:center}
+.ticker .tape{display:inline-flex;gap:26px;padding:0 14px;align-items:center;animation:tape 60s linear infinite}
+.ticker:hover .tape{animation-play-state:paused}
+@keyframes tape{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.tk{font:500 10px var(--font-mono);color:var(--ink-2)}
+.tk b{font-weight:700}
+.tk .up{color:var(--green)}.tk .dn{color:var(--red)}
+
+/* ============ LAYOUT ============ */
+main{padding:6px;max-width:1720px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:8px}
+.s3{grid-column:span 3}.s4{grid-column:span 4}.s5{grid-column:span 5}
+.s6{grid-column:span 6}.s7{grid-column:span 7}.s8{grid-column:span 8}.s12{grid-column:span 12}
+
+/* ============ PANEL ============ */
+.panel{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:0;
+  box-shadow:var(--shadow);padding:8px 10px;min-width:0;overflow:hidden}
+.panel::before{content:"";position:absolute;inset:-4px;pointer-events:none;
+  background:
+    linear-gradient(#000,#000) left 0 top 0/7px 1.5px no-repeat,
+    linear-gradient(#000,#000) left 0 top 0/1.5px 7px no-repeat,
+    linear-gradient(#000,#000) right 0 top 0/7px 1.5px no-repeat,
+    linear-gradient(#000,#000) right 0 top 0/1.5px 7px no-repeat,
+    linear-gradient(#000,#000) left 0 bottom 0/7px 1.5px no-repeat,
+    linear-gradient(#000,#000) left 0 bottom 0/1.5px 7px no-repeat,
+    linear-gradient(#000,#000) right 0 bottom 0/7px 1.5px no-repeat,
+    linear-gradient(#000,#000) right 0 bottom 0/1.5px 7px no-repeat}
+.phead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+  border-bottom:1px dashed rgba(0,0,0,.25);padding-bottom:5px;margin-bottom:7px}
+.phead h2{margin:0;font:700 10px var(--font-mono);letter-spacing:0.14em;text-transform:uppercase}
+.phead h2::before{content:"▪ ";color:var(--orange)}
+.phead .meta{font:600 8px var(--font-mono);color:var(--ink-2);letter-spacing:.1em;text-transform:uppercase;text-align:right}
+.sub{font:500 8px var(--font-mono);color:var(--ink-2);letter-spacing:.08em;text-transform:uppercase}
+.na{color:var(--ink-3);font-style:normal}
+.g{color:var(--green)}.r{color:var(--red)}.o{color:var(--orange)}.p{color:var(--purple)}
+
+/* ============ KPI / HERO ============ */
+.hero-row{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:6px}
+.hero{font:800 44px/1.0 var(--font-display);letter-spacing:-0.02em}
+.hero.na-hero{color:var(--ink-3)}
+.result-card{background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);
+  padding:5px 8px;min-width:110px}
+.result-card .big{font:700 12px var(--font-mono)}
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);border-top:1px solid var(--line);
+  border-bottom:1px solid var(--line);margin-top:8px}
+.kpi{padding:6px 8px;border-right:1px solid var(--line-soft)}
+.kpi:last-child{border-right:0}
+.kpi b{display:block;font:700 20px var(--font-display);letter-spacing:-.01em;margin-top:2px}
+.kpi .tiny{font:500 7px var(--font-mono);color:var(--ink-3);letter-spacing:.08em}
+.eqwrap{margin-top:8px;border:1px solid var(--line)}
+.eqwrap .eqhead{display:flex;justify-content:space-between;padding:3px 6px;border-bottom:1px solid var(--line-soft);
+  font:600 8px var(--font-mono);letter-spacing:.1em;color:var(--ink-2);text-transform:uppercase}
+.eqwrap svg{display:block;width:100%;height:74px}
+.eq-empty{height:74px;display:grid;place-items:center;color:var(--ink-3);font:600 9px var(--font-mono);letter-spacing:.12em}
+.meter-row{display:grid;grid-template-columns:110px 1fr auto;gap:8px;align-items:center;margin-top:8px}
+.meter{height:10px;border:1px solid var(--line);background:var(--panel-2);border-radius:0}
+.meter>i{display:block;height:100%;background:var(--green)}
+.meter>i.warn{background:var(--orange)}.meter>i.bad{background:var(--red)}
+
+/* ============ CHEVRON STEPS ============ */
+.flow{display:grid;grid-template-columns:repeat(7,1fr);gap:0;margin-top:6px}
+.step{position:relative;background:var(--panel-2);padding:6px 8px 6px 16px;min-height:40px;
+  clip-path:polygon(0 0,calc(100% - 10px) 0,100% 50%,calc(100% - 10px) 100%,0 100%,10px 50%)}
+.step:first-child{clip-path:polygon(0 0,calc(100% - 10px) 0,100% 50%,calc(100% - 10px) 100%,0 100%);padding-left:8px}
+.step i{display:block;font:700 8px var(--font-mono);font-style:normal;color:var(--orange);letter-spacing:.1em}
+.step b{display:block;font:700 9px var(--font-mono);letter-spacing:.08em;text-transform:uppercase;margin-top:1px}
+.step small{display:block;font:600 7px var(--font-mono);letter-spacing:.08em;color:var(--ink-2);margin-top:1px}
+.step.pass{background:var(--green-cell)}.step.pass b{color:var(--green)}
+.step.block{background:var(--red-soft)}.step.block b{color:var(--red)}
+.step.na-step{background:var(--panel-2)}.step.na-step b{color:var(--ink-3)}
+.step.cur{background:var(--cream);box-shadow:inset 0 0 0 1px var(--line)}
+
+/* ============ STRATEGY CARDS ============ */
+.strat-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.field-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px 10px}
+.fg{min-width:0}
+.fg label{display:block;font:600 7.5px var(--font-mono);color:var(--ink-2);letter-spacing:.1em;text-transform:uppercase}
+.fg b{display:block;font:700 12px var(--font-mono);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fg b.big{font:700 16px var(--font-display);letter-spacing:-.01em}
+.counts-strip{display:flex;gap:10px;flex-wrap:wrap;border-top:1px dashed rgba(0,0,0,.25);
+  margin-top:7px;padding-top:5px;font:500 8.5px var(--font-mono);color:var(--ink-2);
+  letter-spacing:.06em;text-transform:uppercase}
+.counts-strip b{color:var(--ink)}
+
+/* ============ COST CHAIN ============ */
+.chain{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.cell{border:1px solid var(--line);background:var(--panel);padding:5px 7px;min-width:0}
+.cell label{display:block;font:600 7.5px var(--font-mono);color:var(--ink-2);letter-spacing:.1em;text-transform:uppercase}
+.cell b{display:block;font:700 13px var(--font-mono);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cell.hi{background:var(--cream-2)}
+.cell.good{background:var(--green-cell)}.cell.good b{color:var(--green)}
+.cell.bad{background:var(--red-soft)}.cell.bad b{color:var(--red)}
+.cell.warn{background:var(--orange-soft)}.cell.warn b{color:var(--orange)}
+.checks{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+.check{border:1px solid var(--line);padding:5px 4px;text-align:center;background:var(--panel)}
+.check label{display:block;font:600 7.5px var(--font-mono);color:var(--ink-2);letter-spacing:.1em}
+.check b{display:block;font:800 11px var(--font-mono);margin-top:2px}
+.check.pass{background:var(--green-cell)}.check.pass b{color:var(--green)}
+.check.fail{background:var(--red-soft)}.check.fail b{color:var(--red)}
+.check.idle b{color:var(--ink-3)}
+
+/* ============ MATRIX ============ */
+.matrix{width:100%;border-collapse:separate;border-spacing:2px}
+.matrix th{font:600 8px var(--font-mono);color:var(--ink-2);letter-spacing:.1em;text-transform:uppercase;padding:3px 2px}
+.matrix td{border:1px solid var(--line);padding:4px 3px;text-align:center;font:700 11px var(--font-mono);background:var(--panel)}
+.matrix td small{display:block;font:500 7px var(--font-mono);color:var(--ink-2);letter-spacing:.04em}
+.matrix td.hd{border:0;text-align:left;font:700 10px var(--font-mono);letter-spacing:.08em;background:transparent}
+.matrix td.ok{background:var(--green-cell)}.matrix td.ok small{color:var(--green)}
+.matrix td.blk{background:var(--red-soft)}.matrix td.blk small{color:var(--red)}
+.matrix td.idle{background:var(--panel-2);color:var(--ink-3)}
+.matrix td.pnlcell{white-space:nowrap;font-size:10px}
+
+/* ============ REFERENCE TABLE ============ */
+.refs{overflow-x:auto}
+.refs table{border-collapse:separate;border-spacing:2px;width:100%}
+.refs th{font:600 8px var(--font-mono);color:var(--ink-2);letter-spacing:.08em;text-transform:uppercase;padding:2px 4px;text-align:left;white-space:nowrap}
+.refs th small{display:block;color:var(--ink-3);font-weight:500;letter-spacing:.04em}
+.refs td{border:1px solid var(--line-soft);padding:3px 5px;font:600 10px var(--font-mono);white-space:nowrap;background:var(--panel)}
+.refs td.ast{border:1px solid var(--line);font-weight:800;letter-spacing:.06em}
+.refs td small{display:block;font:500 7.5px var(--font-mono);color:var(--ink-2)}
+.st{font:600 8px var(--font-mono);letter-spacing:.08em;text-transform:uppercase}
+.st::before{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;background:currentColor;margin-right:3px}
+.st.fresh{color:var(--green)}.st.stale{color:var(--orange)}
+.st.disc,.st.notrec{color:var(--red)}.st.other{color:var(--ink-3)}
+.agg{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:7px;border-top:1px dashed rgba(0,0,0,.25);padding-top:6px}
+
+/* ============ LOG / BARS ============ */
+.log{max-height:230px;overflow:auto}
+.trow{display:grid;grid-template-columns:58px 34px 1fr 74px;gap:7px;align-items:center;
+  padding:4px 0;border-bottom:1px solid rgba(0,0,0,.06)}
+.trow:hover{background:#F8FBFA}
+.trow .ts{font:500 9px var(--font-mono);color:var(--ink-2)}
+.trow .mkt{font:700 10px var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trow .val{text-align:right;font:700 10px var(--font-mono)}
+.trow .val small{display:block;font:500 7px var(--font-mono);color:var(--ink-2)}
+.yn{display:inline-block;width:26px;text-align:center;font:600 8px var(--font-mono);
+  letter-spacing:.06em;padding:1px 0;border:1px solid currentColor}
+.yn.y{color:var(--green);background:var(--green-bg)}
+.yn.n{color:var(--red);background:#FDF0F1}
+.bar-row{display:grid;grid-template-columns:150px 1fr 40px;gap:7px;align-items:center;padding:3px 0}
+.bar-row .nm{font:500 8.5px var(--font-mono);color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:.04em}
+.bar-row b{text-align:right;font:700 10px var(--font-mono)}
+.kv{display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid rgba(0,0,0,.06);font:500 9.5px var(--font-mono)}
+.kv b{font-weight:700;text-align:right}
+.empty{display:grid;place-items:center;min-height:46px;color:var(--ink-3);
+  font:600 9px var(--font-mono);letter-spacing:.12em;text-transform:uppercase}
+
+/* ============ BOTTOM BAR ============ */
+.botbar{margin-top:8px;background:var(--bar);border-top:1px solid var(--line);color:#000;
+  display:flex;align-items:center;gap:18px;padding:4px 12px;min-height:30px}
+.botbar .big{font:800 16px var(--font-display);letter-spacing:-.01em}
+.botbar .cap{font:600 7px var(--font-mono);letter-spacing:.12em;text-transform:uppercase;color:#2b2b2b}
+.botbar .seg{display:flex;gap:2px;align-items:center}
+.botbar .seg i{display:block;height:10px;width:14px;border:1px solid #000}
+.botbar .seg i.g{background:var(--green)}.botbar .seg i.o{background:var(--orange)}.botbar .seg i.r{background:var(--red)}
+.botbar .right{margin-left:auto;display:flex;gap:14px;align-items:center;font:600 8px var(--font-mono);letter-spacing:.1em;text-transform:uppercase}
+
+footer{padding:4px 12px 10px;display:flex;justify-content:space-between;font:500 8px var(--font-mono);
+  color:var(--ink-2);letter-spacing:.1em;text-transform:uppercase}
+
+@media(max-width:1200px){
+  .s3,.s4{grid-column:span 6}.s5,.s6,.s7,.s8{grid-column:span 12}
+  .chain{grid-template-columns:repeat(4,1fr)}
+  .headstat{min-width:64px}
+}
+@media(max-width:760px){
+  .grid{display:block}.panel{margin-bottom:8px}
+  .headstats{display:none}.hero{font-size:32px}
+  .kpis,.field-grid{grid-template-columns:repeat(2,1fr)}
+  .chain{grid-template-columns:repeat(2,1fr)}
+  .flow{grid-template-columns:repeat(2,1fr)}
+  .step{clip-path:none!important;padding-left:8px}
+  .checks{grid-template-columns:repeat(3,1fr)}
+  .agg{grid-template-columns:repeat(2,1fr)}
+}
 </style>
 </head>
 <body>
-<header>
-  <div class="logo">C</div>
-  <div class="brand">POLY//HORIZON<span class="sub">CRYPTO ARBITRAGE / CLOB SHADOW / DRY RUN</span></div>
+
+<!-- ============ TOP BAR ============ -->
+<header class="topbar">
+  <div class="logo">P</div>
+  <div class="brand">POLY//HORIZON<small>CRYPTO SHADOW · CLOB + REFERENCE</small></div>
+  <span class="chip chip--purple-fill">SHADOW</span>
+  <span class="chip chip--purple" id="modeChip">DRY RUN</span>
   <div class="headstats">
-    <div class="headstat"><label>MARKETS</label><b id="markets">N/A</b></div>
-    <div class="headstat"><label>SESSION EVALS</label><b id="raw">N/A</b></div>
-    <div class="headstat"><label>BUY+MERGE EVALS</label><b id="pairedEvals">N/A</b></div>
-    <div class="headstat"><label>REPEATABLE PATTERNS</label><b id="repeatableCount">N/A</b></div>
-    <div class="headstat"><label>MAKER GEOMETRY</label><b id="makerQuotes">N/A</b></div>
-    <div class="headstat"><label>CURRENT LOCKED COMPLETE</label><b id="lockedComplete">N/A</b></div>
-    <div class="headstat"><label>REAL ORDERS</label><b id="realOrders">0</b></div>
+    <div class="headstat"><label>DISCOVERED</label><b id="hDisc">N/A</b></div>
+    <div class="headstat"><label>PAIRED READY</label><b id="hReady">N/A</b></div>
+    <div class="headstat"><label>SESSION EVALS</label><b id="hEvals">N/A</b></div>
+    <div class="headstat"><label>ACCEPTS</label><b id="hAccepts">N/A</b></div>
+    <div class="headstat"><label>DUPLICATES</label><b id="hDup">N/A</b></div>
+    <div class="headstat"><label>REAL ORDERS</label><b id="hReal" class="g">0</b></div>
   </div>
-  <div class="engine"><label>ENGINE STATUS</label><b id="status">OFFLINE</b></div>
+  <div class="top-right">
+    <span class="chip chip--gray" id="msgAge">MSG AGE N/A</span>
+    <span id="sysChip" class="chip chip--gray">OFFLINE</span>
+    <span class="clock" id="clock">--:--:--<small> UTC</small></span>
+  </div>
 </header>
+
+<!-- ============ RANK BAR ============ -->
+<div class="rankbar" id="rankbar">
+  <span>ENGINE <b>N/A</b></span><span>SESSION <b>N/A</b></span><span>ANALYTICS <b>N/A</b></span>
+</div>
+
+<!-- ============ TICKER ============ -->
 <div class="ticker">
-  <span>BUY BOTH + MERGE / SPLIT + SELL BOTH / MAKER BOTH + MERGE</span>
-  <span>PROBABILITY RESEARCH: DIRECTIONAL EV / LOW-PRICE LOTTERY</span>
-  <span>WINDOWS <b>5M / 15M / 1H / 4H</b></span>
+  <span class="live">▼ LIVE</span>
+  <span class="tape" id="tape"><span class="tk">NO EVENTS</span></span>
 </div>
+
 <main>
-<div class="dashboard">
-  <section class="panel profile">
-    <div class="profile-head"><div><h2>@POLY//OPERATOR</h2><span class="sub">CURRENT CONFIG PERFORMANCE / REAL AUDIT</span></div><span class="tag">SHADOW MODE</span></div>
-    <label style="margin-top:14px">SIMULATED COMPLETED PNL</label>
-    <div class="hero" id="simPnl">N/A</div>
-    <span class="sub">CURRENT CONFIG ONLY / HISTORICAL CONFIGS EXCLUDED</span>
-    <div class="metrics">
-      <div class="metric"><label>WIN RATE</label><b id="winRate">N/A</b></div>
-      <div class="metric"><label>SHARPE</label><b id="sharpe">N/A</b><small id="sharpeSamples" class="sub">0 COMPLETED TRADES</small></div>
-      <div class="metric"><label>REAL PNL</label><b>$0.00</b></div>
-      <div class="metric"><label>REAL ORDERS</label><b>0</b></div>
+<div class="grid">
+
+  <!-- ============ P2 · SIMULATED PNL ============ -->
+  <section class="panel s7">
+    <div class="phead"><h2>SIMULATED PNL · CURRENT CONFIG</h2><span class="meta" id="pnlMeta">SHADOW / NOT REAL MONEY</span></div>
+    <div class="hero-row">
+      <div>
+        <div class="hero na-hero" id="simPnl">N/A</div>
+        <span class="sub">SIMULATED COMPLETED PNL · HISTORICAL CONFIGS EXCLUDED</span>
+      </div>
+      <div class="result-card" id="lastTradeCard">
+        <span class="lbl">LAST COMPLETED</span>
+        <div class="big na">N/A</div>
+        <span class="sub">NO COMPLETED SIMULATION</span>
+      </div>
     </div>
-    <div class="session-strip">
-      <div class="session-cell"><label>RUN ID</label><b id="sessionRun">N/A</b></div>
-      <div class="session-cell"><label>SESSION AGE</label><b id="sessionAge">N/A</b></div>
-      <div class="session-cell"><label>ANALYTICS</label><b id="analyticsState">N/A</b></div>
-      <div class="session-cell"><label>HIST EXCLUDED</label><b id="historicalExcluded">N/A</b></div>
+    <div class="kpis">
+      <div class="kpi"><span class="lbl">COMPLETED</span><b id="kCompleted">N/A</b></div>
+      <div class="kpi"><span class="lbl">WINS / LOSSES</span><b id="kWL">N/A</b></div>
+      <div class="kpi"><span class="lbl">WIN RATE</span><b id="kWinRate" class="na">N/A</b></div>
+      <div class="kpi"><span class="lbl">SHARPE</span><b id="kSharpe" class="o">N/A</b><span class="tiny" id="kSharpeN">SAMPLES N/A</span></div>
+      <div class="kpi"><span class="lbl">REAL PNL / ORDERS</span><b class="g">$0.00 / 0</b><span class="tiny">INVARIANT</span></div>
+    </div>
+    <div class="eqwrap">
+      <div class="eqhead"><span>SIMULATED EQUITY · COMPLETED TRADES ONLY</span><span id="eqCount">N/A</span></div>
+      <div id="equityChart"><div class="eq-empty">N/A · NO COMPLETED SIMULATIONS</div></div>
+    </div>
+    <div class="meter-row">
+      <span class="lbl" id="exposureLbl">EXPOSURE / MAX LOSS</span>
+      <div class="meter"><i id="exposureFill" style="width:0%"></i></div>
+      <span class="chip chip--gray" id="riskMode">N/A</span>
     </div>
   </section>
 
-  <section class="panel command">
-    <h2>STRATEGY CONSOLE / INSTANT COMPLETE SET</h2>
-    <div class="command-grid">
-      <div><div class="pair-title">CRYPTO PAIRED LOCK / SHADOW</div><span id="currentMarket" class="sub">N/A</span></div>
-      <div><label>UP VWAP</label><strong id="upVwap">N/A</strong></div>
-      <div><label>DOWN VWAP</label><strong id="downVwap">N/A</strong></div>
-      <div><label>EXPECTED EXEC VALUE</label><strong id="eev">N/A</strong></div>
-      <div><label>LOCKED PROFIT</label><strong id="lockedProfit">N/A</strong></div>
-      <div><label>STRATEGY SCORE</label><strong id="strategyScore">N/A</strong></div>
-    </div>
-    <div class="checks" id="scoreBreakdown"></div>
-    <div class="cost-chain" id="pairAudit"></div>
+  <!-- ============ P6 · REFERENCE ============ -->
+  <section class="panel s5">
+    <div class="phead"><h2>REFERENCE PRICES · PER SOURCE</h2>
+      <span class="meta"><span class="chip chip--purple">REFERENCE ONLY</span><br>NOT USED FOR PAIRED-LOCK ACCEPTANCE</span></div>
+    <div class="refs" id="refTable"><div class="empty">N/A</div></div>
+    <div class="agg" id="refAgg"></div>
   </section>
 
-  <section class="panel matrix-panel">
-    <h2>ROBUSTNESS MATRIX / ASSET x TIMEFRAME</h2>
-    <table class="matrix" id="marketMatrix"></table>
-    <span class="sub">COUNT = OFFICIAL ACTIVE MARKETS / DIR REF = REFERENCE READY</span>
-  </section>
-
-  <section class="panel strategies">
-    <h2>STRATEGY STATUS / INDEPENDENT SEMANTICS</h2>
-    <div class="strategy-grid">
-      <div class="strategy-card" id="directionalCard"></div>
-      <div class="strategy-card" id="lotteryCard"></div>
-      <div class="strategy-card" id="pairedCard"></div>
-      <div class="strategy-card" id="reversionCard"></div>
-    </div>
+  <!-- ============ P5 · PIPELINE STEPS ============ -->
+  <section class="panel s8">
+    <div class="phead"><h2>EXECUTION PIPELINE · SHADOW</h2><span class="meta" id="pipeMeta">DEPLOY = BLOCKED BY DESIGN</span></div>
     <div class="flow" id="pipelineSteps"></div>
+    <div class="counts-strip" id="pipeCounts"></div>
   </section>
 
-  <section class="panel probability-panel">
-    <h2>PROBABILITY CALIBRATION / OBSERVATION ONLY</h2>
-    <span class="sub">CALIBRATION ONLY / NOT ORDERS OR PNL / STRICT ACCEPT REMAINS SEPARATE</span>
-    <div id="probabilityCalibration" class="strategy-grid"></div>
+  <!-- ============ P4b · POSITION SIZER ============ -->
+  <section class="panel s4">
+    <div class="phead"><h2>POSITION SIZER · REAL MARKET BOOK SIZED</h2><span class="meta">PAIRED LOCK</span></div>
+    <div class="field-grid" style="grid-template-columns:repeat(2,1fr)" id="sizerGrid"></div>
+    <div class="counts-strip" id="sizerFoot"></div>
   </section>
 
-  <section class="panel equity-panel">
-    <h2>SIMULATED EQUITY / CURRENT CONFIG</h2>
-    <div class="chart" id="equityChart"><div class="empty">NO COMPLETED SIMULATIONS / CURRENT CONFIG</div></div>
-  </section>
-
-  <section class="panel arb-research">
-    <h2>REPEATABLE ARBITRAGE RESEARCH</h2>
-    <span class="sub">RESEARCH ONLY / NOT ORDERS OR PNL</span>
-    <div id="arbitrageFunnels" class="strategy-grid"></div>
-    <div class="near-misses">
-      <h2>SPLIT + SELL / NEAREST LOCKED ARBITRAGE</h2>
-      <div id="splitSellNearMisses"></div>
+  <!-- ============ P3a · DIRECTIONAL EV ============ -->
+  <section class="panel s6">
+    <div class="phead"><h2>DIRECTIONAL EV · LATE WINDOW</h2><span class="meta" id="dirMeta">STRATEGY 1/3</span></div>
+    <div class="strat-head">
+      <span id="dirDecision"><span class="chip chip--gray">NO EVALUATION</span></span>
+      <span class="sub" id="dirMarket">N/A</span>
     </div>
-    <div class="near-misses">
-      <h2>REPEATABLE PATTERN RESEARCH</h2>
-      <div id="repeatablePatterns"></div>
+    <div class="field-grid" id="dirGrid"></div>
+    <div class="counts-strip" id="dirCounts"></div>
+  </section>
+
+  <!-- ============ P3b · LOW-PRICE LOTTERY ============ -->
+  <section class="panel s6">
+    <div class="phead"><h2>LOW-PRICE LOTTERY EV</h2><span class="meta">STRATEGY 2/3 · HIGH VARIANCE</span></div>
+    <div class="strat-head">
+      <span id="lotDecision"><span class="chip chip--gray">NO EVALUATION</span></span>
+      <span class="sub" id="lotMarket">N/A</span>
     </div>
-    <div class="near-misses">
-      <h2>SIZE + DELAY COUNTERFACTUALS</h2>
-      <div id="counterfactualPatterns"></div>
+    <div class="field-grid" id="lotGrid"></div>
+    <div class="counts-strip" id="lotCounts"></div>
+  </section>
+
+  <!-- ============ P4 · PAIRED LOCK COST CHAIN ============ -->
+  <section class="panel s12">
+    <div class="phead"><h2>PAIRED LOCK · FULL COST CHAIN</h2>
+      <span class="meta">STRATEGY 3/3 · AUXILIARY · <span id="pairMarket">N/A</span></span></div>
+    <div class="chain" id="costChain1"></div>
+    <div class="chain" id="costChain2" style="margin-top:4px"></div>
+    <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:8px;margin-top:8px">
+      <div>
+        <span class="lbl">EXECUTION PRESSURE · CONFIG-MODEL ONLY / NOT HISTORICAL FILL RATES</span>
+        <div class="field-grid" style="grid-template-columns:repeat(4,1fr);margin-top:4px" id="pressureGrid"></div>
+      </div>
+      <div>
+        <span class="lbl">CHECKS · <span id="scoreLbl">SCORE N/A</span></span>
+        <div class="checks" style="margin-top:4px" id="scoreChecks"></div>
+      </div>
+    </div>
+    <div class="counts-strip" id="pairCounts"></div>
+  </section>
+
+  <!-- ============ P7 · MARKET MATRIX ============ -->
+  <section class="panel s5">
+    <div class="phead"><h2>MARKET MATRIX · ASSET × TIMEFRAME</h2><span class="meta" id="matrixMeta">COUNT · REF READY/TOTAL</span></div>
+    <table class="matrix" id="marketMatrix"></table>
+    <div class="counts-strip" id="readinessStrip"></div>
+  </section>
+
+  <!-- ============ P8 · ACCEPTANCE ============ -->
+  <section class="panel s4">
+    <div class="phead"><h2>SHADOW ACCEPTANCE · INVARIANTS</h2><span class="meta" id="accVerdict"><span class="chip chip--gray">N/A</span></span></div>
+    <div class="checks" style="grid-template-columns:repeat(3,1fr)" id="accChecks"></div>
+    <div style="margin-top:6px" id="accKvs"></div>
+  </section>
+
+  <!-- ============ P6b · MESSAGE AGE ============ -->
+  <section class="panel s3">
+    <div class="phead"><h2>MESSAGE AGE · PROCESSING TIME</h2><span class="meta">NOT LATENCY</span></div>
+    <div id="latencyRows"><div class="empty">NO SAMPLES</div></div>
+    <div style="margin-top:8px">
+      <span class="lbl">REJECTION DISTRIBUTION</span>
+      <div id="rejectionBars" style="margin-top:3px"><div class="empty">N/A</div></div>
     </div>
   </section>
 
-  <section class="panel replay">
-    <h2>POLYMARKET REPLAY / SHADOW LEDGER</h2>
-    <div class="ledger" id="tradeLedger"></div>
+  <!-- ============ P9a · TRADE LOG ============ -->
+  <section class="panel s4">
+    <div class="phead"><h2>SHADOW TRADE LOG · COMPLETED</h2><span class="meta" id="logMeta">CURRENT CONFIG</span></div>
+    <div class="log" id="tradeLedger"><div class="empty">NO CURRENT CONFIG COMPLETIONS</div></div>
   </section>
 
-  <section class="panel references">
-    <h2>LIVE REFERENCE PRICES</h2>
-    <span class="sub">REFERENCE ONLY FOR COMPLETE SET / REQUIRED QUORUM FOR DIRECTIONAL</span>
-    <div class="refs"><div>ASSET</div><div>BINANCE</div><div>COINBASE</div><div>KRAKEN</div><div>CHAINLINK</div></div>
-    <div class="refs" id="referencePrices"></div>
+  <!-- ============ P9b · CALIBRATION ============ -->
+  <section class="panel s4">
+    <div class="phead"><h2>PROBABILITY CALIBRATION</h2><span class="meta"><span class="chip chip--orange">CALIBRATION ONLY</span></span></div>
+    <div id="calibration"><div class="empty">N/A</div></div>
   </section>
 
-  <section class="panel rejections">
-    <h2>PAIRED LOCK REJECTION DISTRIBUTION</h2>
-    <div id="rejectionReasons"></div>
-    <div class="sub" id="rejectionCoverage"></div>
+  <!-- ============ P9c · RESEARCH ============ -->
+  <section class="panel s4">
+    <div class="phead"><h2>ARBITRAGE RESEARCH</h2><span class="meta"><span class="chip chip--orange">RESEARCH ONLY</span></span></div>
+    <div id="research"><div class="empty">N/A</div></div>
   </section>
 
-  <section class="panel health-panel">
-    <h2>CLOB READY / EXECUTION HEALTH</h2>
-    <div class="health-grid" id="health"></div>
-  </section>
-
-
-  <section class="panel pnl-panel">
-    <h2>PNL METER / CURRENT CONFIG</h2>
-    <div id="pnlMeter"></div>
-  </section>
-
-  <section class="panel latency-panel">
-    <h2>MESSAGE AGE + ENGINE PROCESSING</h2>
-    <div id="latencyRankings"></div>
-  </section>
 </div>
-<footer><span id="footerHealth">SHADOW / NO LIVE ORDERS</span><span>REFRESH 2S / <span id="sync">N/A</span></span></footer>
-</main>
-<script>
-const $=id=>document.getElementById(id);
-const fmt=(v,n=2)=>v==null?'N/A':Number(v).toFixed(n);
-const money=v=>v==null?'N/A':'$'+Number(v).toFixed(2);
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const duration=s=>s==null?'N/A':s<60?fmt(s,0)+'s':s<3600?fmt(s/60,1)+'m':fmt(s/3600,1)+'h';
 
-function equity(points){
-  if(!points?.length)return '<div class="empty">NO COMPLETED SIMULATIONS / CURRENT CONFIG</div>';
-  const w=620,h=200,min=Math.min(...points.map(x=>x.equity)),max=Math.max(...points.map(x=>x.equity)),span=max-min||1;
-  const p=points.map((x,i)=>`${i/(points.length-1||1)*w},${h-(x.equity-min)/span*(h-24)-12}`).join(' ');
-  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="#91ffad" stroke-width="2" points="${p}"/></svg>`;
+<!-- ============ P10 · BOTTOM BAR ============ -->
+<div class="botbar">
+  <div><span class="big" id="bEvals">N/A</span><br><span class="cap">TOTAL EVALUATIONS</span></div>
+  <div class="seg" id="bSeg"><i class="g"></i><i class="o"></i><i class="r"></i></div>
+  <div><span class="cap">ACCEPTS</span><br><b id="bAccepts">N/A</b></div>
+  <div><span class="cap">DUPLICATES</span><br><b id="bDup">N/A</b></div>
+  <div><span class="cap">RESYNCS</span><br><b id="bResync">N/A</b></div>
+  <div><span class="cap">FOK PASSED</span><br><b id="bFok">N/A</b></div>
+  <div class="right">
+    <span id="bUptime">ENGINE N/A</span>
+    <span class="chip chip--green-fill">REAL ORDERS 0</span>
+    <span class="chip chip--green-fill">REAL SUBMISSIONS 0</span>
+  </div>
+</div>
+<footer><span id="footerHealth">SHADOW / NO LIVE ORDERS</span><span>REFRESH 2S · <span id="sync">N/A</span></span></footer>
+</main>
+
+<script>
+'use strict';
+/* ================= helpers ================= */
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const NA='<span class="na">N/A</span>';
+const isNum=v=>v!=null&&v!==''&&isFinite(Number(v));
+const num=(v,n)=>isNum(v)?Number(v).toFixed(n==null?2:n):NA;
+const px=v=>{if(!isNum(v))return NA;const a=Math.abs(Number(v));
+  return a>=1000?Number(v).toLocaleString('en-US',{maximumFractionDigits:2}):a>=100?Number(v).toFixed(2):a>=1?Number(v).toFixed(3):Number(v).toFixed(4);};
+const money=v=>isNum(v)?(Number(v)<0?'-$':'$')+Math.abs(Number(v)).toFixed(2):NA;
+const signMoney=v=>{if(!isNum(v))return NA;const n=Number(v);return '<span class="'+(n>0?'g':n<0?'r':'')+'">'+(n>0?'+':n<0?'-':'')+'$'+Math.abs(n).toFixed(2)+'</span>';};
+const signNum=(v,n,suf)=>{if(!isNum(v))return NA;const x=Number(v);return '<span class="'+(x>0?'g':x<0?'r':'')+'">'+(x>0?'+':'')+x.toFixed(n==null?2:n)+(suf||'')+'</span>';};
+const cnt=v=>isNum(v)?Number(v).toLocaleString('en-US'):NA;
+const dur=s=>{if(!isNum(s))return NA;s=Number(s);return s<60?s.toFixed(0)+'S':s<3600?(s/60).toFixed(1)+'M':(s/3600).toFixed(1)+'H';};
+const fg=(label,val,cls)=>'<div class="fg"><label>'+label+'</label><b class="'+(cls||'')+'">'+val+'</b></div>';
+const cell=(label,val,cls)=>'<div class="cell '+(cls||'')+'"><label>'+label+'</label><b>'+val+'</b></div>';
+const kv=(k,v)=>'<div class="kv"><span>'+k+'</span><b>'+v+'</b></div>';
+function decisionChip(dec){
+  if(!dec)return '<span class="chip chip--gray">NO EVALUATION</span>';
+  const pos=['ACCEPT','ENTRY_EXECUTABLE','EXIT_EXECUTABLE'].indexOf(dec)>=0;
+  return '<span class="chip '+(pos?'chip--green-fill':'chip--red')+'">'+esc(dec)+'</span>';
 }
-function sourceState(v,key){
-  const s=v.sources?.[key];
-  if(!s)return '<span class="na">NOT RECEIVED</span>';
-  const status=(s.status||'NOT_RECEIVED').replace('_',' ');
-  const cls=status==='FRESH'?'good':status==='STALE'||status==='DISCONNECTED'?'warn':'na';
-  return s.price==null?`<span class="${cls}">${status}</span>`:`${fmt(s.price,2)}<small class="sub">${fmt(s.message_age_ms,0)}ms / ${status}</small>`;
+function statusSpan(status){
+  const s=String(status||'NOT_RECEIVED');
+  const cls=s==='FRESH'?'fresh':s==='STALE'?'stale':s==='DISCONNECTED'?'disc':s==='NOT_RECEIVED'?'notrec':'other';
+  return '<span class="st '+cls+'">'+esc(s.replace(/_/g,' '))+'</span>';
 }
-function assetPnlCell(item){
-  if(!item)return '<td class="pnl na" title="NO COMPLETED SHADOW TRADE">N/A</td>';
-  const cls=Number(item.pnl)>0?'good':Number(item.pnl)<0?'bad':'';
-  const tip=`${item.strategy||'N/A'} / ${item.timeframe||'N/A'} / ${item.market_id||'N/A'}`;
-  return `<td class="pnl ${cls}" title="${esc(tip)}">${money(item.pnl)}</td>`;
+function checkCell(label,val){
+  const cls=val==='PASS'?'pass':val==='FAIL'?'fail':'idle';
+  return '<div class="check '+cls+'"><label>'+label+'</label><b>'+(val||'N/A')+'</b></div>';
 }
-function strategyCard(id,title,key,d){
-  const hist=d.strategy_counts?.[key]||{},session=d.session_strategy_counts?.[key]||{};
-  const latest=d.strategy_latest?.[key]||{},perf=d.performance_by_strategy?.[key]||{};
-  const recent=d.strategy_recent?.[key]||{},cal=d.probability_calibration?.[key]||{};
-  const reasons=Object.entries(recent.rejection_reasons||{}).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([k,v])=>`${k} ${v}`).join(' / ');
-  const probability=['late_window_directional_ev','low_price_lottery_ev'].includes(key);
-  let detail='COMPLETE-SET MATH';
-  if(probability){
-    const obs=d.probability_observations?.by_strategy?.[key]||{};
-    detail=`OBS PENDING ${obs.pending??0} / SETTLED ${obs.settled??0} / BRIER ${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)} / CALIBRATION ONLY`;
-  }else if(key==='microstructure_reversion'){
-    detail='REAL ASK ENTRY / FUTURE REAL BID EXIT / BOOK EXECUTABLE != FILL';
+function boolCheck(label,ok){
+  const v=ok==null?'N/A':ok?'PASS':'FAIL';
+  return checkCell(label,v);
+}
+
+/* ================= ticker ================= */
+function renderTicker(d){
+  const evs=(d.events||[]).slice(0,40);
+  if(!evs.length){$('tape').innerHTML='<span class="tk">NO EVENTS</span>';return;}
+  const item=e=>{
+    const dec=e.decision||'EVAL';
+    const pos=['ACCEPT','ENTRY_EXECUTABLE','EXIT_EXECUTABLE'].indexOf(dec)>=0;
+    const strat=String(e.strategy||'').replace('late_window_directional_ev','DIR').replace('low_price_lottery_ev','LOT').replace('paired_lock','PAIR');
+    return '<span class="tk"><b class="'+(pos?'up':'dn')+'">'+esc(dec)+'</b> · '+esc(strat)+' · <b>'+esc(e.asset||'?')+'</b> '+esc(e.timeframe||'')+' · '+(isNum(e.seconds_to_close)?Number(e.seconds_to_close).toFixed(0)+'S':'N/A')+'</span>';
+  };
+  const half=evs.map(item).join('');
+  $('tape').innerHTML=half+half; /* duplicated for seamless marquee */
+}
+
+/* ================= P2 pnl ================= */
+function renderPnl(d){
+  const p=d.performance||{};
+  const hero=$('simPnl');
+  if(isNum(p.simulated_pnl)){
+    hero.textContent=(Number(p.simulated_pnl)<0?'-$':'$')+Math.abs(Number(p.simulated_pnl)).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    hero.className='hero '+(Number(p.simulated_pnl)>=0?'g':'r');
+  }else{hero.textContent='N/A';hero.className='hero na-hero';}
+  $('kCompleted').textContent=isNum(p.completed)?p.completed:'N/A';
+  $('kWL').innerHTML=(isNum(p.wins)||isNum(p.losses))?('<span class="g">'+(p.wins??0)+'</span> / <span class="r">'+(p.losses??0)+'</span>'):NA;
+  $('kWinRate').innerHTML=isNum(p.win_rate)?(Number(p.win_rate)*100).toFixed(1)+'%':'N/A';
+  $('kWinRate').className=isNum(p.win_rate)?'g':'na';
+  $('kSharpe').textContent=isNum(p.sharpe)?Number(p.sharpe).toFixed(2):'N/A';
+  $('kSharpeN').textContent='SAMPLES '+(isNum(p.sharpe_samples)?p.sharpe_samples:'N/A');
+  const curve=d.equity_curve||[];
+  $('eqCount').textContent=curve.length?curve.length+' POINTS':'N/A';
+  if(!curve.length){
+    $('equityChart').innerHTML='<div class="eq-empty">N/A · NO COMPLETED SIMULATIONS</div>';
+  }else{
+    const w=600,h=74,vals=curve.map(x=>Number(x.equity)||0);
+    const min=Math.min.apply(null,vals),max=Math.max.apply(null,vals),span=(max-min)||1;
+    const pts=vals.map((v,i)=>(i/(vals.length-1||1)*w).toFixed(1)+','+(h-8-(v-min)/span*(h-16)).toFixed(1)).join(' ');
+    const last=pts.split(' ').pop().split(',');
+    let grid='';for(let gy=1;gy<=3;gy++){grid+='<line x1="0" y1="'+(h*gy/4)+'" x2="'+w+'" y2="'+(h*gy/4)+'" stroke="rgba(0,0,0,0.06)" stroke-dasharray="3 3"/>';}
+    $('equityChart').innerHTML='<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+grid+
+      '<polygon fill="rgba(11,148,112,0.08)" points="0,'+h+' '+pts+' '+w+','+h+'"/>'+
+      '<polyline fill="none" stroke="#0B9470" stroke-width="1.5" points="'+pts+'"/>'+
+      '<circle cx="'+last[0]+'" cy="'+last[1]+'" r="3" fill="#0B9470"/></svg>';
   }
-  const positive=['ACCEPT','ENTRY_EXECUTABLE','EXIT_EXECUTABLE'].includes(latest.decision);
-  const sizing=`DYNAMIC SIZE ${fmt(latest.dynamic_target_size,2)} / ALL-IN COST ${money(latest.dynamic_all_in_cost)} / CAPITAL BUDGET ${money(latest.capital_budget_usd)} / MAXIMUM LOSS ${money(latest.dynamic_maximum_loss)}<br>MARKET MINIMUM ${fmt(latest.market_minimum_size,2)} / SIZE LIMIT ${esc(latest.size_binding_constraint||'N/A')}`;
-  $(id).innerHTML=`<label>${title}</label><b class="${positive?'good':'warn'}">${latest.decision||'NO EVALUATION'}</b>
-    <div>SESSION EVAL ${session.evaluations??0} / ACCEPT ${session.accepts??0} / REJECT ${session.rejections??0}</div>
-    <div>${detail}</div><div>${sizing}</div><div class="${latest.decision==='ACCEPT'?'good':'warn'}">${esc(latest.reason||'N/A')}</div>
-    <div class="history sub">HISTORY EVAL ${hist.evaluations??0} / SETTLED ${perf.completed??0} / PNL ${money(perf.simulated_pnl)}<br>TOP ${esc(reasons||'N/A')}</div>`;
+  const ledger=d.trade_ledger||[];
+  const lt=ledger.length?ledger[ledger.length-1]:null;
+  $('lastTradeCard').innerHTML='<span class="lbl">LAST COMPLETED</span>'+
+    '<div class="big '+(lt?(Number(lt.pnl)>=0?'g':'r'):'na')+'">'+(lt?money(lt.pnl):'N/A')+'</div>'+
+    '<span class="sub">'+(lt?esc(String(lt.strategy||'').toUpperCase().replace(/_/g,' ')):'NO COMPLETED SIMULATION')+'</span>';
+  const dyn=d.dynamic_sizing||{};
+  const cap=Number(dyn.active_capital_usd),maxLoss=Number(dyn.maximum_loss_usd);
+  $('exposureFill').style.width=(isNum(cap)&&isNum(maxLoss)&&maxLoss>0)?Math.min(100,cap/maxLoss*100)+'%':'0%';
+  $('exposureLbl').textContent='EXPOSURE '+(isNum(cap)?'$'+cap.toFixed(0):'N/A')+' / MAX LOSS '+(isNum(maxLoss)?'$'+maxLoss.toFixed(0):'N/A');
+  const rm=(d.shadow_lifecycle||{}).risk_mode;
+  $('riskMode').textContent=rm?String(rm).toUpperCase():'N/A';
+  $('riskMode').className='chip '+(rm==='normal'?'chip--green':rm?'chip--orange':'chip--gray');
 }
-function renderProbabilityCalibration(d){
-  const names={late_window_directional_ev:'DIRECTIONAL MODEL',low_price_lottery_ev:'LOTTERY MODEL'};
-  $('probabilityCalibration').innerHTML=Object.entries(names).map(([key,name])=>{
-    const cal=d.probability_calibration?.[key]||{},obs=d.probability_observations?.by_strategy?.[key]||{};
-    return `<div class="strategy-card"><label>${name}</label><b>OBSERVATION ONLY</b>
-      <div>PENDING <b>${obs.pending??0}</b> / SETTLED <b>${obs.settled??0}</b></div>
-      <div>BRIER <b>${cal.brier_score==null?'N/A':fmt(cal.brier_score,4)}</b> / LOG LOSS <b>${cal.log_loss==null?'N/A':fmt(cal.log_loss,4)}</b></div>
-      <div>EXPECTED UP ${cal.expected_up_rate==null?'N/A':fmt(cal.expected_up_rate*100,1)+'%'} / REALIZED UP ${cal.realized_up_rate==null?'N/A':fmt(cal.realized_up_rate*100,1)+'%'}</div>
-      <div class="history sub">STRICT ORIGIN ACCEPT ${cal.origin_accepted??0} / REJECT ${cal.origin_rejected??0}<br>OPENS POSITION: FALSE</div></div>`;
+
+/* ================= P6 reference ================= */
+function renderReference(d){
+  const assets=d.reference_prices?d.reference_prices.assets||{}:{};
+  const names=[];
+  Object.keys(assets).forEach(a=>{const src=assets[a]&&assets[a].sources||{};
+    Object.keys(src).forEach(s=>{if(names.indexOf(s)<0)names.push(s);});});
+  names.sort((a,b)=>(a==='chainlink'?1:0)-(b==='chainlink'?1:0)||a.localeCompare(b));
+  const rows=Object.keys(assets).sort();
+  if(!rows.length||!names.length){
+    $('refTable').innerHTML='<div class="empty">N/A · NO REFERENCE DATA</div>';
+  }else{
+    let html='<table><tr><th>ASSET</th>'+names.map(s=>{
+      let mt='';for(const a of rows){const x=assets[a]&&assets[a].sources&&assets[a].sources[s];
+        if(x){mt=(x.market_type||'')+(x.quote_currency?' · '+x.quote_currency:'');break;}}
+      return '<th>'+esc(s.toUpperCase())+'<small>'+esc(mt||'N/A')+'</small></th>';}).join('')+'</tr>';
+    rows.forEach(a=>{
+      html+='<tr><td class="ast">'+esc(a)+'</td>'+names.map(s=>{
+        const x=assets[a]&&assets[a].sources&&assets[a].sources[s];
+        if(!x)return '<td>'+statusSpan('NOT_RECEIVED')+'</td>';
+        const price=isNum(x.price)?px(x.price):null;
+        return '<td>'+(price?'<b>'+price+'</b>':'')+statusSpan(x.status)+
+          '<small>'+(isNum(x.message_age_ms)?Number(x.message_age_ms).toFixed(0)+'MS':'AGE N/A')+(x.symbol?' · '+esc(x.symbol):'')+'</small></td>';
+      }).join('')+'</tr>';
+    });
+    $('refTable').innerHTML=html+'</table>';
+  }
+  /* aggregate for the market of the latest directional event (fallback: first) */
+  const mrs=d.market_reference_states||{};
+  const dirLatest=(d.strategy_latest||{}).late_window_directional_ev||{};
+  let key=dirLatest.market_id&&mrs[dirLatest.market_id]?dirLatest.market_id:Object.keys(mrs)[0];
+  const r=key?mrs[key]:null;
+  if(!r){$('refAgg').innerHTML='<div class="fg"><label>REFERENCE AGGREGATE</label><b class="na">N/A</b></div>';return;}
+  const state=String(r.reference_state||'');
+  $('refAgg').innerHTML=
+    fg('MARKET',esc(String(key).slice(0,14)))+
+    fg('FAST PRICE',px(r.fast_price))+
+    fg('CONSENSUS',px(r.consensus_price))+
+    fg('SETTLEMENT REF',px(r.settlement_reference))+
+    fg('FRESH SOURCES',isNum(r.fresh_exchange_source_count)?r.fresh_exchange_source_count:'N/A')+
+    fg('USD SPOT SRC',isNum(r.fresh_usd_spot_source_count)?r.fresh_usd_spot_source_count:'N/A')+
+    fg('DIVERGENCE',isNum(r.cross_source_divergence_bps)?Number(r.cross_source_divergence_bps).toFixed(1)+' BPS':'N/A')+
+    fg('QUORUM / STATE',(r.reference_quorum_met==null?NA:(r.reference_quorum_met?'<span class="g">MET</span>':'<span class="r">NOT MET</span>'))+' / '+
+      '<span class="'+(state==='REFERENCE_READY'?'g':state==='REFERENCE_DEGRADED'?'o':'r')+'">'+esc(state.replace('REFERENCE_','')||'N/A')+'</span>'+
+      (r.reference_block_reason?'<br><span class="sub">'+esc(r.reference_block_reason)+'</span>':''));
+}
+
+/* ================= P5 pipeline ================= */
+function renderPipeline(d){
+  const labels=[['ingest','INGEST'],['clob_snap','CLOB SNAP'],['replay','REPLAY'],['backtest','BACKTEST'],['validate','VALIDATE'],['approve','APPROVE'],['deploy','DEPLOY']];
+  const pipe=d.pipeline_steps||{};
+  $('pipelineSteps').innerHTML=labels.map((x,i)=>{
+    const v=pipe[x[0]];
+    const cls=v==='PASS'?'pass':v==='BLOCKED'?'block':'na-step';
+    return '<div class="step '+cls+'"><i>0'+(i+1)+'</i><b>'+x[1]+'</b><small>'+(v||'N/A')+'</small></div>';
+  }).join('');
+  const c=d.counts||{},cr=d.clob_readiness||{};
+  $('pipeCounts').innerHTML=
+    '<span>DISCOVERED <b>'+cnt(cr.discovered_markets)+'</b></span>'+
+    '<span>READY <b>'+cnt(cr.paired_markets_ready)+'</b></span>'+
+    '<span>NOT READY <b>'+cnt(cr.not_ready)+'</b></span>'+
+    '<span>WAIT UP <b>'+cnt(cr.waiting_up_snapshot)+'</b></span>'+
+    '<span>WAIT DOWN <b>'+cnt(cr.waiting_down_snapshot)+'</b></span>'+
+    '<span>RESYNCS <b>'+cnt((d.shadow_health||{}).resyncs)+'</b></span>';
+}
+
+/* ================= P4b sizer ================= */
+function renderSizer(d){
+  const pair=d.current_pair||{};
+  $('sizerGrid').innerHTML=
+    fg('TARGET SIZE',num(pair.dynamic_target_size,2),'big')+
+    fg('MARKET MIN',num(pair.market_minimum_size,2),'big')+
+    fg('CAPITAL BUDGET',money(pair.capital_budget_usd))+
+    fg('MAXIMUM LOSS',money(pair.dynamic_maximum_loss))+
+    fg('EXECUTABLE DEPTH',num(pair.executable_depth_size,2))+
+    fg('SLIPPAGE LIMITED',num(pair.slippage_limited_size,2));
+  $('sizerFoot').innerHTML=
+    '<span>SIZING <b>'+esc(pair.sizing_mode||'N/A')+'</b></span>'+
+    '<span>BINDING <b>'+esc(pair.size_binding_constraint||'N/A')+'</b></span>'+
+    '<span>SHADOW CAPITAL <b>'+money(pair.shadow_capital_usd)+'</b></span>';
+}
+
+/* ================= P3 strategies ================= */
+function stratCounts(d,key){
+  const hist=(d.strategy_counts||{})[key]||{},sess=(d.session_strategy_counts||{})[key]||{};
+  const recent=(d.strategy_recent||{})[key]||{};
+  const reasons=Object.entries(recent.rejection_reasons||{}).sort((a,b)=>b[1]-a[1]).slice(0,2)
+    .map(x=>esc(x[0])+' '+x[1]).join(' / ');
+  return '<span>SESSION E <b>'+(sess.evaluations??0)+'</b> A <b>'+(sess.accepts??0)+'</b> R <b>'+(sess.rejections??0)+'</b></span>'+
+    '<span>HISTORY E <b>'+(hist.evaluations??0)+'</b> A <b>'+(hist.accepts??0)+'</b></span>'+
+    '<span>OPP ACT <b>'+(hist.active_opportunities??0)+'</b> UNIQ <b>'+(hist.unique_opportunities??0)+'</b></span>'+
+    '<span>TOP REJ <b>'+(reasons||'N/A')+'</b></span>';
+}
+function renderDirectional(d){
+  const e=(d.strategy_latest||{}).late_window_directional_ev||{};
+  $('dirDecision').innerHTML=decisionChip(e.decision);
+  $('dirMarket').textContent=[e.asset,e.timeframe,e.outcome?String(e.outcome).toUpperCase():null].filter(Boolean).join(' · ')||'N/A';
+  const riskBuf=(isNum(e.latency_risk_buffer)||isNum(e.settlement_risk_buffer))?
+    ((Number(e.latency_risk_buffer)||0)+(Number(e.settlement_risk_buffer)||0)).toFixed(4):NA;
+  $('dirGrid').innerHTML=
+    fg('EST PROB',num(e.estimated_probability,4))+
+    fg('MKT IMPLIED',num(e.market_implied_probability,4))+
+    fg('MKT PRICE',num(e.market_price,4))+
+    fg('EXPECTED FILL',num(e.expected_fill_price,4))+
+    fg('GROSS EDGE',signNum(e.gross_edge,4))+
+    fg('FEES',num(e.fees,4))+
+    fg('SLIPPAGE',num(e.slippage,4))+
+    fg('RISK BUFFER',riskBuf)+
+    fg('NET EV',signNum(e.net_ev,4),'big')+
+    fg('SEC TO CLOSE',num(e.seconds_to_close,0))+
+    fg('REF PRICE',px(e.reference_price))+
+    fg('PRICE TO BEAT',px(e.price_to_beat))+
+    fg('DIST TO BEAT',signNum(e.distance_to_price_to_beat,4))+
+    fg('REF DIVERGENCE',isNum(e.cross_source_divergence_bps)?Number(e.cross_source_divergence_bps).toFixed(1)+' BPS':NA)+
+    fg('QUORUM',e.reference_quorum_met==null?NA:(e.reference_quorum_met?'<span class="g">MET</span>':'<span class="r">NOT MET</span>'))+
+    fg('REASON','<span class="'+(e.decision==='ACCEPT'?'g':'o')+'">'+esc(e.reason||'N/A')+'</span>');
+  $('dirCounts').innerHTML=stratCounts(d,'late_window_directional_ev');
+}
+function renderLottery(d){
+  const e=(d.strategy_latest||{}).low_price_lottery_ev||{};
+  $('lotDecision').innerHTML=decisionChip(e.decision);
+  $('lotMarket').textContent=[e.asset,e.timeframe,e.outcome?String(e.outcome).toUpperCase():null].filter(Boolean).join(' · ')||'N/A';
+  const uncBuf=(isNum(e.model_uncertainty_buffer)||isNum(e.execution_risk_buffer))?
+    ((Number(e.model_uncertainty_buffer)||0)+(Number(e.execution_risk_buffer)||0)).toFixed(4):NA;
+  const cal=(d.probability_calibration||{}).low_price_lottery_ev||{};
+  const perf=(d.performance_by_strategy||{}).low_price_lottery_ev||{};
+  $('lotGrid').innerHTML=
+    fg('EXPECTED FILL',num(e.expected_fill_price,4),'big')+
+    fg('EST PROB',num(e.estimated_probability,4))+
+    fg('NET EV',signNum(e.net_ev,4),'big')+
+    fg('FEES',num(e.fees,4))+
+    fg('SLIPPAGE',num(e.slippage,4))+
+    fg('UNCERTAINTY BUF',uncBuf)+
+    fg('MKT PRICE',num(e.market_price,4))+
+    fg('SEC TO CLOSE',num(e.seconds_to_close,0))+
+    fg('REASON','<span class="'+(e.decision==='ACCEPT'?'g':'o')+'">'+esc(e.reason||'N/A')+'</span>')+
+    fg('CAL SAMPLES',isNum(cal.samples)?cal.samples:0)+
+    fg('REALIZED HIT',isNum(cal.realized_up_rate)?(Number(cal.realized_up_rate)*100).toFixed(1)+'%':NA)+
+    fg('EXPECTED HIT',isNum(cal.expected_up_rate)?(Number(cal.expected_up_rate)*100).toFixed(1)+'%':NA)+
+    fg('BRIER',num(cal.brier_score,4))+
+    fg('WIN RATE',isNum(perf.win_rate)?(Number(perf.win_rate)*100).toFixed(1)+'%':NA)+
+    fg('SHARPE',isNum(perf.sharpe)?Number(perf.sharpe).toFixed(2):NA)+
+    fg('COMPLETED PNL',money(perf.simulated_pnl));
+  $('lotCounts').innerHTML=stratCounts(d,'low_price_lottery_ev')+'<span><b>CALIBRATION ONLY · NOT ORDERS OR PNL</b></span>';
+}
+
+/* ================= P4 paired lock ================= */
+function renderPaired(d){
+  const pair=d.current_pair||{};
+  const latest=(d.strategy_latest||{}).paired_lock||{};
+  const score=d.strategy_score||{};
+  const totalFees=isNum(pair.up_fee)||isNum(pair.down_fee)?(Number(pair.up_fee)||0)+(Number(pair.down_fee)||0):latest.total_fees;
+  const roi=isNum(latest.locked_roi)?latest.locked_roi:(isNum(pair.locked_profit)&&isNum(pair.net_cost)&&Number(pair.net_cost)>0?Number(pair.locked_profit)/Number(pair.net_cost):null);
+  $('pairMarket').textContent=pair.market_id?String(pair.market_id).slice(0,28):'N/A';
+  $('costChain1').innerHTML=
+    cell('UP VWAP',num(pair.up_vwap,4))+
+    cell('DOWN VWAP',num(pair.down_vwap,4))+
+    cell('GROSS COST',money(pair.gross_cost))+
+    cell('UP FEE',num(pair.up_fee,4))+
+    cell('DOWN FEE',num(pair.down_fee,4))+
+    cell('TOTAL FEES',num(totalFees,4))+
+    cell('EXEC BUFFER',money(pair.buffer),'warn');
+  const profitCls=isNum(pair.locked_profit)?(Number(pair.locked_profit)>0?'good':'bad'):'';
+  $('costChain2').innerHTML=
+    cell('NET COST',money(pair.net_cost),'hi')+
+    cell('GUARANTEED PAYOUT',money(pair.guaranteed_payout))+
+    cell('LOCKED PROFIT',money(pair.locked_profit),profitCls)+
+    cell('LOCKED ROI',isNum(roi)?(Number(roi)*100).toFixed(3)+'%':NA,profitCls)+
+    cell('EEV · CONFIG MODEL',money(pair.expected_execution_value||latest.expected_execution_value))+
+    cell('DECISION',latest.decision||pair.decision?esc(latest.decision||pair.decision):NA,(latest.decision||pair.decision)==='ACCEPT'?'good':'bad')+
+    cell('REASON',esc(latest.reason||pair.reason||'N/A'));
+  $('pressureGrid').innerHTML=
+    fg('LEG 1 FILL P · CONFIG',num(latest.leg_1_fill_probability,3))+
+    fg('LEG 2 FILL P · CONFIG',num(latest.leg_2_fill_probability,3))+
+    fg('TIME BETWEEN LEGS',isNum(latest.time_between_legs_us)?(Number(latest.time_between_legs_us)/1000).toFixed(1)+' MS':NA)+
+    fg('ORPHAN LEG LOSS',money(latest.orphan_leg_loss))+
+    fg('UP AGE',isNum(latest.up_age_ms)?Number(latest.up_age_ms).toFixed(0)+' MS':NA)+
+    fg('DOWN AGE',isNum(latest.down_age_ms)?Number(latest.down_age_ms).toFixed(0)+' MS':NA)+
+    fg('BOOK SKEW',isNum(latest.book_skew_ms)?Number(latest.book_skew_ms).toFixed(0)+' MS':NA)+
+    fg('BOOKS SYNCED',latest.books_synced==null?NA:(latest.books_synced?'<span class="g">YES</span>':'<span class="r">NO</span>'));
+  const checks=score.checks||{};
+  $('scoreChecks').innerHTML=
+    checkCell('DEPTH',checks.depth)+checkCell('FRESHNESS',checks.freshness)+
+    checkCell('BOOK SYNC',checks.book_sync)+checkCell('LEG RISK',checks.leg_risk)+
+    checkCell('NET COST',checks.net_cost);
+  $('scoreLbl').textContent='SCORE '+(isNum(score.total)?Number(score.total).toFixed(0):'N/A')+(score.blocked?' · BLOCKED':'');
+  $('pairCounts').innerHTML=stratCounts(d,'paired_lock')+
+    '<span>EEV / FILL PROBABILITIES = <b>配置型压力模型 · CONFIG-MODEL ONLY</b></span>';
+}
+
+/* ================= P7 matrix ================= */
+function renderMatrix(d){
+  const m=d.market_matrix||{},pnls=d.asset_latest_pnl||{};
+  const assets=['BTC','ETH','SOL','XRP','BNB','DOGE','HYPE'],frames=['5m','15m','1h','4h'];
+  let html='<tr><th>ASSET</th>'+frames.map(f=>'<th>'+f.toUpperCase()+'</th>').join('')+'<th>LATEST SIM PNL</th></tr>';
+  assets.forEach(a=>{
+    html+='<tr><td class="hd">'+a+'</td>'+frames.map(f=>{
+      const c=(m[a]||{})[f]||{},n=c.count||0,rr=c.reference_ready||0,rb=c.reference_blocked||0;
+      const cls=!n?'idle':rr>0?'ok':rb>0?'blk':'';
+      return '<td class="'+cls+'">'+(n||'—')+'<small>'+(n?'REF '+rr+'/'+n:'NO MARKET')+'</small></td>';
+    }).join('')+(()=>{const it=pnls[a];
+      if(!it)return '<td class="pnlcell na">N/A</td>';
+      const tip=esc((it.strategy||'')+' / '+(it.timeframe||'')+' / '+(it.market_id||''));
+      return '<td class="pnlcell '+(Number(it.pnl)>0?'g':Number(it.pnl)<0?'r':'')+'" title="'+tip+'">'+money(it.pnl)+'</td>';})()+'</tr>';
+  });
+  $('marketMatrix').innerHTML=html;
+  const cr=d.clob_readiness||{};
+  const identity=isNum(cr.discovered_markets)&&isNum(cr.paired_markets_ready)&&isNum(cr.not_ready)?
+    (Number(cr.paired_markets_ready)+Number(cr.not_ready)===Number(cr.discovered_markets)?'<span class="g">IDENTITY OK</span>':'<span class="r">IDENTITY FAIL</span>'):NA;
+  $('readinessStrip').innerHTML=
+    '<span>DISCOVERED <b>'+cnt(cr.discovered_markets)+'</b></span>'+
+    '<span>PAIRED READY <b>'+cnt(cr.paired_markets_ready)+'</b></span>'+
+    '<span>NOT READY <b>'+cnt(cr.not_ready)+'</b></span>'+
+    '<span>WAIT UP <b>'+cnt(cr.waiting_up_snapshot)+'</b></span>'+
+    '<span>WAIT DOWN <b>'+cnt(cr.waiting_down_snapshot)+'</b></span>'+
+    '<span>READY+NOT_READY = DISCOVERED <b>'+identity+'</b></span>';
+}
+
+/* ================= P8 acceptance ================= */
+function renderAcceptance(d){
+  const rep=d.shadow_report||{},cr=d.clob_readiness||{};
+  const exec=d.shadow_execution||{},life=d.shadow_lifecycle||{},c=d.counts||{},h=d.shadow_health||{};
+  const evals=rep.evaluations,acc=rep.accepted_evaluations,rej=rep.rejected_evaluations;
+  const reasonSum=Object.values(rep.rejection_reasons||{}).reduce((a,b)=>a+Number(b)||0,0);
+  const realZero=[c.executed_orders,exec.real_orders,exec.real_order_submissions,exec.real_fills,life.real_orders,life.real_order_submissions,life.real_fills]
+    .every(v=>v==null||Number(v)===0);
+  const checks=[
+    ['ACC+REJ=EVAL',isNum(evals)&&isNum(acc)&&isNum(rej)?Number(acc)+Number(rej)===Number(evals):null],
+    ['ΣREASONS=REJ',isNum(rej)?reasonSum===Number(rej):null],
+    ['READY IDENTITY',isNum(cr.discovered_markets)?Number(cr.paired_markets_ready||0)+Number(cr.not_ready||0)===Number(cr.discovered_markets):null],
+    ['REAL=0',realZero],
+    ['DUP EVENTS=0',isNum(rep.duplicate_events)?Number(rep.duplicate_events)===0:null],
+    ['ANALYTICS',d.analytics_status==='READY'?true:d.analytics_status?false:null]
+  ];
+  $('accChecks').innerHTML=checks.map(x=>boolCheck(x[0],x[1])).join('');
+  let verdict;
+  if(!Number(cr.discovered_markets)||!Number(evals))verdict=['INCOMPLETE','chip--orange'];
+  else if(checks.every(x=>x[1]===true))verdict=['PASS','chip--green-fill'];
+  else verdict=['FAIL','chip--red-fill'];
+  $('accVerdict').innerHTML='<span class="chip '+verdict[1]+'">'+verdict[0]+'</span>';
+  $('accKvs').innerHTML=
+    kv('EVALUATIONS',cnt(evals))+
+    kv('ACCEPTED / REJECTED',(isNum(acc)?acc:'N/A')+' / '+(isNum(rej)?rej:'N/A'))+
+    kv('DUPLICATE EVENTS',cnt(rep.duplicate_events))+
+    kv('INVALID JSON',cnt(rep.invalid_json))+
+    kv('REF IPC AGE P95',isNum(h.reference_ipc_receive_age_ms_p95)?Number(h.reference_ipc_receive_age_ms_p95).toFixed(1)+' MS (BUDGET 50)':NA)+
+    kv('CLOB→STRATEGY P95',isNum(h.clob_to_strategy_evaluation_us_p95)?Number(h.clob_to_strategy_evaluation_us_p95).toFixed(0)+' US (BUDGET 5000)':NA)+
+    kv('WS SESSION / RESYNCS',(h.ws_session_id?esc(String(h.ws_session_id).slice(-8)):'N/A')+' / '+(isNum(h.resyncs)?h.resyncs:'N/A'));
+}
+
+/* ================= P6b message age + rejections ================= */
+function renderLatency(d){
+  const lat=d.latency_rankings||{};
+  const rows=Object.entries(lat);
+  if(!rows.length){$('latencyRows').innerHTML='<div class="empty">NO SAMPLES</div>';}
+  else{
+    const maxV=Math.max.apply(null,[1].concat(rows.map(x=>Number(x[1].p95)||Number(x[1].latest)||0)));
+    $('latencyRows').innerHTML=rows.map(x=>{
+      const v=x[1],val=isNum(v.p95)?Number(v.p95):isNum(v.latest)?Number(v.latest):null;
+      const metric=v.metric==='processing_time'?'PROC TIME':'MSG AGE';
+      return '<div class="bar-row"><span class="nm">'+esc(String(x[0]).toUpperCase())+' · '+metric+'</span>'+
+        '<div class="meter"><i style="width:'+(val==null?0:Math.min(100,val/maxV*100))+'%"></i></div>'+
+        '<b>'+(val==null?'N/A':val.toFixed(1)+esc(v.unit||''))+'</b></div>';
+    }).join('');
+  }
+  const reasons=d.rejection_reasons||{};
+  const total=Object.values(reasons).reduce((a,b)=>a+Number(b)||0,0);
+  const shown=Object.entries(reasons).sort((a,b)=>b[1]-a[1]).slice(0,6);
+  $('rejectionBars').innerHTML=shown.length?shown.map(x=>
+    '<div class="bar-row"><span class="nm">'+esc(x[0])+'</span>'+
+    '<div class="meter"><i class="warn" style="width:'+(total?x[1]/total*100:0)+'%"></i></div>'+
+    '<b>'+x[1]+'</b></div>').join(''):'<div class="empty">N/A</div>';
+}
+
+/* ================= P9 log / calibration / research ================= */
+function renderLog(d){
+  const ledger=d.trade_ledger||[];
+  $('logMeta').textContent=ledger.length?ledger.length+' COMPLETED':'CURRENT CONFIG';
+  if(!ledger.length){$('tradeLedger').innerHTML='<div class="empty">NO CURRENT CONFIG COMPLETIONS</div>';return;}
+  $('tradeLedger').innerHTML=ledger.slice(-60).reverse().map(x=>{
+    const pos=Number(x.pnl)>=0;
+    return '<div class="trow"><span class="ts">'+(isNum(x.ts)?new Date(Number(x.ts)*1000).toLocaleTimeString('en-GB'):'N/A')+'</span>'+
+      '<span class="yn '+(pos?'y':'n')+'">'+(pos?'WIN':'LOSS')+'</span>'+
+      '<span class="mkt">'+esc(String(x.market_id||'').slice(0,22))+'</span>'+
+      '<span class="val '+(pos?'g':'r')+'">'+money(x.pnl)+'<small>'+esc(String(x.strategy||'').replace(/_/g,' '))+'</small></span></div>';
   }).join('');
 }
-function renderArbitrageResearch(research){
-  const names={paired_lock:'BUY BOTH + MERGE',split_sell_lock:'SPLIT + SELL BOTH',maker_complete_set_arb:'MAKER COMPLETE SET'};
-  $('arbitrageFunnels').innerHTML=`<div class="strategy-card"><label>RESEARCH CONCLUSION</label><b class="${research.no_repeatable_arbitrage?'warn':'good'}">${esc(research.conclusion||'NO REPEATABLE ARBITRAGE FOUND')}</b><div>BOOK EXECUTABLE != FILL</div><div>REAL ORDERS 0 / REAL PNL N/A</div></div>`+Object.entries(research.funnels||{}).map(([key,x])=>`<div class="strategy-card">
-    <label>${names[key]||esc(key)}</label>
-    <div>EVALUATIONS <b>${x.evaluations??'N/A'}</b></div>
-    <div>DEPTH PASSED <b>${x.depth_passed??'N/A'}</b></div>
-    <div>FEE PASSED <b>${x.fee_passed??'N/A'}</b></div>
-    <div>LATENCY SURVIVED <b>${x.latency_survived??'N/A'}</b></div>
-    <div>INDEPENDENT EPISODES <b>${x.independent_episodes??'N/A'}</b></div>
-    <div>ATTEMPTS <b>${x.shadow_attempts??'N/A'}</b></div>
-    <div>LEG 1 BOOK EXEC <b>${x.leg_1_book_executable??'N/A'}</b></div>
-    <div>BOTH BOOK EXEC <b>${x.both_legs_book_executable??'N/A'}</b></div>
-    <div>ORPHAN <b>${x.orphaned??0}</b> / INVALID <b>${x.invalidated??0}</b></div>
-  </div>`).join('')||'<span class="na">NO ARBITRAGE AUDIT</span>';
-  $('repeatablePatterns').innerHTML=(research.repeatable_patterns||[]).slice(0,12).map(x=>`<div class="near-row">
-    <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span><span>${esc(names[x.strategy]||x.strategy||'N/A')}</span>
-    <span>${x.independent_episodes??0} EP / ${x.distinct_close_windows??0} WINDOWS</span>
-    <span>${fmt(x.target_size,2)} Q / ${fmt(x.delay_ms,0)}ms / ${esc(x.leg_order||'N/A')}</span>
-    <span>BOOK EXEC ${fmt(x.book_executable_rate==null?null:x.book_executable_rate*100,1)}% / CAP ${fmt(x.profitable_capacity,2)}</span>
-    <b class="${['OUT_OF_SAMPLE_VALIDATED','RESEARCH_CANDIDATE','MAKER_RESEARCH_CANDIDATE'].includes(x.classification)?'good':'warn'}">${esc(x.classification||'OBSERVED')}</b>
-  </div>`).join('')||'<div class="empty" style="height:45px">NO INDEPENDENT EPISODE YET</div>';
-  $('counterfactualPatterns').innerHTML=(research.counterfactual_patterns||[]).slice(0,12).map(x=>`<div class="near-row">
-    <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span><span>${esc(names[x.strategy]||x.strategy||'N/A')}</span>
-    <span>${fmt(x.target_size,2)} Q / ${fmt(x.delay_ms,0)}ms</span>
-    <span>${x.qualified_observations??0}/${x.observations??0} QUALIFIED</span>
-    <b class="${x.independent_episodes>0?'good':'warn'}">${x.independent_episodes??0} EP</b>
-  </div>`).join('')||'<div class="empty" style="height:45px">NO COUNTERFACTUAL OBSERVATION YET</div>';
+function renderCalibration(d){
+  const cal=d.probability_calibration||{},obs=(d.probability_observations||{}).by_strategy||{};
+  const names=[['late_window_directional_ev','DIRECTIONAL MODEL'],['low_price_lottery_ev','LOTTERY MODEL']];
+  $('calibration').innerHTML=names.map(n=>{
+    const c=cal[n[0]]||{},o=obs[n[0]]||{};
+    return '<div style="border:1px solid var(--line);padding:6px 8px;margin-bottom:5px">'+
+      '<div class="strat-head"><b style="font:700 9px var(--font-mono);letter-spacing:.1em">'+n[1]+'</b><span class="chip chip--orange">OBS ONLY</span></div>'+
+      '<div class="field-grid" style="grid-template-columns:repeat(3,1fr)">'+
+      fg('PENDING',o.pending??0)+fg('SETTLED',o.settled??0)+fg('SAMPLES',c.samples??0)+
+      fg('BRIER',num(c.brier_score,4))+fg('LOG LOSS',num(c.log_loss,4))+
+      fg('EXP/REAL UP',(isNum(c.expected_up_rate)?(Number(c.expected_up_rate)*100).toFixed(1)+'%':NA)+' / '+(isNum(c.realized_up_rate)?(Number(c.realized_up_rate)*100).toFixed(1)+'%':NA))+
+      '</div></div>';
+  }).join('')+'<span class="sub">CALIBRATION ONLY · NOT ORDERS OR PNL · STRICT ACCEPT REMAINS SEPARATE</span>';
 }
+function renderResearch(d){
+  const r=d.arbitrage_research||{},f=r.funnels||{};
+  const names={paired_lock:'PAIRED LOCK',split_sell_lock:'SPLIT+SELL',maker_complete_set_arb:'MAKER COMPLETE SET'};
+  const keys=Object.keys(f);
+  let html='';
+  keys.forEach(k=>{const x=f[k]||{};
+    html+='<div style="border:1px solid var(--line);padding:5px 8px;margin-bottom:5px">'+
+      '<b style="font:700 9px var(--font-mono);letter-spacing:.1em">'+esc(names[k]||k)+'</b>'+
+      '<div class="counts-strip" style="border:0;margin-top:3px;padding-top:0">'+
+      '<span>EVAL <b>'+(x.evaluations??'N/A')+'</b></span><span>EPISODES <b>'+(x.independent_episodes??'N/A')+'</b></span>'+
+      '<span>ATTEMPTS <b>'+(x.shadow_attempts??'N/A')+'</b></span><span>COMPLETED <b>'+(x.completed??'N/A')+'</b></span>'+
+      '<span>ORPHAN <b>'+(x.orphaned??0)+'</b></span></div></div>';});
+  if(keys.length||r.conclusion){
+    html+='<div class="sub">CONCLUSION: '+esc(r.conclusion||'N/A')+' · RESEARCH ONLY · BOOK EXECUTABLE ≠ FILL</div>';
+    $('research').innerHTML=html;
+  }else{$('research').innerHTML='<div class="empty">N/A · NO ARBITRAGE AUDIT</div>';}
+}
+
+/* ================= header / bottom ================= */
+function renderChrome(d){
+  const c=d.counts||{},cr=d.clob_readiness||{},rep=d.shadow_report||{},sess=d.engine_session||{},h=d.shadow_health||{};
+  $('hDisc').textContent=isNum(cr.discovered_markets)?cr.discovered_markets:'N/A';
+  $('hReady').textContent=isNum(cr.paired_markets_ready)?cr.paired_markets_ready:'N/A';
+  $('hEvals').textContent=isNum(sess.evaluations)?sess.evaluations:'N/A';
+  $('hAccepts').textContent=isNum(c.shadow_accepts)?c.shadow_accepts:'N/A';
+  $('hDup').textContent=isNum(rep.duplicate_events)?rep.duplicate_events:'N/A';
+  $('hReal').textContent=isNum(c.executed_orders)?c.executed_orders:0;
+  const sys=d.system_status||'BLOCKED';
+  $('sysChip').textContent=sys+' / SHADOW';
+  $('sysChip').className='chip '+(sys==='ONLINE'?'chip--green-fill':sys==='DEGRADED'?'chip--orange':'chip--red-fill');
+  $('modeChip').textContent=d.mode||'DRY RUN';
+  const lat=(d.latency_rankings||{}).polymarket||{};
+  $('msgAge').textContent='MSG AGE '+(isNum(lat.latest)?Number(lat.latest).toFixed(0)+(lat.unit||'ms').toUpperCase():'N/A');
+  if(isNum(d.ts)){$('clock').innerHTML=new Date(Number(d.ts)*1000).toISOString().slice(11,19)+'<small> UTC</small>';
+    $('sync').textContent=new Date(Number(d.ts)*1000).toLocaleTimeString();}
+  $('rankbar').innerHTML=
+    '<span>SYSTEM <b>'+esc(sys)+'</b></span>'+
+    '<span>ENGINE <b>'+(h.ws_connected?'<span class="g">WS CONNECTED</span>':'<span class="r">WS BLOCKED</span>')+'</b></span>'+
+    '<span>RUN <b>'+(sess.run_id?esc(String(sess.run_id).slice(-10)):'N/A')+'</b></span>'+
+    '<span>AGE <b>'+dur(sess.age_seconds)+'</b></span>'+
+    '<span>ANALYTICS <b>'+esc(d.analytics_status||'N/A')+'</b></span>'+
+    '<span>GEN <b>'+(isNum(h.subscription_generation)?h.subscription_generation:'N/A')+'</b></span>'+
+    '<span>STATE <b>'+esc((d.shadow_execution||{}).state||'IDLE')+'</b></span>'+
+    (d.analytics_refreshing?'<span class="o">ANALYTICS REBUILDING</span>':'');
+  const evals=rep.evaluations,accN=rep.accepted_evaluations,rejN=rep.rejected_evaluations,dup=rep.duplicate_events;
+  $('bEvals').textContent=isNum(evals)?Number(evals).toLocaleString('en-US'):'N/A';
+  $('bAccepts').textContent=isNum(accN)?accN:'N/A';
+  $('bDup').textContent=isNum(dup)?dup:'N/A';
+  $('bResync').textContent=isNum(h.resyncs)?h.resyncs:'N/A';
+  $('bFok').textContent=isNum(rep.fok_passed)?rep.fok_passed:'N/A';
+  const tot=(Number(accN)||0)+(Number(rejN)||0)+(Number(dup)||0);
+  if(tot>0){
+    const gw=Math.max(6,Math.round((Number(accN)||0)/tot*120)),ow=Math.max(4,Math.round((Number(dup)||0)/tot*120)),rw=Math.max(6,Math.round((Number(rejN)||0)/tot*120));
+    $('bSeg').innerHTML='<i class="g" style="width:'+gw+'px"></i><i class="o" style="width:'+ow+'px"></i><i class="r" style="width:'+rw+'px"></i>';
+  }
+  $('bUptime').textContent='ENGINE '+(isNum(sess.age_seconds)?dur(sess.age_seconds):'N/A');
+  $('footerHealth').textContent='WS '+(h.ws_connected?'CONNECTED':'BLOCKED')+' · SESSION '+(sess.run_id?String(sess.run_id).slice(-8):'N/A')+' · REAL SUBMISSIONS '+((d.shadow_execution||{}).real_order_submissions??0)+(d.analytics_refreshing?' · ANALYTICS REFRESHING':'');
+}
+
+/* ================= main ================= */
 function render(d){
-  const c=d.counts||{},p=d.performance||{},session=d.engine_session||{},m=d.market_matrix||{};
-  const assets=['BTC','ETH','SOL','XRP','BNB','DOGE','HYPE'],frames=['5m','15m','1h','4h'];
-  const refs=d.reference_prices?d.reference_prices.assets||{}:{},life=d.shadow_lifecycle||{},health=d.shadow_health||{};
-  $('status').textContent=(d.system_status||'BLOCKED')+' / SHADOW';
-  $('sync').textContent=new Date((d.ts||0)*1000).toLocaleTimeString();
-  $('markets').textContent=assets.reduce((n,a)=>n+frames.reduce((q,f)=>q+Number(m[a]?.[f]?.count||0),0),0);
-  $('raw').textContent=session.evaluations??'N/A';
-  $('pairedEvals').textContent=session.strategy_counts?.paired_lock?.evaluations??'N/A';
-  $('repeatableCount').textContent=(d.arbitrage_research?.repeatable_patterns||[]).length;
-  $('makerQuotes').textContent=c.maker_quote_geometry_candidates??'N/A';
-  $('lockedComplete').textContent=c.locked_complete??'N/A';
-  $('realOrders').textContent=c.executed_orders??0;
-  $('simPnl').textContent=money(p.simulated_pnl);
-  $('winRate').textContent=p.win_rate==null?'N/A':fmt(p.win_rate*100,1)+'%';
-  $('sharpe').textContent=fmt(p.sharpe,2);
-  $('sharpeSamples').textContent=(p.completed??0)+' COMPLETED TRADES';
-  $('sessionRun').textContent=session.run_id?String(session.run_id).slice(-10):'N/A';
-  $('sessionAge').textContent=duration(session.age_seconds);
-  $('analyticsState').textContent=d.analytics_status||'N/A';
-  $('historicalExcluded').textContent=life.historical_completed_excluded??0;
-  $('equityChart').innerHTML=equity(d.equity_curve);
-
-  const pair=d.current_pair||{},score=d.strategy_score||{checks:{}},checks=score.checks||{};
-  $('currentMarket').textContent=pair.market_id?String(pair.market_id).slice(0,24):'N/A';
-  $('upVwap').textContent=fmt(pair.up_vwap,3);$('downVwap').textContent=fmt(pair.down_vwap,3);
-  $('eev').textContent=money(pair.expected_execution_value);$('lockedProfit').textContent=money(pair.locked_profit);
-  $('strategyScore').textContent=fmt(score.total,0);
-  $('scoreBreakdown').innerHTML=Object.entries({DEPTH:checks.depth,FRESH:checks.freshness,'BOOK SYNC':checks.book_sync,'LEG RISK':checks.leg_risk,'NET COST':checks.net_cost}).map(([k,v])=>`<div class="check ${v==='PASS'?'good':v==='FAIL'?'warn':''}"><label>${k}</label>${v||'N/A'}</div>`).join('');
-  $('pairAudit').innerHTML=`<div><label>GROSS COST / FEES / BUFFER</label><b>${money(pair.gross_cost)} / ${money((pair.up_fee??0)+(pair.down_fee??0))} / ${money(pair.buffer)}</b></div>
-    <div><label>NET COST</label><b>${money(pair.net_cost)}</b></div><div><label>GUARANTEED PAYOUT</label><b>${money(pair.guaranteed_payout)}</b></div>
-    <div><label>LOCKED PROFIT</label><b>${money(pair.locked_profit)}</b></div><div><label>DYNAMIC SIZE / MARKET MINIMUM</label><b>${fmt(pair.dynamic_target_size,2)} / ${fmt(pair.market_minimum_size,2)}</b></div>
-    <div><label>CAPITAL BUDGET / MAXIMUM LOSS</label><b>${money(pair.capital_budget_usd)} / ${money(pair.dynamic_maximum_loss)}</b></div><div><label>SIZE LIMIT</label><b>${esc(pair.size_binding_constraint||'N/A')}</b></div>
-    <div><label>DECISION</label><b class="${pair.decision==='ACCEPT'?'good':'warn'}">${pair.decision||'N/A'}<small class="sub">${esc(pair.reason||'N/A')}</small></b></div>`;
-
-  strategyCard('directionalCard','DIRECTIONAL EV','late_window_directional_ev',d);
-  strategyCard('lotteryCard','LOW-PRICE LOTTERY','low_price_lottery_ev',d);
-  strategyCard('pairedCard','BUY BOTH + MERGE','paired_lock',d);
-  strategyCard('reversionCard','DISCOUNT BUY + PROFIT EXIT','microstructure_reversion',d);
-  renderProbabilityCalibration(d);
-  $('splitSellNearMisses').innerHTML=(d.split_sell_near_misses||[]).map(x=>`<div class="near-row">
-    <b>${esc(x.asset||'N/A')}</b><span>${esc(x.timeframe||'N/A')}</span>
-    <span>${fmt(x.combined_bid_vwap,4)} / NEED ${fmt(x.observed_profit_threshold_bid_sum,4)}</span>
-    <b class="warn">${money(x.profit_threshold_shortfall)}</b>
-    <span>${fmt(x.required_gross_improvement_bps,1)} bps</span>
-  </div>`).join('')||'<div class="empty" style="height:45px">NO ELIGIBLE NEAR-MISS SAMPLE</div>';
-  renderArbitrageResearch(d.arbitrage_research||{});
-
-  const labels={ingest:'INGEST',clob_snap:'CLOB SNAP',replay:'REPLAY',backtest:'BACKTEST',validate:'VALIDATE',approve:'APPROVE',deploy:'DEPLOY'},pipeline=d.pipeline_steps||{};
-  $('pipelineSteps').innerHTML=Object.entries(labels).map(([k,x],i)=>`<div class="step ${pipeline[k]==='PASS'?'on':pipeline[k]==='BLOCKED'?'block':''}"><i>0${i+1}</i>${x}<small class="sub">${pipeline[k]||'N/A'}</small></div>`).join('');
-  $('tradeLedger').innerHTML=(d.trade_ledger||[]).map(x=>`<div class="trade"><span>${esc(String(x.market_id||'').slice(0,20))}</span><span>${new Date(x.ts*1000).toLocaleTimeString()}</span><b class="${Number(x.pnl)>=0?'good':'bad'}">${money(x.pnl)}</b><span>${esc(x.strategy||'N/A')}</span></div>`).join('')||'<div class="empty">NO CURRENT CONFIG COMPLETIONS</div>';
-
-  const assetPnls=d.asset_latest_pnl||{};
-  $('marketMatrix').innerHTML='<tr><th>ASSET</th>'+frames.map(f=>`<th>${f.toUpperCase()}</th>`).join('')+'<th>LATEST SIM PNL</th></tr>'+assets.map(a=>'<tr><td>'+a+'</td>'+frames.map(f=>{const cell=m[a]?.[f]||{},ready=cell.reference_ready??0,total=cell.count??0;return `<td class="${total?'hot':''}">${total}<small class="sub">DIR REF ${ready}/${total}</small></td>`}).join('')+assetPnlCell(assetPnls[a])+'</tr>').join('');
-  $('referencePrices').innerHTML=assets.map(a=>{const v=refs[a]||{};return `<div>${a}</div>${['binance','coinbase','kraken','chainlink'].map(s=>`<div>${sourceState(v,s)}</div>`).join('')}`}).join('');
-
-  const reasons=d.rejection_reasons||{},totalReject=Object.values(reasons).reduce((a,b)=>a+b,0),shown=Object.entries(reasons).sort((a,b)=>b[1]-a[1]).slice(0,8),shownCount=shown.reduce((n,x)=>n+x[1],0);
-  $('rejectionReasons').innerHTML=shown.map(([k,v])=>`<div class="bar"><span>${esc(k)}</span><div class="track"><div class="fill" style="width:${totalReject?v/totalReject*100:0}%"></div></div><b>${v}</b></div>`).join('')||'<span class="na">N/A</span>';
-  $('rejectionCoverage').textContent=`SHOWN ${shownCount} / TOTAL ${totalReject} / OTHER ${totalReject-shownCount}`;
-
-  const cr=d.clob_readiness||{},execution=d.shadow_execution||{};
-  const dyn=d.dynamic_sizing||{};
-  const healthRows=[['DISCOVERED',cr.discovered_markets],['PAIRED MARKETS READY',cr.paired_markets_ready],['NOT READY',cr.not_ready],['WAIT UP',cr.waiting_up_snapshot],['WAIT DOWN',cr.waiting_down_snapshot],['DYNAMIC POSITIONS',dyn.active_positions],['ACTIVE CAPITAL',money(dyn.active_capital_usd)],['MAXIMUM LOSS',money(dyn.maximum_loss_usd)],['SUBSCRIPTION GEN',health.subscription_generation],['WS SESSION',health.ws_session_id],['RESYNCS',health.resyncs],['MAKER GEOMETRY',c.maker_quote_geometry_candidates],['TRADE EVENTS',c.maker_trade_events],['ONE-LEG THROUGH',c.maker_single_leg_trade_throughs],['BOTH-LEGS THROUGH',c.maker_both_leg_trade_throughs],['AUDIT QUEUE',health.strategy_audit_queue],['BACKPRESSURE',health.strategy_audit_backpressure],['EXECUTION STATE',execution.state||'IDLE'],['REAL FILLS',execution.real_fills??0]];
-  $('health').innerHTML=healthRows.map(x=>`<div class="health-row"><span>${x[0]}</span><b>${x[1]??'N/A'}</b></div>`).join('');
-
-  const maxEquity=Math.max(1,...(d.equity_curve||[]).map(x=>Math.abs(Number(x.equity)||0))),pnl=Number(p.simulated_pnl||0);
-  $('pnlMeter').innerHTML=`<div class="pnl-meter"><span>SIM PNL</span><div class="track"><div class="fill" style="width:${Math.min(100,Math.abs(pnl)/maxEquity*100)}%"></div></div><b class="${pnl>=0?'good':'bad'}">${money(p.simulated_pnl)}</b></div>
-    <div class="pnl-meter"><span>COMPLETED</span><div class="track"><div class="fill" style="width:${Math.min(100,Number(p.completed||0))}%"></div></div><b>${p.completed??0}</b></div>`;
-
-  const lat=d.latency_rankings||{},latRows=Object.entries(lat),maxLatency=Math.max(1,...latRows.map(([,v])=>Number(v.latest)||0));
-  $('latencyRankings').innerHTML=latRows.map(([name,v])=>`<div class="latency-row"><span>${name.toUpperCase()}</span><div class="track"><div class="fill" style="width:${v.latest==null?0:Number(v.latest)/maxLatency*100}%"></div></div><b>${v.latest==null?'N/A':fmt(v.latest,1)+v.unit}</b></div>`).join('')||'<span class="na">NO OBSERVED SAMPLES</span>';
-  $('footerHealth').textContent=`WS ${health.ws_connected?'CONNECTED':'BLOCKED'} / SESSION ${session.run_id?String(session.run_id).slice(-8):'N/A'} / REAL SUBMISSIONS ${execution.real_order_submissions??0}${d.analytics_refreshing?' / ANALYTICS REFRESHING':''}`;
+  renderChrome(d);
+  renderTicker(d);
+  renderPnl(d);
+  renderReference(d);
+  renderPipeline(d);
+  renderSizer(d);
+  renderDirectional(d);
+  renderLottery(d);
+  renderPaired(d);
+  renderMatrix(d);
+  renderAcceptance(d);
+  renderLatency(d);
+  renderLog(d);
+  renderCalibration(d);
+  renderResearch(d);
 }
 async function refresh(){
-  try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error(r.status);render(await r.json())}
-  catch(e){$('status').textContent='OFFLINE / SHADOW'}
+  try{
+    const r=await fetch('/api/status',{cache:'no-store'});
+    if(!r.ok)throw new Error(String(r.status));
+    render(await r.json());
+  }catch(e){
+    $('sysChip').textContent='OFFLINE / SHADOW';
+    $('sysChip').className='chip chip--red-fill';
+  }
 }
-refresh();setInterval(refresh,2000);
+refresh();
+setInterval(refresh,2000);
 </script>
 </body>
 </html>

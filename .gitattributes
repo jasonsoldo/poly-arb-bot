@@ -1,0 +1,5 @@
+# Linux VPS executes these files directly (bash / systemd / logrotate).
+# CRLF breaks bash scripts and systemd unit parsing on Linux, so they must
+# be stored and checked out with LF line endings on every platform.
+*.sh text eol=lf
+deploy/* text eol=lf

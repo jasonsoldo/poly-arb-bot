@@ -57,6 +57,21 @@ execution_pid=""
 ev_pid=""
 trap 'kill "$scanner_pid" "$reference_pid" "$execution_pid" "$ev_pid" 2>/dev/null || true' EXIT INT TERM
 
+# Windows/MSYS2 OpenSSL has no default CA store; point the C++ engines at a CA
+# bundle when SSL_CERT_FILE is not already provided (Linux VPS is unaffected
+# because none of the candidate paths exist there).
+if [[ -z "${SSL_CERT_FILE:-}" ]]; then
+  for ca_bundle in \
+    "/c/Program Files/Git/usr/ssl/certs/ca-bundle.crt" \
+    "${PROGRAMFILES:-}/Git/usr/ssl/certs/ca-bundle.crt" \
+    /etc/ssl/certs/ca-certificates.crt; do
+    if [[ -f "$ca_bundle" ]]; then
+      export SSL_CERT_FILE="$ca_bundle"
+      break
+    fi
+  done
+fi
+
 reference_socket="${REFERENCE_IPC_PATH:-state/reference-price.sock}"
 mkdir -p "$(dirname "$reference_socket")"
 rm -f "$reference_socket"

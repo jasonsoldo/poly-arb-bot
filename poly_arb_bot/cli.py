@@ -878,11 +878,12 @@ def main() -> int:
             "shadow-acceptance",
             "strategy-calibration",
             "probability-calibration",
+            "paired-opportunity-report",
         ],
     )
     parser.add_argument("--snapshot", default="data/sample_live_snapshot.json")
     parser.add_argument("--markets", default="data/live_markets.example.json")
-    parser.add_argument("--output", default="data/live_snapshot.json")
+    parser.add_argument("--output")
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--binance-base-url", default="https://data-api.binance.vision")
     parser.add_argument("--gamma-base-url", default="https://gamma-api.polymarket.com")
@@ -908,6 +909,13 @@ def main() -> int:
     parser.add_argument("--execution-log", default="logs/shadow-execution.jsonl")
     parser.add_argument("--config-hash", default="latest")
     parser.add_argument("--verify-official", action="store_true")
+    parser.add_argument("--audit-file", default="logs/shadow-audit.jsonl")
+    parser.add_argument("--report-state", default="state/paired-opportunity-report.json")
+    parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--top-reasons", type=int, default=10)
+    parser.add_argument("--min-seconds-to-close", type=float, default=20.0)
+    parser.add_argument("--opportunity-threshold", type=float, default=1.0)
+    parser.add_argument("--max-run-gap-seconds", type=float, default=30.0)
     args = parser.parse_args()
     if args.command == "web-monitor":
         serve(args.host, args.port, Path("web"), Path("data"), Path(args.log_file), Path(args.state_file or "state/orders.json"))
@@ -926,6 +934,20 @@ def main() -> int:
     if args.command == "probability-calibration":
         from .strategy_calibration import probability_main
         return probability_main(args.execution_log, args.config_hash)
+    if args.command == "paired-opportunity-report":
+        from .paired_opportunity_report import PairedReportConfig, run_report
+        return run_report(
+            args.audit_file,
+            config=PairedReportConfig(
+                min_seconds_to_close=args.min_seconds_to_close,
+                opportunity_threshold=args.opportunity_threshold,
+                max_run_gap_seconds=args.max_run_gap_seconds,
+                top_reasons=args.top_reasons,
+            ),
+            watch=args.watch,
+            state_path=args.report_state,
+            json_output=args.output,
+        )
 
     if args.command == "simulate":
         return run_simulation(
@@ -937,19 +959,19 @@ def main() -> int:
             log_file=Path(args.log_file),
         )
     if args.command == "live-snapshot":
-        return write_live_snapshot(Path(args.markets), Path(args.output), args.binance_base_url)
+        return write_live_snapshot(Path(args.markets), Path(args.output or "data/live_snapshot.json"), args.binance_base_url)
     if args.command == "scan-markets":
-        return scan_markets(Path(args.output), args.gamma_base_url, args.limit)
+        return scan_markets(Path(args.output or "data/live_snapshot.json"), args.gamma_base_url, args.limit)
     if args.command == "scan-updown":
-        return scan_updown_markets(Path(args.output), args.gamma_base_url, args.intervals, args.slug_window, args.base_ts)
+        return scan_updown_markets(Path(args.output or "data/live_snapshot.json"), args.gamma_base_url, args.intervals, args.slug_window, args.base_ts)
     if args.command == "discover-crypto":
-        return discover_crypto_markets(Path(args.output), args.gamma_base_url, args.limit)
+        return discover_crypto_markets(Path(args.output or "data/live_snapshot.json"), args.gamma_base_url, args.limit)
     if args.command == "inspect-gamma":
         return inspect_gamma(args.gamma_base_url, args.limit)
     if args.command == "live-run":
         return run_live_loop(
             Path(args.markets),
-            Path(args.output),
+            Path(args.output or "data/live_snapshot.json"),
             args.mode,
             args.interval_seconds,
             args.iterations,

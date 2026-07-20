@@ -21,12 +21,18 @@ def test_strategy_roles_separate_primary_models_from_research_observers():
 
 
 def test_dashboard_has_three_primary_cards_and_no_retired_strategy_panels():
-    for element_id in ("directionalCard", "lotteryCard", "pairedCard"):
+    # Rewritten dashboard (see docs/dashboard-data-map.md P3): the three
+    # primary strategy panels are bound to dirGrid / lotGrid / costChain1.
+    for element_id in ("dirGrid", "lotGrid", "costChain1"):
         assert f'id="{element_id}"' in HTML
-    for element_id in ("inventoryCard", "hedgeAudit", "currentInventory"):
+    for element_id in (
+        "inventoryCard", "hedgeAudit", "currentInventory",
+        "directionalCard", "lotteryCard", "pairedCard",
+    ):
         assert f'id="{element_id}"' not in HTML
-    assert "REPEATABLE ARBITRAGE RESEARCH" in HTML
-    assert "RESEARCH ONLY / NOT ORDERS OR PNL" in HTML
+    assert "ARBITRAGE RESEARCH" in HTML
+    assert "RESEARCH ONLY" in HTML
+    assert "NOT ORDERS OR PNL" in HTML
 
 
 def test_acceptance_requires_observers_but_not_retired_runtime_modules():

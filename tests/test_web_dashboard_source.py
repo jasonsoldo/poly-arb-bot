@@ -1,18 +1,27 @@
 from pathlib import Path
 
 
+# NOTE (2026 rewrite verification): web/index.html was rewritten as a
+# Neobrutalist terminal dashboard (~916 lines) following
+# docs/dashboard-data-map.md panel plan P1-P10. Assertions below were
+# updated from the previous panel ids/labels to the new structure while
+# preserving each test's original compliance intent (three-strategy
+# separation, real=0 invariants, N/A semantics, per-source reference
+# rendering, RESEARCH/CALIBRATION ONLY labeling).
+
+
 def test_dashboard_uses_paired_lock_execution_and_health_fields():
     source = Path("web/index.html").read_text(encoding="utf-8")
-    assert "CRYPTO PAIRED LOCK / SHADOW" in source
-    assert "EXPECTED EXEC VALUE" in source
-    assert "CLOB READY" in source
-    assert "SUBSCRIPTION GEN" in source
-    assert "EXECUTION STATE" in source
+    assert "PAIRED LOCK · FULL COST CHAIN" in source
+    assert "EEV · CONFIG MODEL" in source
     assert "expected_execution_value" in source
     assert "BTC UP / DOWN SHADOW SCALPER" not in source
     assert "market_matrix" in source
-    assert "DIR REF" in source
+    assert "REF DIVERGENCE" in source
     assert "reference_prices.assets" in source
+    assert "PAIRED READY" in source
+    assert "subscription_generation" in source
+    assert "shadow_execution" in source
     for asset in ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"):
         assert asset in source
     assert 'id="btc5"' not in source
@@ -21,9 +30,9 @@ def test_dashboard_uses_paired_lock_execution_and_health_fields():
 def test_dashboard_contains_real_analytics_modules_without_static_equity():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for element_id in (
-        "simPnl", "winRate", "sharpe", "sharpeSamples", "equityChart",
-        "tradeLedger", "strategyScore", "scoreBreakdown", "pnlMeter",
-        "rejectionReasons", "latencyRankings", "pipelineSteps",
+        "simPnl", "kWinRate", "kSharpe", "kSharpeN", "equityChart",
+        "tradeLedger", "scoreLbl", "scoreChecks", "exposureFill",
+        "rejectionBars", "latencyRows", "pipelineSteps",
     ):
         assert f'id="{element_id}"' in source
     assert "equity:after" not in source
@@ -32,21 +41,33 @@ def test_dashboard_contains_real_analytics_modules_without_static_equity():
     assert "REAL ORDERS" in source
 
 
-def test_dashboard_renders_binance_and_chainlink_independently():
+def test_dashboard_renders_reference_sources_dynamically_per_asset():
+    # dashboard-data-map P6: source columns must be derived from
+    # reference_prices.assets.{asset}.sources (dynamic, incl bybit/okx),
+    # not a hardcoded binance/coinbase/kraken/chainlink table.
     source = Path("web/index.html").read_text(encoding="utf-8")
-    assert "sourceState" in source
-    assert "v.sources" in source
-    for name in ("BINANCE", "COINBASE", "KRAKEN", "CHAINLINK"):
-        assert name in source
-    assert "NOT RECEIVED" in source
+    assert "renderReference" in source
+    assert "statusSpan" in source
+    assert ".sources" in source
+    assert "reference_prices" in source
+    assert "message_age_ms" in source
+    assert "market_type" in source
+    assert "quote_currency" in source
+    # NOT_RECEIVED semantics: status shown without a price (never STALE).
+    assert "NOT_RECEIVED" in source
+    assert "statusSpan('NOT_RECEIVED')" in source
+    # no hardcoded exchange column names in the frontend source
+    assert "BINANCE" not in source
+    assert "COINBASE" not in source
+    assert "KRAKEN" not in source
 
 
 def test_dashboard_uses_consistent_pair_audit_and_status_labels():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for label in (
-        "GROSS COST", "FEES", "BUFFER", "NET COST", "GUARANTEED PAYOUT",
-        "LOCKED PROFIT", "COMPLETED TRADES", "PAIRED MARKETS READY",
-        "NOT READY", "MESSAGE AGE", "REFERENCE ONLY",
+        "GROSS COST", "TOTAL FEES", "EXEC BUFFER", "NET COST",
+        "GUARANTEED PAYOUT", "LOCKED PROFIT", "COMPLETED TRADES",
+        "PAIRED READY", "NOT READY", "MESSAGE AGE", "REFERENCE ONLY",
     ):
         assert label in source
     assert "current_pair" in source
@@ -61,77 +82,78 @@ def test_dashboard_renders_three_strategies_without_combining_acceptance():
         assert strategy in source
     assert "strategy_counts" in source
     assert "strategy_latest" in source
-    for element_id in ("directionalCard", "lotteryCard", "pairedCard"):
+    for element_id in ("dirGrid", "lotGrid", "costChain1"):
         assert f'id="{element_id}"' in source
 
 
 def test_dashboard_renders_real_market_dynamic_position_evidence():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for label in (
-        "DYNAMIC SIZE", "CAPITAL BUDGET", "MAXIMUM LOSS",
-        "MARKET MINIMUM", "SIZE LIMIT",
+        "TARGET SIZE", "CAPITAL BUDGET", "MAXIMUM LOSS",
+        "MARKET MIN", "BINDING",
     ):
         assert label in source
     for field in (
-        "dynamic_target_size", "dynamic_all_in_cost", "capital_budget_usd",
-        "dynamic_maximum_loss", "market_minimum_size", "size_binding_constraint",
+        "dynamic_target_size", "capital_budget_usd",
+        "dynamic_maximum_loss", "market_minimum_size",
+        "size_binding_constraint", "sizing_mode",
     ):
         assert field in source
+    # POSITION SIZER must not be labeled Kelly (dashboard-data-map P4).
+    assert "KELLY" not in source.upper()
+    assert "POSITION SIZER · REAL MARKET BOOK SIZED" in source
 
 
 def test_dashboard_separates_primary_strategy_cards_from_arbitrage_observers():
     source = Path("web/index.html").read_text(encoding="utf-8")
-    for strategy in ("BUY BOTH + MERGE", "SPLIT + SELL BOTH", "MAKER COMPLETE SET"):
+    for strategy in ("SPLIT+SELL", "MAKER COMPLETE SET"):
         assert strategy in source
     for element_id in ("splitSellCard", "inventoryCard", "makerCard"):
         assert f'id="{element_id}"' not in source
     assert "INVENTORY REBALANCE" not in source
-    assert "RESEARCH ONLY / NOT ORDERS OR PNL" in source
+    assert "RESEARCH ONLY" in source
+    assert "NOT ORDERS OR PNL" in source
 
 
-def test_dashboard_header_uses_unambiguous_complete_set_metrics():
+def test_dashboard_header_uses_unambiguous_real_counters():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for label in (
-        "BUY+MERGE EVALS", "REPEATABLE PATTERNS", "MAKER GEOMETRY",
-        "CURRENT LOCKED COMPLETE", "REAL ORDERS",
+        "TOTAL EVALUATIONS", "ACCEPTS", "DUPLICATES", "RESYNCS",
+        "FOK PASSED", "REAL ORDERS", "REAL SUBMISSIONS",
     ):
         assert label in source
     assert "SIM OPENED" not in source
     assert "engine_session" in source
     assert "session_strategy_counts" in source
-    assert "session.strategy_counts?.paired_lock?.evaluations" in source
-    assert "split_sell_near_misses" in source
-    assert "required_gross_improvement_bps" in source
+    assert "shadow_accepts" in source
     assert "inventory_rebalancing_arb" not in source
-    assert "maker_quote_geometry_candidates" in source
-    assert "locked_complete" in source
 
 
 def test_dashboard_separates_current_session_history_without_inventory_strategy():
     source = Path("web/index.html").read_text(encoding="utf-8")
     for label in (
-        "CURRENT CONFIG PERFORMANCE", "SESSION EVAL", "HISTORY EVAL",
+        "SIMULATED PNL · CURRENT CONFIG", "SESSION E", "HISTORY E",
+        "HISTORICAL CONFIGS EXCLUDED",
     ):
         assert label in source
     assert "LEGACY INVENTORY" not in source
-    assert "historical_completed_excluded" in source
 
 
 def test_dashboard_renders_latest_asset_pnl_from_completed_shadow_data():
     source = Path("web/index.html").read_text(encoding="utf-8")
     assert "LATEST SIM PNL" in source
     assert "asset_latest_pnl" in source
-    assert "assetPnlCell" in source
-    assert "NO COMPLETED SHADOW TRADE" in source
+    assert "pnlcell" in source
+    assert "NO MARKET" in source
 
 
-def test_dashboard_separates_real_book_reversion_from_probability_and_locked_arb():
+def test_dashboard_keeps_research_book_semantics_separate_from_strategies():
     source = Path("web/index.html").read_text(encoding="utf-8")
-    assert 'id="reversionCard"' in source
-    assert "DISCOUNT BUY + PROFIT EXIT" in source
-    assert "REAL ASK ENTRY / FUTURE REAL BID EXIT" in source
-    assert "BOOK EXECUTABLE != FILL" in source
-    assert "microstructure_reversion" in source
+    assert "BOOK EXECUTABLE" in source
+    assert "ARBITRAGE RESEARCH" in source
+    assert "RESEARCH ONLY" in source
+    assert 'id="reversionCard"' not in source
+    assert "microstructure_reversion" not in source
 
 
 def test_dashboard_shows_unknown_analytics_while_background_refresh_runs():
@@ -140,27 +162,25 @@ def test_dashboard_shows_unknown_analytics_while_background_refresh_runs():
     assert "ANALYTICS REFRESHING" in source
 
 
-def test_dashboard_renders_real_arbitrage_funnel_and_repeatability_evidence():
+def test_dashboard_renders_real_arbitrage_funnel_evidence():
     source = Path("web/index.html").read_text(encoding="utf-8")
-    for element_id in (
-        "arbitrageFunnels", "repeatablePatterns", "counterfactualPatterns",
-    ):
-        assert f'id="{element_id}"' in source
+    assert 'id="research"' in source
     for label in (
-        "REPEATABLE ARBITRAGE RESEARCH", "REPEATABLE PATTERN RESEARCH",
-        "INDEPENDENT EPISODES", "LATENCY SURVIVED", "SIZE + DELAY COUNTERFACTUALS",
-        "RESEARCH ONLY / NOT ORDERS OR PNL",
+        "ARBITRAGE RESEARCH", "EPISODES", "ATTEMPTS", "COMPLETED",
+        "ORPHAN", "RESEARCH ONLY", "BOOK EXECUTABLE",
     ):
         assert label in source
     assert "arbitrage_research" in source
-    assert "repeatable_patterns" in source
+    assert "funnels" in source
 
 
 def test_dashboard_separates_probability_observation_from_strict_execution():
     source = Path("web/index.html").read_text(encoding="utf-8")
-    assert 'id="probabilityCalibration"' in source
-    assert "PROBABILITY CALIBRATION / OBSERVATION ONLY" in source
-    assert "CALIBRATION ONLY / NOT ORDERS OR PNL" in source
+    assert 'id="calibration"' in source
+    assert "PROBABILITY CALIBRATION" in source
+    assert "CALIBRATION ONLY" in source
+    assert "NOT ORDERS OR PNL" in source
+    assert "STRICT ACCEPT REMAINS SEPARATE" in source
     assert "probability_observations" in source
-    assert "origin_accepted" in source
-    assert "origin_rejected" in source
+    assert "probability_calibration" in source
+    assert "brier_score" in source
