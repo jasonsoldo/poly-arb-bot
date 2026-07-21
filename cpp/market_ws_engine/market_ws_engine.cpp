@@ -2991,7 +2991,11 @@ private:
         flush_arb_audit_queue();
         maker_quote_observations_.clear();
         write_health(false);
-        std::cerr << "WS_ERROR stage=" << stage << " code=" << ec.value() << " message=" << ec.message() << "\n";
+        const beast::string_view reason_view = ws_.reason().reason;
+        std::string close_reason = reason_view.empty() ? std::string() : std::string(reason_view.data(), reason_view.size());
+        if (close_reason.size() > 120) close_reason.resize(120);
+        std::cerr << "WS_ERROR stage=" << stage << " code=" << ec.value() << " message=" << ec.message()
+                  << " close_code=" << static_cast<unsigned>(ws_.reason().code) << " close_reason=" << close_reason << "\n";
     }
 
     static constexpr const char* arb_episode_started_event_ =
