@@ -107,6 +107,11 @@ DEFAULT_MAX_ORPHAN_SECONDS = {"5m": 90.0, "15m": 240.0, "1h": 360.0, "4h": 600.0
 DEFAULT_FORCE_FLATTEN_SECONDS = {"5m": 240.0, "15m": 600.0, "1h": 900.0, "4h": 1500.0}
 DEFAULT_WINDOW_MIN_SECONDS = {"5m": 20.0, "15m": 20.0, "1h": 20.0, "4h": 20.0}
 DEFAULT_WINDOW_MAX_SECONDS = {"5m": 300.0, "15m": 900.0, "1h": 3600.0, "4h": 7200.0}
+# Per-timeframe book-age limits, calibrated from measured book update intervals
+# (Phase 0 collection + 6h VPS validation): 5m p50=133ms / 15m p50=1.07s /
+# 1h p50=2.6s / 4h p50=35s. A single global threshold is structurally too
+# tight for long timeframes (46-47% of evaluations rejected as *_book_stale).
+DEFAULT_MAX_BOOK_AGE_MS = {"5m": 2000.0, "15m": 5000.0, "1h": 10000.0, "4h": 60000.0}
 
 _EPS = 1e-9
 
@@ -183,8 +188,8 @@ class MakerAccumulateConfig:
     max_orphan_loss_usd: float = 1.0
     max_orphan_giveback_per_share: float = 0.03
     directional_exit_timeout_seconds: float = 60.0
-    # book / clock health
-    max_book_age_ms: float = 750.0
+    # book / clock health (max_book_age_ms is per-timeframe, see DEFAULT_MAX_BOOK_AGE_MS)
+    max_book_age_ms: dict = field(default_factory=lambda: dict(DEFAULT_MAX_BOOK_AGE_MS))
     max_book_skew_ms: float = 250.0
     max_clock_skew_ms: float = 250.0
     # portfolio risk (design §6, independent maker_accumulate_* block)
@@ -215,6 +220,13 @@ class MakerAccumulateConfig:
 
     @classmethod
     def from_env(cls):
+        # Global MAKER_ACCUMULATE_MAX_BOOK_AGE_MS is a fallback base for every
+        # timeframe; per-timeframe MAKER_ACCUMULATE_MAX_BOOK_AGE_MS_{5M,15M,1H,4H}
+        # overrides win (same pattern as the other per-timeframe dicts).
+        book_age_defaults = dict(DEFAULT_MAX_BOOK_AGE_MS)
+        global_book_age = os.getenv("MAKER_ACCUMULATE_MAX_BOOK_AGE_MS")
+        if global_book_age is not None:
+            book_age_defaults = {tf: float(global_book_age) for tf in book_age_defaults}
         return cls(
             min_tick=float(os.getenv("MAKER_ACCUMULATE_MIN_TICK", "0.01")),
             buffer_per_share=float(os.getenv("MAKER_ACCUMULATE_BUFFER_PER_SHARE", "0.005")),
@@ -249,7 +261,7 @@ class MakerAccumulateConfig:
             max_orphan_loss_usd=float(os.getenv("MAKER_ACCUMULATE_MAX_ORPHAN_LOSS_USD", "1.0")),
             max_orphan_giveback_per_share=float(os.getenv("MAKER_ACCUMULATE_MAX_ORPHAN_GIVEBACK_PER_SHARE", "0.03")),
             directional_exit_timeout_seconds=float(os.getenv("MAKER_ACCUMULATE_DIRECTIONAL_EXIT_TIMEOUT", "60")),
-            max_book_age_ms=float(os.getenv("MAKER_ACCUMULATE_MAX_BOOK_AGE_MS", "750")),
+            max_book_age_ms=_env_tf_dict("MAKER_ACCUMULATE_MAX_BOOK_AGE_MS", book_age_defaults, float),
             max_book_skew_ms=float(os.getenv("MAKER_ACCUMULATE_MAX_BOOK_SKEW_MS", "250")),
             max_clock_skew_ms=float(os.getenv("MAKER_ACCUMULATE_MAX_CLOCK_SKEW_MS", "250")),
             max_order_size=float(os.getenv("MAKER_ACCUMULATE_MAX_ORDER_SIZE", "25")),
@@ -446,9 +458,10 @@ def evaluate_maker_accumulate(row, config=None, portfolio=None):
         _append_reason(reasons, "waiting_up_snapshot")
     elif not row.down.snapshot_received:
         _append_reason(reasons, "waiting_down_snapshot")
-    if row.up.snapshot_received and row.up.age_ms > config.max_book_age_ms:
+    max_book_age_ms = _tf(config.max_book_age_ms, row.timeframe)
+    if row.up.snapshot_received and row.up.age_ms > max_book_age_ms:
         _append_reason(reasons, "up_book_stale")
-    if row.down.snapshot_received and row.down.age_ms > config.max_book_age_ms:
+    if row.down.snapshot_received and row.down.age_ms > max_book_age_ms:
         _append_reason(reasons, "down_book_stale")
     if row.book_skew_ms > config.max_book_skew_ms:
         _append_reason(reasons, "books_not_synced")
@@ -641,6 +654,7 @@ class MakerAccumulateStateMachine:
         else:
             event_id = self._reject_event_id(row)
             episode_id = None
+        max_book_age_ms = _tf(self.config.max_book_age_ms, row.timeframe)
         event = {
             "event_id": event_id,
             "event_type": event_type,
@@ -659,8 +673,8 @@ class MakerAccumulateStateMachine:
             "decision": decision,
             "reason": reason,
             "books_ready": row.up.snapshot_received and row.down.snapshot_received,
-            "books_fresh": (row.up.age_ms <= self.config.max_book_age_ms
-                            and row.down.age_ms <= self.config.max_book_age_ms),
+            "books_fresh": (row.up.age_ms <= max_book_age_ms
+                            and row.down.age_ms <= max_book_age_ms),
             "books_synced": row.book_skew_ms <= self.config.max_book_skew_ms,
             "seconds_to_close": row.seconds_to_close,
             "clock_skew_ms": row.clock_skew_ms,
@@ -711,9 +725,10 @@ class MakerAccumulateStateMachine:
         return filled, strict, queue
 
     def _books_evaluable(self, row):
+        max_book_age_ms = _tf(self.config.max_book_age_ms, row.timeframe)
         return (row.up.snapshot_received and row.down.snapshot_received
-                and row.up.age_ms <= self.config.max_book_age_ms
-                and row.down.age_ms <= self.config.max_book_age_ms)
+                and row.up.age_ms <= max_book_age_ms
+                and row.down.age_ms <= max_book_age_ms)
 
     def _side(self, row, outcome):
         return row.up if outcome == "Up" else row.down
@@ -774,7 +789,9 @@ class MakerAccumulateStateMachine:
                 self._last_reject_reason[row.condition_id] = decision.reason
                 self._emit(events, row, "maker_episode_rejected", None,
                            "REJECT", decision.reason,
-                           {"blocking_reasons": list(decision.blocking_reasons)})
+                           {"blocking_reasons": list(decision.blocking_reasons),
+                            "up_book_age_ms": row.up.age_ms,
+                            "down_book_age_ms": row.down.age_ms})
             return decision
         self._last_reject_reason.pop(row.condition_id, None)
 
@@ -821,6 +838,8 @@ class MakerAccumulateStateMachine:
                        "hedge_exit_margin": episode.hedge_exit_margin,
                        "orphan_loss_estimate": episode.orphan_loss_estimate,
                        "up_age_ms": row.up.age_ms, "down_age_ms": row.down.age_ms,
+                       "up_book_age_ms": row.up.age_ms,
+                       "down_book_age_ms": row.down.age_ms,
                        "book_skew_ms": row.book_skew_ms,
                    })
         return MakerDecision(strategy=STRATEGY, decision="ACCEPT", reason=decision.reason,

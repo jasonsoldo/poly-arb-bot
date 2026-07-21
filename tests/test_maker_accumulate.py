@@ -7,6 +7,7 @@ from poly_arb_bot.maker_accumulate import (
     COMPLETE,
     DEFAULT_FORCE_FLATTEN_SECONDS,
     DEFAULT_LEG2_TIMEOUT_SECONDS,
+    DEFAULT_MAX_BOOK_AGE_MS,
     DEFAULT_MAX_ORPHAN_SECONDS,
     EMERGENCY_FLATTEN,
     HEDGING_DIRECTIONAL_EXIT,
@@ -105,6 +106,49 @@ def test_config_validates_force_flatten_window():
         MakerAccumulateConfig(shadow_fill_mode="optimistic")
 
 
+def test_max_book_age_per_timeframe_defaults():
+    config = MakerAccumulateConfig()
+    assert config.max_book_age_ms == DEFAULT_MAX_BOOK_AGE_MS
+    assert config.max_book_age_ms == {"5m": 2000.0, "15m": 5000.0, "1h": 10000.0, "4h": 60000.0}
+
+
+def test_max_book_age_per_timeframe_env_overrides(monkeypatch):
+    monkeypatch.setenv("MAKER_ACCUMULATE_MAX_BOOK_AGE_MS_15M", "7000")
+    config = MakerAccumulateConfig.from_env()
+    assert config.max_book_age_ms["15m"] == 7000.0
+    assert config.max_book_age_ms["5m"] == 2000.0
+    assert config.max_book_age_ms["1h"] == 10000.0
+    assert config.max_book_age_ms["4h"] == 60000.0
+
+
+def test_max_book_age_global_env_fallback(monkeypatch):
+    monkeypatch.setenv("MAKER_ACCUMULATE_MAX_BOOK_AGE_MS", "3000")
+    config = MakerAccumulateConfig.from_env()
+    assert config.max_book_age_ms == {tf: 3000.0 for tf in ("5m", "15m", "1h", "4h")}
+    # per-timeframe override wins over the global fallback
+    monkeypatch.setenv("MAKER_ACCUMULATE_MAX_BOOK_AGE_MS_4H", "90000")
+    config = MakerAccumulateConfig.from_env()
+    assert config.max_book_age_ms["4h"] == 90000.0
+    assert config.max_book_age_ms["5m"] == 3000.0
+
+
+def test_long_timeframe_uses_long_book_age_threshold():
+    # 4h book p50 update interval is ~35s: 30s-old books are fresh, 61s-old are stale
+    fresh = evaluate_maker_accumulate(make_input(
+        timeframe="4h",
+        up=side(0.4, 0.42, age=30000), down=side(0.56, 0.57, age=30000)))
+    assert "up_book_stale" not in fresh.blocking_reasons
+    assert "down_book_stale" not in fresh.blocking_reasons
+    stale = evaluate_maker_accumulate(make_input(
+        timeframe="4h", up=side(0.4, 0.42, age=61000)))
+    assert stale.decision == "REJECT"
+    assert "up_book_stale" in stale.blocking_reasons
+    # the same 30s age is stale for a 5m market under its own threshold
+    stale_5m = evaluate_maker_accumulate(make_input(
+        timeframe="5m", up=side(0.4, 0.42, age=30000)))
+    assert "up_book_stale" in stale_5m.blocking_reasons
+
+
 def test_taker_fee_matches_cpp_rounding():
     assert taker_fee_total(0.57, 25.0, 0.07) == math.floor(25 * 0.07 * 0.57 * 0.43 * 1e5 + 0.5) / 1e5
     assert taker_fee_total(0.5, 0.0, 0.07) == 0.0
@@ -130,8 +174,8 @@ def test_reject_reasons_are_explicit():
         (dict(up=side(0.4, 0.42, received=False), down=side(0.56, 0.57, received=False)), "books_not_ready"),
         (dict(up=side(0.4, 0.42, received=False)), "waiting_up_snapshot"),
         (dict(down=side(0.56, 0.57, received=False)), "waiting_down_snapshot"),
-        (dict(up=side(0.4, 0.42, age=800)), "up_book_stale"),
-        (dict(down=side(0.56, 0.57, age=800)), "down_book_stale"),
+        (dict(up=side(0.4, 0.42, age=2500)), "up_book_stale"),
+        (dict(down=side(0.56, 0.57, age=2500)), "down_book_stale"),
         (dict(book_skew_ms=300.0), "books_not_synced"),
         (dict(fee_schedule_available=False), "fee_schedule_unavailable"),
         (dict(market_tradable=False), "market_not_tradable"),
@@ -222,6 +266,7 @@ def test_state_machine_opens_episode_and_blocks_second_one():
     assert event["leg1_quote_price"] == 0.41
     assert event["expected_margin"] is not None
     assert event["reference_usage"].startswith("REFERENCE ONLY")
+    assert event["up_book_age_ms"] == 50.0 and event["down_book_age_ms"] == 50.0
     assert event["real_order_submissions"] == 0 and event["real_orders"] == 0
     # second evaluation on the same condition does not open a new episode
     again = sm.evaluate(make_input(ts=T0 + 1))
@@ -238,7 +283,10 @@ def test_reject_events_are_deduplicated_by_reason():
     row = make_input(fee_schedule_available=False)
     first = sm.evaluate(row)
     assert first.decision.reason == "fee_schedule_unavailable"
-    assert len(events_of(first, "maker_episode_rejected")) == 1
+    rejected = events_of(first, "maker_episode_rejected")
+    assert len(rejected) == 1
+    assert rejected[0]["up_book_age_ms"] == 50.0
+    assert rejected[0]["down_book_age_ms"] == 50.0
     second = sm.evaluate(make_input(ts=T0 + 1, fee_schedule_available=False))
     assert not events_of(second, "maker_episode_rejected")
 

@@ -227,6 +227,21 @@ imbalance 作为 side selection 信号区分度有限，仅在尾部（|imb|>0.3
 4. **BTC/15m 边际极薄（p50 = 0.01）**：该组在 buffer=0.005 下几何可行但 margin 阈值
    敏感；它是量最大、穿越最频繁的市场，值得保留并用 Shadow 数据决定取舍。
 
+### 附录（2026-07-21）：`max_book_age_ms` 改为分周期阈值
+
+- **变更**：`MAKER_ACCUMULATE_MAX_BOOK_AGE_MS` 由全局单一值改为 per-timeframe dict，
+  默认值 **5m=2000 / 15m=5000 / 1h=10000 / 4h=60000**（毫秒）；支持
+  `MAKER_ACCUMULATE_MAX_BOOK_AGE_MS_{5M,15M,1H,4H}` 单独覆盖，全局变量保留为
+  全部周期的回退默认。`max_book_skew_ms` 保持全局不变。
+- **依据【实测】**：盘口更新间隔（Phase 0 采集 + VPS 6 小时验证）5m p50=133ms、
+  15m p50=1.07s、1h p50=2.6s、4h p50=35s。旧全局默认 750ms（及过渡值 2000ms）
+  对长周期结构性过紧——VPS 上 46-47% 评估被 `up_book_stale`/`down_book_stale`
+  拒掉，其中绝大多数是 15m+ 市场的正常更新间隔，而非真实行情断流。
+- **取档逻辑**：每档约为对应周期 p50 更新间隔的 1.5-15 倍，留足 WS 抖动余量，
+  同时仍远小于各周期窗口长度，不削弱 fail-closed 语义（真实断流仍会被 stale 拒绝）。
+- **配套改动**：`maker_episode_rejected` / `maker_episode_opened` 审计事件新增
+  `up_book_age_ms` / `down_book_age_ms` 字段（纯追加），后续定标无需翻 paired 日志。
+
 ---
 
 ## 7. 局限性
