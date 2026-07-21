@@ -570,7 +570,7 @@ def test_web_status_keeps_three_strategy_statistics_separate(tmp_path):
     assert status["current_pair"]["reason"] == "net_cost_above_threshold"
 
 
-def test_web_status_exposes_unambiguous_complete_set_counts(tmp_path):
+def test_web_status_exposes_focused_strategy_counts(tmp_path):
     data = tmp_path / "data"
     logs = tmp_path / "logs"
     data.mkdir(); logs.mkdir()
@@ -594,18 +594,6 @@ def test_web_status_exposes_unambiguous_complete_set_counts(tmp_path):
             "decision": "REJECT",
         }),
         json.dumps({
-            "ts": time.time(), "event_id": "inventory-reject",
-            "event_type": "shadow_inventory_eval",
-            "strategy": "inventory_rebalancing_arb", "market_id": "m1",
-            "decision": "REJECT",
-        }),
-        json.dumps({
-            "ts": time.time(), "event_id": "inventory-action",
-            "event_type": "shadow_inventory_action",
-            "strategy": "inventory_rebalancing_arb", "market_id": "m1",
-            "decision": "ACCEPT",
-        }),
-        json.dumps({
             "ts": time.time(), "event_id": "maker-quote",
             "event_type": "shadow_maker_quote_eval",
             "strategy": "maker_complete_set_arb", "market_id": "m1",
@@ -619,239 +607,41 @@ def test_web_status_exposes_unambiguous_complete_set_counts(tmp_path):
             "market_id": "m1", "strategy_config_hash": "paired-current",
             "realized_simulated_pnl": .1,
         }),
-        json.dumps({
-            "ts": time.time(), "event_id": "inventory-complete",
-            "event_type": "shadow_complete", "strategy": "inventory_rebalancing_arb",
-            "market_id": "m1", "strategy_config_hash": "inventory-current",
-            "realized_simulated_pnl": .2,
-        }),
     ]) + "\n", encoding="utf-8")
     (data / "shadow-health.json").write_text(json.dumps({
         "paired_config_hash": "paired-current",
-        "inventory_config_hash": "inventory-current",
-        "maker_config_hash": "maker-current",
-        "maker_quote_geometry_candidates": 7,
-        "maker_trade_events": 11,
-        "maker_single_leg_trade_throughs": 3,
-        "maker_both_leg_trade_throughs": 1,
     }), encoding="utf-8")
 
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
     counts = status["counts"]
 
-    assert counts["total_strategy_evaluations"] == 4
+    assert counts["total_strategy_evaluations"] == 3
     assert counts["probability_strategy_evaluations"] == 1
     assert counts["paired_evaluations"] == 2
     assert "inventory_evaluations" not in counts
     assert "inventory_actions" not in counts
-    assert counts["maker_evaluations"] == 1
-    assert counts["maker_quote_candidates"] == 1
-    assert counts["maker_quote_geometry_candidates"] == 7
-    assert counts["maker_trade_events"] == 11
-    assert counts["maker_single_leg_trade_throughs"] == 3
-    assert counts["maker_both_leg_trade_throughs"] == 1
-    assert counts["complete_set_evaluations"] == 3
+    # Retired observer counters are gone; retired observer audit events are
+    # ignored even when present in historical logs.
+    for removed_key in (
+        "split_sell_evaluations", "split_sell_accepts", "maker_evaluations",
+        "maker_quote_candidates", "maker_quote_geometry_candidates",
+        "maker_trade_events", "maker_single_leg_trade_throughs",
+        "maker_both_leg_trade_throughs", "complete_set_evaluations",
+        "session_split_sell_evaluations", "session_split_sell_accepts",
+        "session_maker_quote_candidates",
+    ):
+        assert removed_key not in counts
+    assert "maker_complete_set_arb" not in status["strategy_counts"]
     assert counts["locked_complete"] == 1
-
-
-def test_web_status_exposes_split_sell_as_independent_locked_method(tmp_path):
-    data = tmp_path / "data"
-    logs = tmp_path / "logs"
-    data.mkdir()
-    logs.mkdir()
-    now = time.time()
-    (data / "live_markets.json").write_text(json.dumps({
-        "markets": [{
-            "market_id": "m1", "asset": "BTC", "interval": "5m",
-            "close_ts": now + 100,
-        }],
-    }), encoding="utf-8")
-    (logs / "shadow-audit.jsonl").write_text(json.dumps({
-        "ts": now,
-        "event_id": "split-eval",
-        "event_type": "shadow_split_sell_eval",
-        "strategy": "split_sell_lock",
-        "market_id": "m1",
-        "up_sell_vwap": .54,
-        "down_sell_vwap": .49,
-        "combined_bid_vwap": 1.03,
-        "observed_profit_threshold_bid_sum": 1.01,
-        "profit_threshold_shortfall": 0,
-        "required_gross_improvement_bps": 0,
-        "net_proceeds": 10.22,
-        "split_collateral_cost": 10,
-        "locked_profit": .22,
-        "decision": "ACCEPT",
-        "reason": "split_sell_opportunity",
-    }) + "\n", encoding="utf-8")
-    (logs / "strategy-audit.jsonl").write_text("", encoding="utf-8")
-    (logs / "shadow-execution.jsonl").write_text(json.dumps({
-        "ts": now,
-        "event_id": "split-complete",
-        "event_type": "shadow_complete",
-        "strategy": "split_sell_lock",
-        "market_id": "m1",
-        "strategy_config_hash": "split-current",
-        "realized_simulated_pnl": .22,
-    }) + "\n", encoding="utf-8")
-    (data / "shadow-health.json").write_text(json.dumps({
-        "split_sell_config_hash": "split-current",
-        "session_strategy_counts": {
-            "split_sell_lock": {
-                "evaluations": 3, "accepts": 1, "rejections": 2,
-            },
-        },
-    }), encoding="utf-8")
-
-    status = build_status(
-        data, logs / "shadow-audit.jsonl", tmp_path / "orders.json"
-    )
-
-    assert status["counts"]["split_sell_evaluations"] == 1
-    assert status["counts"]["split_sell_accepts"] == 1
-    assert status["counts"]["session_split_sell_evaluations"] == 3
-    assert status["counts"]["session_split_sell_accepts"] == 1
-    assert status["current_split_sell"]["locked_profit"] == .22
-    assert status["current_split_sell"]["combined_bid_vwap"] == 1.03
-    assert status["performance_by_strategy"]["split_sell_lock"]["completed"] == 1
-    assert status["performance_by_strategy"]["split_sell_lock"]["simulated_pnl"] == .22
-
-
-def test_web_status_ranks_latest_split_sell_near_misses(tmp_path):
-    data = tmp_path / "data"
-    logs = tmp_path / "logs"
-    data.mkdir()
-    logs.mkdir()
-    now = time.time()
-    markets = [
-        {"market_id": "m1", "asset": "BTC", "interval": "5m", "close_ts": now + 100},
-        {"market_id": "m2", "asset": "ETH", "interval": "15m", "close_ts": now + 200},
-    ]
-    (data / "live_markets.json").write_text(
-        json.dumps({"markets": markets}), encoding="utf-8"
-    )
-    rows = [
-        {
-            "ts": now, "event_id": "m1-new", "event_type": "shadow_split_sell_eval",
-            "strategy": "split_sell_lock", "market_id": "m1", "asset": "BTC",
-            "timeframe": "5m", "decision": "REJECT",
-            "reason": "split_sell_profit_below_threshold",
-            "profit_threshold_shortfall": .12,
-            "required_gross_improvement_bps": 120,
-        },
-        {
-            "ts": now - 1, "event_id": "m2-new", "event_type": "shadow_split_sell_eval",
-            "strategy": "split_sell_lock", "market_id": "m2", "asset": "ETH",
-            "timeframe": "15m", "decision": "REJECT",
-            "reason": "split_sell_profit_below_threshold",
-            "profit_threshold_shortfall": .04,
-            "required_gross_improvement_bps": 40,
-        },
-        {
-            "ts": now - 2, "event_id": "m1-old", "event_type": "shadow_split_sell_eval",
-            "strategy": "split_sell_lock", "market_id": "m1", "asset": "BTC",
-            "timeframe": "5m", "decision": "REJECT",
-            "reason": "split_sell_profit_below_threshold",
-            "profit_threshold_shortfall": .01,
-            "required_gross_improvement_bps": 10,
-        },
-    ]
-    (logs / "shadow-audit.jsonl").write_text(
-        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
-    )
-    (logs / "strategy-audit.jsonl").write_text("", encoding="utf-8")
-
-    status = build_status(
-        data, logs / "shadow-audit.jsonl", tmp_path / "orders.json"
-    )
-
-    assert [row["market_id"] for row in status["split_sell_near_misses"]] == [
-        "m2", "m1",
-    ]
-    assert status["split_sell_near_misses"][1]["profit_threshold_shortfall"] == .12
-
-
-def test_web_status_exposes_incremental_arbitrage_research(tmp_path):
-    data = tmp_path / "data"
-    logs = tmp_path / "logs"
-    data.mkdir()
-    logs.mkdir()
-    now = time.time()
-    (data / "live_markets.json").write_text(json.dumps({
-        "markets": [{
-            "market_id": "m1", "asset": "BTC", "interval": "5m",
-            "close_ts": now + 100,
-        }],
-    }), encoding="utf-8")
-    (logs / "shadow-audit.jsonl").write_text(json.dumps({
-        "ts": now,
-        "event_id": "pair-accept",
-        "event_type": "shadow_eval",
-        "strategy": "paired_lock",
-        "market_id": "m1",
-        "asset": "BTC",
-        "timeframe": "5m",
-        "generation": 1,
-        "session": 2,
-        "decision": "ACCEPT",
-        "fok": True,
-        "locked_profit": .05,
-        "expected_execution_value": .03,
-        "size": 10,
-        "time_between_legs_us": 50_000,
-    }) + "\n", encoding="utf-8")
-    (logs / "strategy-audit.jsonl").write_text("", encoding="utf-8")
-
-    status = build_status(
-        data, logs / "shadow-audit.jsonl", tmp_path / "orders.json"
-    )
-
-    research = status["arbitrage_research"]
-    assert research["semantics"] == "RESEARCH_ONLY_NOT_ORDERS_OR_PNL"
-    assert research["funnels"]["paired_lock"]["independent_episodes"] == 1
-    assert research["repeatable_patterns"][0]["asset"] == "BTC"
-    assert research["repeatable_patterns"][0]["classification"] == "OBSERVED"
-
-
-def test_web_arbitrage_research_uses_book_executable_not_fill_semantics():
-    report = web_monitor._empty_arbitrage_research()
-    funnel = report["funnels"]["paired_lock"]
-
-    assert funnel["shadow_attempts"] == 0
-    assert funnel["leg_1_book_executable"] == 0
-    assert funnel["both_legs_book_executable"] == 0
-    assert funnel["orphaned"] == 0
-    assert funnel["invalidated"] == 0
-    assert "both_legs_filled" not in funnel
-    assert report["no_repeatable_arbitrage"] is True
-    assert report["conclusion"] == "NO REPEATABLE ARBITRAGE FOUND"
-
-
-def test_web_merge_keeps_leg_order_and_config_hash_cohorts_separate():
-    base = {
-        "funnels": {}, "counterfactual_patterns": [],
-        "semantics": "RESEARCH_ONLY_NOT_ORDERS_OR_PNL",
+    assert "arbitrage_research" not in status
+    assert "current_split_sell" not in status
+    assert "split_sell_near_misses" not in status
+    assert status["strategy_enablement"] == {
+        "late_window_directional_ev": False,
+        "low_price_lottery_ev": False,
+        "paired_lock": True,
+        "maker_paired_accumulate": True,
     }
-    first = dict(base, repeatable_patterns=[{
-        "strategy": "paired_lock", "asset": "BTC", "timeframe": "5m",
-        "target_size": 10, "delay_ms": 50, "leg_order": "UP_THEN_DOWN",
-        "config_hash": "a", "independent_episodes": 20,
-        "distinct_close_windows": 12, "classification": "OUT_OF_SAMPLE_VALIDATED",
-        "profitable_capacity": 10,
-    }])
-    second = dict(base, repeatable_patterns=[{
-        "strategy": "paired_lock", "asset": "BTC", "timeframe": "5m",
-        "target_size": 10, "delay_ms": 50, "leg_order": "DOWN_THEN_UP",
-        "config_hash": "a", "independent_episodes": 2,
-        "distinct_close_windows": 2, "classification": "OBSERVED",
-        "profitable_capacity": None,
-    }])
-
-    merged = web_monitor._merge_arbitrage_research([first, second])
-
-    assert len(merged["repeatable_patterns"]) == 2
-    assert merged["repeatable_patterns"][0]["classification"] == "OUT_OF_SAMPLE_VALIDATED"
-    assert merged["no_repeatable_arbitrage"] is False
 
 
 def test_web_status_separates_engine_session_counts_and_legacy_inventory(tmp_path):
@@ -899,7 +689,7 @@ def test_web_status_separates_engine_session_counts_and_legacy_inventory(tmp_pat
     assert status["engine_session"]["evaluations"] == 12
     assert status["counts"]["session_paired_evaluations"] == 12
     assert "session_inventory_actions" not in status["counts"]
-    assert status["session_strategy_counts"]["maker_complete_set_arb"] == {
+    assert status["session_strategy_counts"]["maker_paired_accumulate"] == {
         "evaluations": 0, "accepts": 0, "rejections": 0,
     }
     cohorts = status["shadow_lifecycle"]["inventory_cohorts"]
@@ -1004,32 +794,6 @@ def test_web_exposes_recent_strategy_breakdown_by_asset_and_reason(tmp_path):
     assert breakdown["by_asset"] == {"BTC": 1, "HYPE": 1}
     assert breakdown["rejection_reasons"] == {"too_early": 1, "insufficient_reference_sources": 1}
 
-
-def test_web_counts_and_exposes_microstructure_reversion_book_evidence(tmp_path):
-    data = tmp_path / "data"; logs = tmp_path / "logs"
-    data.mkdir(); logs.mkdir()
-    (logs / "strategy-audit.jsonl").write_text("\n".join([
-        json.dumps({
-            "ts": time.time() - 1, "event_id": "r1", "event_type": "shadow_reversion_eval",
-            "strategy": "microstructure_reversion", "market_id": "m1", "asset": "BTC",
-            "timeframe": "5m", "decision": "ACCEPT", "reason": "discount_below_anchor",
-        }),
-        json.dumps({
-            "ts": time.time(), "event_id": "r2",
-            "event_type": "shadow_reversion_exit_book_executable",
-            "strategy": "microstructure_reversion", "market_id": "m1", "asset": "BTC",
-            "timeframe": "5m", "decision": "EXIT_EXECUTABLE",
-            "reason": "net_profit_exit_book_executable", "net_profit": .12,
-            "observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
-        }),
-    ]) + "\n", encoding="utf-8")
-
-    status = build_status(data, logs / "missing.jsonl", tmp_path / "state.json")
-
-    counts = status["strategy_counts"]["microstructure_reversion"]
-    assert counts["evaluations"] == 1
-    assert counts["accepts"] == 1
-    assert status["strategy_latest"]["microstructure_reversion"]["net_profit"] == .12
 
 def test_web_status_exposes_strategy_lifecycle_position_states(tmp_path):
     data = tmp_path / "data"
@@ -1375,3 +1139,60 @@ def test_web_status_maker_accumulate_empty_state_is_not_fabricated(tmp_path):
         "session_evaluations": 0, "session_accepts": 0, "session_rejections": 0,
     }
     assert all(count == 0 for count in maker["state_counts"].values())
+
+
+def test_web_status_blocks_scanner_unverified_settlement(tmp_path):
+    now_ms = time.time() * 1000
+    (tmp_path / "live_markets.json").write_text(json.dumps({"markets": [
+        {"market_id": "hype-5m", "asset": "HYPE", "interval": "5m",
+         "settlement_source": "chainlink", "settlement_verified": False,
+         "settlement_block_reason": "chainlink_rtds_asset_unsupported"},
+        {"market_id": "btc-5m", "asset": "BTC", "interval": "5m",
+         "settlement_source": "chainlink", "settlement_verified": True},
+    ]}), encoding="utf-8")
+    venue_sources = {
+        "binance": {"symbol": "btcusdt", "market_type": "spot", "quote_currency": "USDT",
+                    "price": 65000.0, "message_age_ms": 100, "status": "FRESH"},
+        "coinbase": {"symbol": "BTC-USD", "market_type": "spot", "quote_currency": "USD",
+                     "price": 65001.0, "message_age_ms": 100, "status": "FRESH"},
+        "chainlink": {"symbol": "btc/usd", "market_type": "oracle", "quote_currency": "USD",
+                      "price": 65000.5, "message_age_ms": 100, "status": "FRESH"},
+    }
+    (tmp_path / "venue-status.json").write_text(json.dumps({
+        "updated_at_ms": now_ms,
+        "assets": {"HYPE": {"sources": dict(venue_sources)}, "BTC": {"sources": dict(venue_sources)}},
+    }), encoding="utf-8")
+
+    status = build_status(tmp_path, tmp_path / "missing.jsonl", tmp_path / "state.json")
+
+    hype = status["market_reference_states"]["hype-5m"]
+    assert hype["reference_quorum_met"] is False
+    assert hype["reference_state"] == "REFERENCE_BLOCKED"
+    assert hype["reference_block_reason"] == "chainlink_rtds_asset_unsupported"
+    assert hype["settlement_verified"] is False
+    btc = status["market_reference_states"]["btc-5m"]
+    assert btc["reference_quorum_met"] is True
+    assert status["market_matrix"]["HYPE"]["5m"]["reference_blocked"] == 1
+    assert status["market_matrix"]["BTC"]["5m"]["reference_ready"] == 1
+
+
+def test_web_status_display_uses_per_source_freshness_limits(tmp_path):
+    now_ms = time.time() * 1000
+    (tmp_path / "venue-status.json").write_text(json.dumps({
+        "updated_at_ms": now_ms,
+        "assets": {"BTC": {"sources": {
+            # no engine-emitted freshness_limit_ms: fall back to local table
+            "binance": {"price": 65000, "message_age_ms": 5000, "status": "FRESH"},
+            "coinbase": {"price": 65001, "message_age_ms": 5000, "status": "FRESH"},
+            # engine-emitted limit wins
+            "kraken": {"price": 65002, "message_age_ms": 20000, "status": "FRESH",
+                       "freshness_limit_ms": 60000},
+        }}},
+    }), encoding="utf-8")
+
+    status = build_status(tmp_path, tmp_path / "missing.jsonl", tmp_path / "state.json")
+
+    btc = status["reference_prices"]["assets"]["BTC"]["sources"]
+    assert btc["binance"]["status"] == "STALE"      # 5s > default 3s limit
+    assert btc["coinbase"]["status"] == "FRESH"     # 5s < coinbase 10s limit
+    assert btc["kraken"]["status"] == "FRESH"       # 20s < emitted 60s limit

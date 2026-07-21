@@ -104,14 +104,15 @@ def test_dashboard_renders_real_market_dynamic_position_evidence():
     assert "POSITION SIZER · REAL MARKET BOOK SIZED" in source
 
 
-def test_dashboard_separates_primary_strategy_cards_from_arbitrage_observers():
+def test_dashboard_has_no_retired_arbitrage_observer_panels():
     source = Path("web/index.html").read_text(encoding="utf-8")
-    for strategy in ("SPLIT+SELL", "MAKER COMPLETE SET"):
-        assert strategy in source
-    for element_id in ("splitSellCard", "inventoryCard", "makerCard"):
+    for strategy in ("SPLIT+SELL", "MAKER COMPLETE SET", "ARBITRAGE RESEARCH"):
+        assert strategy not in source
+    for element_id in ("splitSellCard", "inventoryCard", "makerCard", "research"):
         assert f'id="{element_id}"' not in source
     assert "INVENTORY REBALANCE" not in source
-    assert "RESEARCH ONLY" in source
+    assert "arbitrage_research" not in source
+    assert "renderResearch" not in source
     assert "NOT ORDERS OR PNL" in source
 
 
@@ -147,13 +148,18 @@ def test_dashboard_renders_latest_asset_pnl_from_completed_shadow_data():
     assert "NO MARKET" in source
 
 
-def test_dashboard_keeps_research_book_semantics_separate_from_strategies():
+def test_dashboard_marks_disabled_probability_strategies_explicitly():
     source = Path("web/index.html").read_text(encoding="utf-8")
-    assert "BOOK EXECUTABLE" in source
-    assert "ARBITRAGE RESEARCH" in source
-    assert "RESEARCH ONLY" in source
     assert 'id="reversionCard"' not in source
     assert "microstructure_reversion" not in source
+    # Directional/lottery panels carry an ENABLED/DISABLED enablement chip
+    # driven by status.strategy_enablement instead of stale data.
+    assert 'id="dirEnableChip"' in source
+    assert 'id="lotEnableChip"' in source
+    assert "strategy_enablement" in source
+    assert "DISABLED · N/A" in source
+    assert "DIRECTIONAL_EV_ENABLE=1" in source
+    assert "LOTTERY_EV_ENABLE=1" in source
 
 
 def test_dashboard_shows_unknown_analytics_while_background_refresh_runs():
@@ -163,15 +169,12 @@ def test_dashboard_shows_unknown_analytics_while_background_refresh_runs():
 
 
 def test_dashboard_renders_real_arbitrage_funnel_evidence():
+    # Arbitrage research funnel panel removed with the observer surface;
+    # paired-lock book-executable semantics live on the main cost chain.
     source = Path("web/index.html").read_text(encoding="utf-8")
-    assert 'id="research"' in source
-    for label in (
-        "ARBITRAGE RESEARCH", "EPISODES", "ATTEMPTS", "COMPLETED",
-        "ORPHAN", "RESEARCH ONLY", "BOOK EXECUTABLE",
-    ):
-        assert label in source
-    assert "arbitrage_research" in source
-    assert "funnels" in source
+    assert 'id="research"' not in source
+    assert "arbitrage_research" not in source
+    assert "funnels" not in source
 
 
 def test_dashboard_separates_probability_observation_from_strict_execution():

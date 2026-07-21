@@ -1,8 +1,17 @@
 import json
 import time
 
+import pytest
+
 import poly_arb_bot.shadow_acceptance as shadow_acceptance
 from poly_arb_bot.shadow_acceptance import evaluate_status
+
+
+@pytest.fixture(autouse=True)
+def _enable_probability_strategies(monkeypatch):
+    """Acceptance tests exercise the full strategy surface explicitly."""
+    monkeypatch.setenv("DIRECTIONAL_EV_ENABLE", "1")
+    monkeypatch.setenv("LOTTERY_EV_ENABLE", "1")
 
 
 def valid_status():
@@ -26,41 +35,22 @@ def valid_status():
             "pending": 2, "settled": 10, "orphaned": 0,
             "semantics": "CALIBRATION_ONLY_NOT_ORDERS_OR_PNL",
         },
-        "arbitrage_research": {
-            "semantics": "RESEARCH_ONLY_NOT_ORDERS_OR_PNL",
-            "no_repeatable_arbitrage": True,
-            "conclusion": "NO REPEATABLE ARBITRAGE FOUND",
-            "funnels": {
-                "paired_lock": {
-                    "shadow_attempts": 3, "leg_1_book_executable": 3,
-                    "both_legs_book_executable": 2, "orphaned": 1,
-                    "invalidated": 0,
-                },
-            },
-        },
         "strategy_counts": {
             "paired_lock": {"evaluations": 10, "accepts": 2, "rejections": 8, "model_evaluations": 0},
             "late_window_directional_ev": {"evaluations": 20, "accepts": 1, "rejections": 19, "model_evaluations": 20, "latest_model_evaluated": True,
                                             "terminal_hedge_evaluations": 20, "terminal_hedge_accepts": 1,
                                             "terminal_hedge_rejections": 19},
             "low_price_lottery_ev": {"evaluations": 20, "accepts": 0, "rejections": 20, "model_evaluations": 20, "latest_model_evaluated": True},
-            "split_sell_lock": {
-                "evaluations": 20, "accepts": 1, "rejections": 19,
+            "maker_paired_accumulate": {
+                "evaluations": 6, "accepts": 1, "rejections": 5,
                 "model_evaluations": 0, "latest_model_evaluated": False,
-            },
-            "inventory_rebalancing_arb": {
-                "evaluations": 20, "accepts": 1, "rejections": 19,
-                "model_evaluations": 20, "latest_model_evaluated": True,
-            },
-            "maker_complete_set_arb": {
-                "evaluations": 20, "accepts": 0, "rejections": 20,
-                "model_evaluations": 20, "latest_model_evaluated": True,
             },
         },
         "strategy_latest": {
             "late_window_directional_ev": {**sizing, "estimated_probability": 0.6},
             "low_price_lottery_ev": {**sizing, "estimated_probability": 0.6},
             "paired_lock": {**sizing, "locked_profit": -0.1},
+            "maker_paired_accumulate": {**sizing, "locked_profit": -0.1},
         },
         "dynamic_sizing": {
             "active_positions": 0, "active_capital_usd": 0,
@@ -72,9 +62,7 @@ def valid_status():
             "late_window_directional_ev": {"completed": 0},
             "low_price_lottery_ev": {"completed": 0},
             "paired_lock": {"completed": 0},
-            "split_sell_lock": {"completed": 0},
-            "inventory_rebalancing_arb": {"completed": 0},
-            "maker_complete_set_arb": {"completed": 0},
+            "maker_paired_accumulate": {"completed": 0},
         },
         "shadow_health": {
             "ws_connected": True,
@@ -116,29 +104,15 @@ def test_acceptance_fails_missing_or_invalid_dynamic_sizing_evidence():
     }
 
 
-def test_acceptance_rejects_synthetic_fill_or_mixed_probability_semantics():
+def test_acceptance_rejects_mixed_probability_semantics():
     status = valid_status()
-    status["arbitrage_research"]["funnels"]["paired_lock"]["both_legs_filled"] = 2
     status["probability_observations"]["semantics"] = "ORDERS"
 
     report = evaluate_status(status)
 
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
-    assert failed == {"arbitrage_book_evidence_integrity", "probability_observation_integrity"}
+    assert failed == {"probability_observation_integrity"}
     assert report["status"] == "FAIL"
-
-
-def test_acceptance_reports_repeatable_arbitrage_evidence_without_calling_it_profit():
-    status = valid_status()
-    status["arbitrage_research"].update(
-        no_repeatable_arbitrage=False,
-        conclusion="REPEATABLE ARBITRAGE CANDIDATE FOUND",
-    )
-
-    report = evaluate_status(status)
-
-    assert report["status"] == "PASS"
-    assert report["metrics"]["arbitrage_research_conclusion"] == "REPEATABLE ARBITRAGE CANDIDATE FOUND"
 
 
 def test_acceptance_fails_drift_and_real_order_submission():
@@ -193,7 +167,7 @@ def test_acceptance_fails_when_an_independent_strategy_is_not_running():
     status["strategy_counts"]["low_price_lottery_ev"] = {"evaluations": 0, "accepts": 0, "rejections": 0, "model_evaluations": 0}
     report = evaluate_status(status)
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
-    assert "three_strategy_evaluations" in failed
+    assert "enabled_strategy_evaluations" in failed
 
 
 def test_acceptance_fails_when_probability_model_never_evaluated():
@@ -216,15 +190,49 @@ def test_acceptance_ignores_retired_terminal_hedge_counter():
     assert report["status"] == "PASS"
 
 
-def test_acceptance_marks_missing_complete_set_strategy_evaluations_incomplete():
+def test_acceptance_marks_missing_maker_accumulate_evaluations_incomplete():
     status = valid_status()
-    status["strategy_counts"]["maker_complete_set_arb"]["evaluations"] = 0
+    status["strategy_counts"]["maker_paired_accumulate"].update(
+        evaluations=0, accepts=0, rejections=0,
+    )
 
     report = evaluate_status(status)
 
     failed = {check["name"] for check in report["checks"] if not check["passed"]}
-    assert failed == {"complete_set_strategies_evaluated"}
+    assert failed == {"enabled_strategy_evaluations"}
     assert report["status"] == "INCOMPLETE"
+
+
+def test_acceptance_default_surface_skips_probability_strategies(monkeypatch):
+    monkeypatch.delenv("DIRECTIONAL_EV_ENABLE", raising=False)
+    monkeypatch.delenv("LOTTERY_EV_ENABLE", raising=False)
+    status = valid_status()
+    status["strategy_counts"]["late_window_directional_ev"] = {
+        "evaluations": 0, "accepts": 0, "rejections": 0, "model_evaluations": 0,
+    }
+    status["strategy_counts"]["low_price_lottery_ev"] = {
+        "evaluations": 0, "accepts": 0, "rejections": 0, "model_evaluations": 0,
+    }
+
+    report = evaluate_status(status)
+
+    assert report["status"] == "PASS"
+    names = {check["name"] for check in report["checks"]}
+    assert "disabled_strategies_silent" in names
+    assert "enabled_strategy_evaluations" in names
+
+
+def test_acceptance_fails_when_disabled_strategy_emits_events(monkeypatch):
+    monkeypatch.delenv("DIRECTIONAL_EV_ENABLE", raising=False)
+    monkeypatch.delenv("LOTTERY_EV_ENABLE", raising=False)
+    status = valid_status()
+    # late_window_directional_ev still has 20 evaluations in valid_status
+
+    report = evaluate_status(status)
+
+    failed = {check["name"] for check in report["checks"] if not check["passed"]}
+    assert "disabled_strategies_silent" in failed
+    assert report["status"] == "FAIL"
 
 
 def test_acceptance_uses_model_count_when_latest_row_fails_closed_before_model():

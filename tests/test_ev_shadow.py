@@ -1,8 +1,17 @@
 import json
 import time
 
+import pytest
+
 from poly_arb_bot import ev_shadow
 from poly_arb_bot.ev_shadow import _historical_volatility, evaluate_market_event
+
+
+@pytest.fixture(autouse=True)
+def _enable_probability_strategies(monkeypatch):
+    """Legacy tests exercise directional/lottery evaluators explicitly."""
+    monkeypatch.setenv("DIRECTIONAL_EV_ENABLE", "1")
+    monkeypatch.setenv("LOTTERY_EV_ENABLE", "1")
 
 
 def market():
@@ -60,10 +69,25 @@ def test_reference_age_recomputes_quorum_without_slow_optional_source(monkeypatc
 def test_reference_age_includes_venue_file_age(monkeypatch):
     monkeypatch.setenv("REFERENCE_MAX_AGE_MS", "3000")
     state = venue()
-    state["updated_at_ms"] = 996_000
+    # file_age = 15s：超过 coinbase 10s 特例阈值 → coinbase STALE；
+    # kraken 15s 仍在 60s 每源阈值内保持 FRESH，fresh 源数 = 1 → insufficient_reference_sources。
+    state["updated_at_ms"] = 985_000
     rows = evaluate_market_event(event(), market(), state, now=1000.0)
     assert all(row["reference_quorum_met"] is False for row in rows)
     assert all(row["reason"] == "insufficient_reference_sources" for row in rows)
+
+
+def test_reference_age_file_age_stales_settlement_but_not_kraken(monkeypatch):
+    monkeypatch.setenv("REFERENCE_MAX_AGE_MS", "3000")
+    state = venue()
+    # file_age = 4s：chainlink（3s 阈值）转 STALE → settlement_reference_unavailable；
+    # kraken（60s 阈值）与 coinbase（10s 阈值）仍 FRESH，源数量本身过线。
+    state["updated_at_ms"] = 996_000
+    rows = evaluate_market_event(event(), market(), state, now=1000.0)
+    assert all(row["reference_quorum_met"] is False for row in rows)
+    assert all(row["reason"] == "settlement_reference_unavailable" for row in rows)
+    shadow_rows = [row for row in rows if row.get("event_type") == "shadow_eval"]
+    assert shadow_rows and all(row["fresh_exchange_source_count"] == 2 for row in shadow_rows)
 
 
 def test_directional_reference_uses_coinbase_source_specific_age(monkeypatch):
@@ -571,3 +595,37 @@ def test_verifier_does_not_rewrite_unchanged_checkpoint(tmp_path):
     source.write_text("", encoding="utf-8")
     assert ev_shadow.process_verification_once(source, output, state) == 0
     assert not state.exists()
+
+
+def test_scanner_unverified_settlement_forces_reject():
+    row = market()
+    row["settlement_verified"] = False
+    row["settlement_block_reason"] = "chainlink_rtds_asset_unsupported"
+    rows = evaluate_market_event(event(), row, venue(), now=1000.0)
+    assert all(item["decision"] == "REJECT" for item in rows)
+    assert all("settlement_reference_unverified" in item["blocking_reasons"] for item in rows)
+
+
+def test_probability_strategies_default_disabled_emit_no_rows(monkeypatch):
+    monkeypatch.delenv("DIRECTIONAL_EV_ENABLE", raising=False)
+    monkeypatch.delenv("LOTTERY_EV_ENABLE", raising=False)
+    assert ev_shadow.directional_ev_enabled() is False
+    assert ev_shadow.lottery_ev_enabled() is False
+    rows = evaluate_market_event(event(), market(), venue(), now=1000.0)
+    assert rows == []
+
+
+def test_directional_only_enable_skips_lottery(monkeypatch):
+    monkeypatch.setenv("DIRECTIONAL_EV_ENABLE", "1")
+    monkeypatch.delenv("LOTTERY_EV_ENABLE", raising=False)
+    rows = evaluate_market_event(event(), market(), venue(), now=1000.0)
+    strategies = {row["strategy"] for row in rows}
+    assert "low_price_lottery_ev" not in strategies
+    assert "late_window_directional_ev" in strategies
+
+
+def test_strategy_env_enabled_truthy_values(monkeypatch):
+    monkeypatch.setenv("DIRECTIONAL_EV_ENABLE", "yes")
+    assert ev_shadow.directional_ev_enabled() is True
+    monkeypatch.setenv("DIRECTIONAL_EV_ENABLE", "0")
+    assert ev_shadow.directional_ev_enabled() is False

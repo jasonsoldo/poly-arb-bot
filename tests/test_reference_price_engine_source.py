@@ -162,3 +162,26 @@ def test_coinbase_uses_official_level2_batch_for_fresh_bid_ask():
     assert 'book.bids.rbegin()->first' in SOURCE
     assert 'book.asks.begin()->first' in SOURCE
 
+
+def test_reference_engine_has_per_source_data_watchdog_reconnect():
+    assert "DEFAULT_DATA_WATCHDOG_MS = 30000" in SOURCE
+    assert "RTDS_DATA_WATCHDOG_MS = 30000" in SOURCE
+    assert "KRAKEN_DATA_WATCHDOG_MS = 60000" in SOURCE
+    assert "source_data_watchdog_ms(const std::string& source_name)" in SOURCE
+    assert '"DATA_WATCHDOG_MS"' in SOURCE
+    assert '"RTDS_DATA_WATCHDOG_MS"' in SOURCE
+    assert '"KRAKEN_DATA_WATCHDOG_MS"' in SOURCE
+    assert "asio::steady_timer watchdog" in SOURCE
+    assert "last_data = std::chrono::steady_clock::now()" in SOURCE
+    assert "REFERENCE_WATCHDOG" in SOURCE
+    assert "action=reconnect_resubscribe" in SOURCE
+    assert "asio::error::timed_out" in SOURCE
+
+
+def test_reference_engine_uses_kraken_specific_freshness_limit_and_exports_thresholds():
+    assert "KRAKEN_REFERENCE_FRESHNESS_MS = 60000" in SOURCE
+    assert '"KRAKEN_REFERENCE_MAX_AGE_MS"' in SOURCE
+    assert 'source_name == "kraken"' in SOURCE
+    assert r'\"freshness_limit_ms\"' in SOURCE
+    assert r'\"data_watchdog_ms\"' in SOURCE
+

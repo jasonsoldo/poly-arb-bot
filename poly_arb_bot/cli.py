@@ -859,7 +859,19 @@ def run_shadow_ws(markets_path: Path, size: float, fee_rate: float, log_file: Pa
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        epilog=(
+            "strategy surface toggles (default keeps only paired_lock + maker_paired_accumulate):\n"
+            "  DIRECTIONAL_EV_ENABLE=1        enable late_window_directional_ev\n"
+            "  LOTTERY_EV_ENABLE=1            enable low_price_lottery_ev\n"
+            "  MAKER_ACCUMULATE_ENABLE=0      disable maker_paired_accumulate (default 1)\n"
+            "  SPLIT_SELL_LOCK_ENABLE=1       re-enable split_sell_lock observer (C++)\n"
+            "  MAKER_COMPLETE_SET_ARB_ENABLE=1  re-enable maker_complete_set_arb observer (C++)\n"
+            "  MICROSTRUCTURE_REVERSION_ENABLE=1  re-enable microstructure_reversion observer (C++)\n"
+            "  ARB_PATTERN_RESEARCH_ENABLE=1    re-enable arbitrage pattern research events (C++)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "command",
         choices=[

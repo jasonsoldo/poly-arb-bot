@@ -484,3 +484,32 @@ def test_real_market_dynamic_sizing_is_used_by_live_shadow_strategies():
     )[0]
     assert "sizing::size_paired_lock" in paired
     assert "counterfactual_sizes_{{1, 2, 5, 10}}" in SOURCE
+
+
+def test_strategy_surface_env_gates_and_settlement_verified_wiring():
+    # Settlement verification fork fixed: engine combines the reference-layer
+    # verdict with the market row flag instead of trusting either alone.
+    assert 'row.get<bool>("settlement_verified", true)' in SOURCE
+    assert "bool settlement_verified = true;" in SOURCE
+    assert "reference.settlement_verified && market.settlement_verified" in SOURCE
+    # Runtime strategy surface gates (default off; set =1 to re-enable).
+    assert 'environment_enabled("DIRECTIONAL_EV_ENABLE")' in SOURCE
+    assert 'environment_enabled("LOTTERY_EV_ENABLE")' in SOURCE
+    assert 'environment_enabled("SPLIT_SELL_LOCK_ENABLE")' in SOURCE
+    assert 'environment_enabled("MAKER_COMPLETE_SET_ARB_ENABLE")' in SOURCE
+    assert 'environment_enabled("MICROSTRUCTURE_REVERSION_ENABLE")' in SOURCE
+    assert 'os.getenv("DIRECTIONAL_EV_ENABLE"' not in SOURCE
+
+
+def test_environment_enabled_defaults_to_disabled():
+    helper = SOURCE.split("bool environment_enabled(const char* name)", 1)[1]
+    helper = helper.split("}", 1)[0]
+    assert '"0"' in helper
+    for truthy in ('"1"', '"true"', '"yes"', '"on"'):
+        assert truthy in helper
+
+
+def test_arb_pattern_research_emission_gated_by_default():
+    assert 'environment_enabled("ARB_PATTERN_RESEARCH_ENABLE")' in SOURCE
+    assert "if (!arb_research_enabled_) return;" in SOURCE
+    assert "if (arb_research_enabled_) {" in SOURCE

@@ -29,6 +29,23 @@ INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
 STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v9"
 
 
+def strategy_env_enabled(name, default="0"):
+    """Return True when a strategy enable env flag is truthy.
+
+    Directional/lottery probability strategies default to disabled so the
+    runtime surface stays focused on risk-free paired-lock arbitrage.
+    """
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def directional_ev_enabled():
+    return strategy_env_enabled("DIRECTIONAL_EV_ENABLE")
+
+
+def lottery_ev_enabled():
+    return strategy_env_enabled("LOTTERY_EV_ENABLE")
+
+
 def strategy_config(strategy=None):
     values = {
         "directional_min_net_ev": os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015"),
@@ -481,7 +498,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             target_depth_ok=float(event.get("up_fill" if outcome == "Up" else "down_fill", 0)) >= size,
             momentum_bps_30s=model_asset.get("momentum_bps_30s"),
             order_book_imbalance=event.get(imbalance_key), confidence=confidence,
-            settlement_source_verified=any(
+            settlement_source_verified=bool(market.get("settlement_verified", True)) and any(
                 quote.source == settlement_source
                 and quote.status == "FRESH"
                 and quote.price is not None
@@ -490,10 +507,12 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             probability_block_reason=probability_block_reason,
             settlement_source=settlement_source or "",
         )
-        for strategy, evaluator in (
-            ("late_window_directional_ev", evaluate_directional),
-            ("low_price_lottery_ev", evaluate_lottery),
-        ):
+        strategy_evaluators = []
+        if directional_ev_enabled():
+            strategy_evaluators.append(("late_window_directional_ev", evaluate_directional))
+        if lottery_ev_enabled():
+            strategy_evaluators.append(("low_price_lottery_ev", evaluate_lottery))
+        for strategy, evaluator in strategy_evaluators:
             is_lottery = strategy == "low_price_lottery_ev"
             raw_probability = lottery_raw if is_lottery else directional_raw
             probability = (

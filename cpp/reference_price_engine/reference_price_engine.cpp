@@ -178,7 +178,27 @@ constexpr double STATUS_WRITE_INTERVAL_MS = 1000;
 constexpr double IPC_PUBLISH_INTERVAL_MS = 20;
 constexpr double DEFAULT_REFERENCE_FRESHNESS_MS = 3000;
 constexpr double COINBASE_REFERENCE_FRESHNESS_MS = 10000;
+// Kraken 现货 ticker 为成交触发型（订阅 ack 返回 event_trigger=trades），无成交即无推送。
+// 实测推送间隔：BTC ~2.8s、ETH/SOL/XRP 5-7s、DOGE ~38s、HYPE ~63s、BNB ~95s
+// （docs/diagnosis-reference-stale.md §1）。3s 阈值下 Kraken 永远 STALE 属结构性误报。
+// 与改订 book 频道（需重写订阅与解析路径）相比，per-source 阈值表改动小且语义正确：
+// Kraken 默认 60s，BTC/ETH/SOL/XRP/DOGE 可转 FRESH；BNB/HYPE 低流动性对仍可能 STALE，
+// 如实反映流动性事实，不用更宽的阈值掩盖。阈值写入 venue-status 供下游使用。
+constexpr double KRAKEN_REFERENCE_FRESHNESS_MS = 60000;
 constexpr double MODEL_SAMPLE_BUCKET_MS = 1000;
+
+// 数据看门狗（每源独立计时）：websocket_loop 原先仅在 read/write 报错时重连；
+// TCP/TLS 存活但服务端静默停发数据时 async_read 永不返回，received_at 冻结、
+// message_age 无限增长（docs/diagnosis-reference-stale.md §2 实测 578s→20min 形态）。
+// 超时即主动断开重连并重订阅（重连后外层循环会重新 write subscription）。
+// 阈值依据各源正常数据频率：
+// - RTDS/Chainlink：实测每 symbol ~0.95 条/s，30s 无任何数据帧必为异常；
+// - Kraken：业务数据为成交触发，但连接本身有 ~1/s heartbeat 帧，60s 无任何帧判定停滞；
+// - 其他源（binance/coinbase/bybit/okx）：bookTicker/ticker/level2 高频连续推送，30s 保守。
+// 应用层 PONG 不重置看门狗：服务端仍应答 PING 但停发数据正是需要捕获的停滞形态。
+constexpr double DEFAULT_DATA_WATCHDOG_MS = 30000;
+constexpr double RTDS_DATA_WATCHDOG_MS = 30000;
+constexpr double KRAKEN_DATA_WATCHDOG_MS = 60000;
 
 double freshness_from_env(const char* name, double fallback) {
     const char* raw = std::getenv(name);
@@ -198,9 +218,29 @@ double source_freshness_limit_ms(const std::string& source_name) {
     static const double coinbase_limit = freshness_from_env(
         "COINBASE_REFERENCE_MAX_AGE_MS", COINBASE_REFERENCE_FRESHNESS_MS
     );
+    static const double kraken_limit = freshness_from_env(
+        "KRAKEN_REFERENCE_MAX_AGE_MS", KRAKEN_REFERENCE_FRESHNESS_MS
+    );
     return source_name == "coinbase"
         ? coinbase_limit
-        : default_limit;
+        : source_name == "kraken" ? kraken_limit : default_limit;
+}
+
+// 每源数据看门狗阈值（毫秒），常量取值依据见上方注释；可用环境变量覆盖：
+// DATA_WATCHDOG_MS（默认）/ RTDS_DATA_WATCHDOG_MS（chainlink）/ KRAKEN_DATA_WATCHDOG_MS。
+double source_data_watchdog_ms(const std::string& source_name) {
+    static const double default_limit = freshness_from_env(
+        "DATA_WATCHDOG_MS", DEFAULT_DATA_WATCHDOG_MS
+    );
+    static const double rtds_limit = freshness_from_env(
+        "RTDS_DATA_WATCHDOG_MS", RTDS_DATA_WATCHDOG_MS
+    );
+    static const double kraken_limit = freshness_from_env(
+        "KRAKEN_DATA_WATCHDOG_MS", KRAKEN_DATA_WATCHDOG_MS
+    );
+    if (source_name == "chainlink") return rtds_limit;
+    if (source_name == "kraken") return kraken_limit;
+    return default_limit;
 }
 
 std::string source_status(
@@ -443,7 +483,11 @@ void write_status_locked(SharedState& shared, bool force = false) {
                 << "\",\"received_at\":"; write_number(out, source.received_at);
             out << ",\"message_age_ms\":";
             if (source.received_at) out << std::max(0.0, timestamp - source.received_at); else out << "null";
-            out << ",\"status\":\"" << status << "\"}";
+            // freshness_limit_ms / data_watchdog_ms 为每源阈值表输出，供下游
+            // （reference_layer / web_monitor 等）按源使用，不再各自硬编码阈值。
+            out << ",\"status\":\"" << status
+                << "\",\"freshness_limit_ms\":" << source_freshness_limit_ms(item.first)
+                << ",\"data_watchdog_ms\":" << source_data_watchdog_ms(item.first) << "}";
         }
         const auto& binance = asset.sources.at("binance");
         const auto& chainlink = asset.sources.at("chainlink");
@@ -608,6 +652,10 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
             std::cerr << "REFERENCE_CONNECTED source=" << source << "\n";
             beast::flat_buffer buffer;
             asio::steady_timer heartbeat(io);
+            asio::steady_timer watchdog(io);
+            // 数据看门狗：仅非 PONG 数据帧重置计时；PONG 仍到达但无业务数据正是要捕获的停滞形态。
+            auto last_data = std::chrono::steady_clock::now();
+            const double data_watchdog_ms = source_data_watchdog_ms(source);
             const std::string ping_message("PING");
             beast::error_code failure;
             bool finished = false;
@@ -616,6 +664,7 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
                 finished = true;
                 failure = ec;
                 heartbeat.cancel();
+                watchdog.cancel();
                 beast::get_lowest_layer(ws).cancel();
             };
             std::function<void()> read_next;
@@ -625,6 +674,7 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
                     const std::string raw = beast::buffers_to_string(buffer.data());
                     buffer.consume(buffer.size());
                     if (raw != "PONG") {
+                        last_data = std::chrono::steady_clock::now();
                         try { handler(raw); }
                         catch (...) {
                             std::lock_guard<std::mutex> lock(shared.mutex);
@@ -635,6 +685,9 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
                 });
             };
             std::function<void()> schedule_heartbeat;
+            // RTDS 官方要求每 5 秒发送应用层 PING 保活
+            // （docs/polymarket-api-current-state.md §1：RTDS=5s；CLOB market channel 的
+            // 10 秒 PING 在 market_ws_engine.cpp 中独立实现，本引擎不影响它）。
             schedule_heartbeat = [&] {
                 heartbeat.expires_after(std::chrono::seconds(5));
                 heartbeat.async_wait([&](beast::error_code ec) {
@@ -646,6 +699,23 @@ void websocket_loop(SharedState& shared, const std::string& source, const std::s
                 });
             };
             read_next();
+            std::function<void()> schedule_watchdog;
+            schedule_watchdog = [&] {
+                watchdog.expires_after(std::chrono::seconds(5));
+                watchdog.async_wait([&](beast::error_code ec) {
+                    if (ec || finished) return;
+                    const auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - last_data).count();
+                    if (static_cast<double>(idle_ms) < data_watchdog_ms) return schedule_watchdog();
+                    // TCP/TLS 存活但超过阈值无任何数据帧：主动断开，外层循环重连并重订阅。
+                    std::cerr << "REFERENCE_WATCHDOG source=" << source
+                              << " idle_ms=" << idle_ms
+                              << " watchdog_ms=" << static_cast<long long>(data_watchdog_ms)
+                              << " action=reconnect_resubscribe\n";
+                    finish(asio::error::timed_out);
+                });
+            };
+            schedule_watchdog();
             if (text_ping) schedule_heartbeat();
             io.run();
             if (failure) throw boost::system::system_error(failure);

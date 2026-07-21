@@ -6,6 +6,9 @@ from typing import List, Optional
 
 VALID_STATUSES = {"FRESH", "STALE", "DISCONNECTED", "NOT_RECEIVED", "UNSUPPORTED", "OUTLIER"}
 COINBASE_REFERENCE_MAX_AGE_MS = 10_000
+# Kraken 现货 ticker 为成交触发型，低流动性 USD 对推送间隔达数十秒
+# （docs/diagnosis-reference-stale.md §1），与 C++ 引擎的 KRAKEN_REFERENCE_FRESHNESS_MS 保持一致。
+KRAKEN_REFERENCE_MAX_AGE_MS = 60_000
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,8 @@ def aggregate_reference(quotes, settlement_reference, settlement_verified,
 def reference_source_maximum_age_ms(source, default_maximum_age_ms):
     if source == "coinbase":
         return float(os.getenv("COINBASE_REFERENCE_MAX_AGE_MS", str(COINBASE_REFERENCE_MAX_AGE_MS)))
+    if source == "kraken":
+        return float(os.getenv("KRAKEN_REFERENCE_MAX_AGE_MS", str(KRAKEN_REFERENCE_MAX_AGE_MS)))
     return float(default_maximum_age_ms)
 
 
@@ -91,7 +96,12 @@ def reference_state_for_asset(asset, settlement_source, maximum_age_ms, file_age
         age = row.get("message_age_ms")
         effective_age = None if age is None else max(0.0, float(age) + file_age_ms)
         status = row.get("status", "NOT_RECEIVED")
-        source_maximum_age_ms = reference_source_maximum_age_ms(name, maximum_age_ms)
+        # venue-status 中引擎输出的每源阈值优先；旧文件缺该字段时回退到本地阈值表。
+        emitted_limit = row.get("freshness_limit_ms")
+        source_maximum_age_ms = (
+            float(emitted_limit) if emitted_limit
+            else reference_source_maximum_age_ms(name, maximum_age_ms)
+        )
         if status == "FRESH" and (effective_age is None or effective_age > source_maximum_age_ms):
             status = "STALE"
         sources.append(ReferenceQuote(

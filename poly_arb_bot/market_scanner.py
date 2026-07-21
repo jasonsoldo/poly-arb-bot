@@ -39,6 +39,17 @@ INTERVAL_SECONDS = {
     "4h": 14400,
 }
 
+# Assets with an officially documented Polymarket RTDS Chainlink stream
+# (docs.polymarket.com/market-data/websocket/rtds: btc/eth/sol/xrp only).
+# BNB/DOGE/HYPE streams are undocumented, so chainlink-derived settlement for
+# those assets is marked settlement_reference_unverified (AGENTS.md 4.6).
+CHAINLINK_RTDS_SUPPORTED_ASSETS = {"BTC", "ETH", "SOL", "XRP"}
+
+# Assets with a verified Binance spot stream in the reference engine. HYPE has
+# no Binance spot symbol (its 1h market settles on the Binance USDT-M
+# perpetual), so binance-derived settlement for HYPE stays unverified.
+BINANCE_SPOT_SUPPORTED_ASSETS = {"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE"}
+
 
 class MarketScanner:
     def __init__(self, assets: Dict[str, str] = None):
@@ -114,6 +125,10 @@ class MarketScanner:
                 float(start_ts) * 1000 if start_ts is not None else None
             )
 
+        settlement_source, settlement_verified, settlement_block_reason = self._settlement(
+            market, event, ASSET_CODES[asset]
+        )
+
         return LiveMarketSpec(
             market_id=condition_id,
             title=title,
@@ -124,13 +139,16 @@ class MarketScanner:
             up_token_id=up_token_id,
             down_token_id=down_token_id,
             start_ts=start_ts,
-            settlement_source=self._settlement_source(market, event),
+            settlement_source=settlement_source,
             interval=interval,
             series_id=series_id,
             fee_rate=self._fee_rate(market),
             open_price_source=open_price_source,
             open_price_capture_mode=open_price_capture_mode,
             open_price_source_timestamp_ms=open_price_source_timestamp_ms,
+            settlement_verified=settlement_verified,
+            settlement_block_reason=settlement_block_reason,
+            fee_rebate_rate=self._fee_rebate_rate(market),
         )
 
     @staticmethod
@@ -139,6 +157,17 @@ class MarketScanner:
         if isinstance(schedule, dict):
             try:
                 value = first_present(schedule, ("rate", "r"))
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    @staticmethod
+    def _fee_rebate_rate(market: Dict[str, Any]) -> Optional[float]:
+        schedule = parse_jsonish(market.get("feeSchedule")) or {}
+        if isinstance(schedule, dict):
+            try:
+                value = first_present(schedule, ("rebateRate", "rebate_rate"))
                 return float(value) if value is not None else None
             except (TypeError, ValueError):
                 pass
@@ -227,14 +256,35 @@ class MarketScanner:
         return rows
 
     @staticmethod
-    def _settlement_source(market: Dict[str, Any], event: Dict[str, Any]) -> Optional[str]:
+    def _settlement(market: Dict[str, Any], event: Dict[str, Any], asset_code: str):
+        """Derive the settlement source and whether our reference layer can
+        verify it (AGENTS.md 4.6: unverified settlement = shadow research only,
+        directional ACCEPT defaults to reject)."""
         fields = ("rules", "description", "resolutionSource", "resolution_source")
-        text = " ".join(str(first_present(row, fields) or "") for row in (market, event)).lower()
+        parts = []
+        for row in (market, event):
+            for field in fields:
+                value = row.get(field)
+                if value:
+                    parts.append(str(value))
+        text = " ".join(parts).lower()
         if "binance" in text:
-            return "binance"
-        if "chainlink" in text:
-            return "chainlink"
-        return None
+            source = "binance"
+        elif "chainlink" in text:
+            source = "chainlink"
+        else:
+            return None, False, "settlement_source_unidentified"
+        if source == "chainlink":
+            if asset_code in CHAINLINK_RTDS_SUPPORTED_ASSETS:
+                return source, True, None
+            return source, False, "chainlink_rtds_asset_unsupported"
+        # Binance-settled markets (1h): resolutionSource URL distinguishes
+        # Binance spot (/trade/) from USDT-M perpetual (/futures/).
+        if "binance.com/en/futures" in text or "/futures/" in text:
+            return source, False, "binance_perpetual_settlement_unsupported"
+        if asset_code in BINANCE_SPOT_SUPPORTED_ASSETS:
+            return source, True, None
+        return source, False, "binance_spot_asset_unsupported"
 
     def _open_price(self, market: Dict[str, Any], event: Dict[str, Any]) -> Optional[float]:
         direct = first_present(

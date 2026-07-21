@@ -90,3 +90,44 @@ def test_coinbase_uses_its_source_specific_freshness_limit(monkeypatch):
 
     assert state.reference_state == "REFERENCE_READY"
     assert state.fresh_usd_spot_source_count == 1
+
+
+def _kraken_freshness_asset(kraken_row):
+    return {"sources": {
+        "kraken": kraken_row,
+        "coinbase": {
+            "market_type": "spot", "quote_currency": "USD", "price": 100.1,
+            "message_age_ms": 100, "status": "FRESH",
+        },
+        "chainlink": {
+            "market_type": "oracle", "quote_currency": "USD", "price": 100.0,
+            "message_age_ms": 100, "status": "FRESH",
+        },
+    }}
+
+
+def test_emitted_freshness_limit_ms_is_honored_for_kraken():
+    # 引擎在 venue-status 中输出的每源阈值（60s）优先于本地默认 3s：
+    # Kraken 30s 消息年龄在成交触发型推送下仍应计为 FRESH。
+    asset = _kraken_freshness_asset({
+        "market_type": "spot", "quote_currency": "USD", "price": 100.0,
+        "message_age_ms": 30_000, "status": "FRESH", "freshness_limit_ms": 60_000,
+    })
+
+    state = reference_layer.reference_state_for_asset(asset, "chainlink", 3_000)
+
+    assert state.reference_state == "REFERENCE_READY"
+    assert any(row.source == "kraken" and row.status == "FRESH" for row in state.sources)
+
+
+def test_kraken_falls_back_to_source_specific_limit_without_emitted_field(monkeypatch):
+    # 旧 venue-status 无 freshness_limit_ms 字段时，回退到本地 Kraken 60s 阈值。
+    monkeypatch.delenv("KRAKEN_REFERENCE_MAX_AGE_MS", raising=False)
+    asset = _kraken_freshness_asset({
+        "market_type": "spot", "quote_currency": "USD", "price": 100.0,
+        "message_age_ms": 30_000, "status": "FRESH",
+    })
+
+    state = reference_layer.reference_state_for_asset(asset, "chainlink", 3_000)
+
+    assert any(row.source == "kraken" and row.status == "FRESH" for row in state.sources)

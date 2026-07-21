@@ -8,9 +8,10 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .arbitrage_research import IncrementalArbitrageResearch
 from .shadow_report import IncrementalReport
-from .reference_layer import reference_state_for_asset
+from .ev_shadow import directional_ev_enabled, lottery_ev_enabled
+from .maker_shadow import maker_accumulate_enabled
+from .reference_layer import reference_source_maximum_age_ms, reference_state_for_asset
 from .strategy_config import StrategyConfig
 
 
@@ -26,10 +27,6 @@ _STRATEGY_COUNT_JOBS = {}
 _STRATEGY_COUNT_RESULTS = {}
 _STRATEGY_JOB_LOCK = threading.Lock()
 STRATEGY_ASYNC_THRESHOLD_BYTES = 10 * 1024 * 1024
-_ARBITRAGE_ANALYTICS = {}
-_ARBITRAGE_RESULTS = {}
-_ARBITRAGE_JOBS = {}
-_ARBITRAGE_LOCK = threading.Lock()
 ASSETS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE")
 INTERVALS = ("5m", "15m", "1h", "4h")
 PRIMARY_STRATEGIES = (
@@ -37,16 +34,14 @@ PRIMARY_STRATEGIES = (
     "low_price_lottery_ev",
     "paired_lock",
 )
-ARBITRAGE_OBSERVERS = (
-    "split_sell_lock",
-    "maker_complete_set_arb",
-)
 # 4th independent shadow strategy (maker_paired_accumulate); episode
 # open/reject decisions are produced by poly_arb_bot.maker_shadow.
 MAKER_ACCUMULATE_STRATEGIES = ("maker_paired_accumulate",)
-CLOB_REVERSION_STRATEGIES = ("microstructure_reversion",)
-STRATEGIES = (PRIMARY_STRATEGIES + ARBITRAGE_OBSERVERS
-              + MAKER_ACCUMULATE_STRATEGIES + CLOB_REVERSION_STRATEGIES)
+# Focused strategy surface: only paired_lock + maker_paired_accumulate are
+# tracked. split_sell_lock / maker_complete_set_arb / microstructure_reversion
+# observers are env-disabled in the C++ engine (default off) and no longer
+# surfaced on the dashboard.
+STRATEGIES = (PRIMARY_STRATEGIES + MAKER_ACCUMULATE_STRATEGIES)
 # maker_paired_accumulate episode open/reject decisions counted as
 # evaluations (one per state-machine decision, deduped by event_id).
 MAKER_ACCUMULATE_DECISION_EVENTS = frozenset({
@@ -187,150 +182,6 @@ def _empty_strategy_counts():
     return counts
 
 
-def _empty_arbitrage_research():
-    funnel = {
-        "evaluations": 0, "depth_passed": 0, "fee_passed": 0,
-        "latency_survived": 0, "independent_episodes": 0,
-        "shadow_attempts": 0, "leg_1_book_executable": 0,
-        "both_legs_book_executable": 0, "orphaned": 0, "invalidated": 0,
-        "completed": 0, "positive_completed": 0,
-    }
-    return {
-        "funnels": {
-            name: dict(funnel) for name in (
-                "paired_lock", "split_sell_lock", "maker_complete_set_arb",
-            )
-        },
-        "repeatable_patterns": [],
-        "counterfactual_patterns": [],
-        "semantics": "RESEARCH_ONLY_NOT_ORDERS_OR_PNL",
-        "no_repeatable_arbitrage": True,
-        "conclusion": "NO REPEATABLE ARBITRAGE FOUND",
-    }
-
-
-def _merge_arbitrage_research(reports):
-    merged = _empty_arbitrage_research()
-    patterns = {}
-    for report in reports:
-        for strategy, source in report.get("funnels", {}).items():
-            target = merged["funnels"].setdefault(strategy, {})
-            for field, value in source.items():
-                if value is not None:
-                    target[field] = int(target.get(field) or 0) + int(value)
-        for row in report.get("repeatable_patterns", []):
-            key = (
-                row.get("strategy"), row.get("asset"), row.get("timeframe"),
-                row.get("target_size"), row.get("delay_ms"),
-                row.get("leg_order"), row.get("config_hash"),
-            )
-            if key not in patterns:
-                patterns[key] = dict(row)
-                continue
-            current = patterns[key]
-            for field in (
-                "independent_episodes", "distinct_close_windows", "completed",
-                "positive_completed", "simulated_pnl",
-            ):
-                current[field] = (current.get(field) or 0) + (row.get(field) or 0)
-            rank = {
-                "NO_EVIDENCE": 0, "OBSERVED": 1, "PROVISIONAL": 2,
-                "RESEARCH_CANDIDATE": 3, "MAKER_RESEARCH_CANDIDATE": 3,
-                "OUT_OF_SAMPLE_VALIDATED": 4,
-            }
-            if rank.get(row.get("classification"), 0) > rank.get(current.get("classification"), 0):
-                current["classification"] = row.get("classification")
-                current["profitable_capacity"] = row.get("profitable_capacity")
-    merged["repeatable_patterns"] = sorted(
-        patterns.values(),
-        key=lambda row: (
-            row.get("classification") not in {
-                "OUT_OF_SAMPLE_VALIDATED", "RESEARCH_CANDIDATE",
-                "MAKER_RESEARCH_CANDIDATE",
-            },
-            -int(row.get("distinct_close_windows") or 0),
-            -int(row.get("independent_episodes") or 0),
-        ),
-    )
-    counterfactuals = []
-    for report in reports:
-        counterfactuals.extend(report.get("counterfactual_patterns", []))
-    merged["counterfactual_patterns"] = sorted(
-        counterfactuals,
-        key=lambda row: (
-            row.get("classification") != "RESEARCH_CANDIDATE",
-            -int(row.get("distinct_close_windows") or 0),
-            -int(row.get("independent_episodes") or 0),
-            float(row.get("delay_ms") or 0),
-        ),
-    )
-    repeatable = any(
-        row.get("classification") in {
-            "OUT_OF_SAMPLE_VALIDATED", "RESEARCH_CANDIDATE",
-            "MAKER_RESEARCH_CANDIDATE",
-        }
-        for row in merged["repeatable_patterns"]
-    )
-    merged["no_repeatable_arbitrage"] = not repeatable
-    merged["conclusion"] = (
-        "REPEATABLE ARBITRAGE CANDIDATE FOUND"
-        if repeatable else "NO REPEATABLE ARBITRAGE FOUND"
-    )
-    return merged
-
-
-def _refresh_arbitrage(paths, execution_path):
-    reports = []
-    for index, path in enumerate(paths):
-        key = str(path.resolve())
-        tracker = _ARBITRAGE_ANALYTICS.get(key)
-        if tracker is None:
-            tracker = IncrementalArbitrageResearch(
-                path,
-                execution_path if index == 0 else None,
-                _analytics_state_path(path, "web-arbitrage-research"),
-            )
-            _ARBITRAGE_ANALYTICS[key] = tracker
-        reports.append(tracker.refresh())
-    return _merge_arbitrage_research(reports)
-
-
-def _arbitrage_worker(key, paths, execution_path):
-    try:
-        result = _refresh_arbitrage(paths, execution_path)
-        with _ARBITRAGE_LOCK:
-            _ARBITRAGE_RESULTS[key] = result
-    finally:
-        with _ARBITRAGE_LOCK:
-            _ARBITRAGE_JOBS.pop(key, None)
-
-
-def _arbitrage_for_status(paths, execution_path):
-    paths = tuple(path for path in paths if path.exists())
-    key = tuple(str(path.resolve()) for path in paths)
-    total_size = sum(path.stat().st_size for path in paths)
-    initialized = all(
-        _analytics_state_path(path, "web-arbitrage-research").exists()
-        for path in paths
-    )
-    with _ARBITRAGE_LOCK:
-        job = _ARBITRAGE_JOBS.get(key)
-        if job and job.is_alive():
-            return _ARBITRAGE_RESULTS.get(key, _empty_arbitrage_research()), True
-        if paths and not initialized and total_size >= STRATEGY_ASYNC_THRESHOLD_BYTES:
-            job = threading.Thread(
-                target=_arbitrage_worker,
-                args=(key, paths, execution_path), daemon=True,
-            )
-            _ARBITRAGE_JOBS[key] = job
-            job.start()
-            return _ARBITRAGE_RESULTS.get(key, _empty_arbitrage_research()), True
-    result = _refresh_arbitrage(paths, execution_path)
-    with _ARBITRAGE_LOCK:
-        _ARBITRAGE_RESULTS[key] = result
-    return result, False
-
-
 def _new_strategy_state():
     return {
         "identity": None, "offset": 0, "size": 0, "seen": set(),
@@ -461,8 +312,7 @@ def _strategy_counts(paths):
                             strategy = row.get("strategy", "paired_lock")
                             event_type = row.get("event_type")
                             if strategy not in state["counts"] or event_type not in {
-                                "shadow_eval", "shadow_maker_quote_eval",
-                                "shadow_split_sell_eval", "shadow_reversion_eval",
+                                "shadow_eval",
                                 *MAKER_ACCUMULATE_DECISION_EVENTS,
                             }:
                                 continue
@@ -907,25 +757,14 @@ def build_status(data_dir, log_file, state_file):
     shadow_health = _json(shadow_health_path, {})
     current_complete_set_hashes = {
         "paired_lock": shadow_health.get("paired_config_hash"),
-        "split_sell_lock": shadow_health.get("split_sell_config_hash"),
-        "maker_complete_set_arb": shadow_health.get("maker_config_hash"),
     }
     if not any(current_complete_set_hashes.values()):
         current_complete_set_hashes = None
     report, report_refreshing = _report_for_status(
         selected_log, execution_log, current_complete_set_hashes,
     )
-    arbitrage_research, arbitrage_refreshing = _arbitrage_for_status(
-        (selected_log, strategy_log), execution_log,
-    )
     shadow_events = [item for item in events if item.get("event_type") in {
-        "shadow_eval", "shadow_opportunity", "shadow_maker_quote_eval",
-        "shadow_split_sell_eval", "shadow_split_sell_opportunity",
-        "shadow_reversion_eval", "shadow_reversion_candidate",
-        "shadow_reversion_entry_book_executable",
-        "shadow_reversion_exit_book_executable",
-        "shadow_reversion_timeout_exit_book_executable",
-        "shadow_reversion_no_exit", "shadow_reversion_invalidated",
+        "shadow_eval", "shadow_opportunity",
         "maker_episode_opened", "maker_episode_rejected",
         "maker_episode_completed", "maker_episode_closed_with_loss",
         "maker_leg_filled", "maker_leg1_cancelled",
@@ -954,18 +793,30 @@ def build_status(data_dir, log_file, state_file):
     reference_prices = _json(data_dir / "venue-status.json", {})
     reference_age_ms = time.time() * 1000 - reference_prices.get("updated_at_ms", 0)
     reference_prices["stale"] = reference_age_ms > 10_000
+    # Display layer must use each source's own freshness limit (strategy layer:
+    # REFERENCE_MAX_AGE_MS default 3s, coinbase 10s, kraken 60s). Prefer the
+    # per-source limit emitted by the engine; fall back to the local table.
+    display_default_max_age_ms = float(os.getenv("REFERENCE_MAX_AGE_MS", "3000"))
+
+    def _source_display_limit_ms(name, row):
+        emitted = row.get("freshness_limit_ms")
+        if emitted:
+            return float(emitted)
+        return reference_source_maximum_age_ms(name, display_default_max_age_ms)
+
     for asset in reference_prices.get("assets", {}).values():
         file_age = max(reference_age_ms, 0)
         for source in ("binance", "chainlink"):
             source_age = asset.get(f"{source}_source_age_ms", -1)
+            source_limit_ms = reference_source_maximum_age_ms(source, display_default_max_age_ms)
             status_key = f"{source}_status"
             reported = asset.get(status_key)
             if asset.get("supported") is False:
                 status = "UNSUPPORTED"
             elif reported in {"FRESH", "STALE", "DISCONNECTED", "NOT_RECEIVED", "UNSUPPORTED", "OUTLIER"}:
-                status = "STALE" if reported == "FRESH" and (reference_age_ms > 10_000 or source_age + file_age > 10_000) else reported
+                status = "STALE" if reported == "FRESH" and (reference_age_ms > 10_000 or source_age + file_age > source_limit_ms) else reported
             else:
-                status = "FRESH" if source_age >= 0 and reference_age_ms <= 10_000 and source_age + file_age <= 10_000 else "STALE"
+                status = "FRESH" if source_age >= 0 and reference_age_ms <= 10_000 and source_age + file_age <= source_limit_ms else "STALE"
             asset[status_key] = status
             stale = status == "STALE"
             asset[f"{source}_stale"] = stale
@@ -974,12 +825,12 @@ def build_status(data_dir, log_file, state_file):
         asset["stale"] = asset["binance_stale"] and asset["chainlink_stale"]
         if asset.get("binance") is None or asset.get("chainlink") is None:
             asset["divergence_bps"] = None
-        for source in asset.get("sources", {}).values():
+        for name, source in asset.get("sources", {}).items():
             reported = source.get("status", "NOT_RECEIVED")
             age = source.get("message_age_ms")
             if age is not None:
                 source["message_age_ms"] = max(0, float(age) + file_age)
-            if reported == "FRESH" and (age is None or float(age) + file_age > 10_000):
+            if reported == "FRESH" and (age is None or float(age) + file_age > _source_display_limit_ms(name, source)):
                 source["status"] = "STALE"
             if source.get("status") != "FRESH":
                 source["price"] = None
@@ -1036,6 +887,8 @@ def build_status(data_dir, log_file, state_file):
                 "asset": asset,
                 "interval": interval,
                 "settlement_source": market.get("settlement_source"),
+                "settlement_verified": market.get("settlement_verified"),
+                "settlement_block_reason": market.get("settlement_block_reason"),
                 "fast_price": reference.fast_price,
                 "consensus_price": reference.consensus_price,
                 "settlement_reference": reference.settlement_reference,
@@ -1046,11 +899,19 @@ def build_status(data_dir, log_file, state_file):
                 "reference_state": reference.reference_state,
                 "reference_block_reason": reference.reference_block_reason,
             }
+            # Scanner-marked unverified settlement (AGENTS.md 4.6): shadow
+            # research only — display as blocked instead of a silent green REF.
+            if market.get("settlement_verified") is False:
+                reference_row["reference_quorum_met"] = False
+                reference_row["reference_state"] = "REFERENCE_BLOCKED"
+                reference_row["reference_block_reason"] = (
+                    market.get("settlement_block_reason") or "settlement_reference_unverified"
+                )
             market_reference_states[market.get("market_id")] = reference_row
             entry["reference"] = reference_row
             cell["markets"].append(entry)
             cell["count"] += 1
-            if reference.reference_quorum_met:
+            if reference_row["reference_quorum_met"]:
                 cell["reference_ready"] += 1
             else:
                 cell["reference_blocked"] += 1
@@ -1075,9 +936,7 @@ def build_status(data_dir, log_file, state_file):
     session_strategy_evaluations = sum(
         row["evaluations"] for row in session_strategy_counts.values()
     )
-    analytics_refreshing = (
-        report_refreshing or strategy_refreshing or arbitrage_refreshing
-    )
+    analytics_refreshing = report_refreshing or strategy_refreshing
     strategy_evaluations = sum(row["evaluations"] for row in strategy_counts.values())
     strategy_accepts = sum(row["accepts"] for row in strategy_counts.values())
     unique_opportunities = sum(row["unique_opportunities"] for row in strategy_counts.values())
@@ -1087,21 +946,10 @@ def build_status(data_dir, log_file, state_file):
         for name in ("late_window_directional_ev", "low_price_lottery_ev")
     )
     paired_evaluations = strategy_counts["paired_lock"]["evaluations"]
-    split_sell_evaluations = strategy_counts["split_sell_lock"]["evaluations"]
-    split_sell_accepts = strategy_counts["split_sell_lock"]["accepts"]
-    maker_evaluations = strategy_counts["maker_complete_set_arb"]["evaluations"]
-    maker_quote_candidates = strategy_counts["maker_complete_set_arb"]["accepts"]
-    complete_set_evaluations = paired_evaluations + split_sell_evaluations + maker_evaluations
     strategy_latest = {}
     for item in shadow_events:
         if item.get("event_type") not in {
-            "shadow_eval", "shadow_maker_quote_eval", "shadow_split_sell_eval",
-            "shadow_split_sell_opportunity",
-            "shadow_reversion_eval", "shadow_reversion_candidate",
-            "shadow_reversion_entry_book_executable",
-            "shadow_reversion_exit_book_executable",
-            "shadow_reversion_timeout_exit_book_executable",
-            "shadow_reversion_no_exit", "shadow_reversion_invalidated",
+            "shadow_eval",
             "maker_episode_opened", "maker_episode_rejected",
             "maker_episode_completed", "maker_episode_closed_with_loss",
         }:
@@ -1146,44 +994,6 @@ def build_status(data_dir, log_file, state_file):
     )
     current_pair = {key: latest_event.get(key) for key in pair_fields} if latest_event else {}
 
-    latest_split_sell = next(
-        (
-            item for item in shadow_events
-            if item.get("strategy") == "split_sell_lock"
-            and item.get("market_id") in market_ids
-        ),
-        None,
-    )
-    split_sell_fields = (
-        "market_id", "asset", "timeframe", "window", "seconds_to_close",
-        "up_sell_vwap", "down_sell_vwap", "combined_bid_vwap", "gross_proceeds",
-        "up_fee", "down_fee", "total_fees", "execution_buffer",
-        "net_proceeds", "split_collateral_cost", "locked_profit", "locked_roi",
-        "observed_break_even_bid_sum", "observed_profit_threshold_bid_sum",
-        "profit_threshold_shortfall", "required_gross_improvement_per_share",
-        "required_gross_improvement_bps",
-        "expected_execution_value", "decision", "reason",
-    )
-    current_split_sell = {
-        key: latest_split_sell.get(key) for key in split_sell_fields
-    } if latest_split_sell else {}
-    split_sell_latest_by_market = {}
-    for item in shadow_events:
-        if (
-            item.get("strategy") == "split_sell_lock"
-            and item.get("event_type") == "shadow_split_sell_eval"
-            and item.get("market_id") in market_ids
-        ):
-            split_sell_latest_by_market.setdefault(item.get("market_id"), item)
-    split_sell_near_misses = sorted(
-        (
-            {key: item.get(key) for key in split_sell_fields}
-            for item in split_sell_latest_by_market.values()
-            if item.get("reason") == "split_sell_profit_below_threshold"
-            and item.get("profit_threshold_shortfall") is not None
-        ),
-        key=lambda item: float(item["profit_threshold_shortfall"]),
-    )[:8]
     current_hash = report.get("current_strategy_config_hash")
     current_hashes = report.get("current_strategy_config_hashes", {})
     current_paired_hash = report.get("current_paired_config_hash")
@@ -1242,8 +1052,8 @@ def build_status(data_dir, log_file, state_file):
     }
     simulated_complete = report["performance"]["completed"]
     locked_complete = sum(
-        report["performance_by_strategy"][name]["completed"]
-        for name in ("paired_lock", "split_sell_lock")
+        report["performance_by_strategy"].get(name, {}).get("completed", 0)
+        for name in ("paired_lock", "maker_paired_accumulate")
     )
     current_inventory_hash = shadow_health.get("inventory_config_hash")
     complete_set_inventory = []
@@ -1327,21 +1137,6 @@ def build_status(data_dir, log_file, state_file):
             "total_strategy_evaluations": strategy_evaluations,
             "probability_strategy_evaluations": probability_strategy_evaluations,
             "paired_evaluations": paired_evaluations,
-            "split_sell_evaluations": split_sell_evaluations,
-            "split_sell_accepts": split_sell_accepts,
-            "maker_evaluations": maker_evaluations,
-            "maker_quote_candidates": maker_quote_candidates,
-            "maker_quote_geometry_candidates": int(
-                shadow_health.get("maker_quote_geometry_candidates", 0)
-            ),
-            "maker_trade_events": int(shadow_health.get("maker_trade_events", 0)),
-            "maker_single_leg_trade_throughs": int(
-                shadow_health.get("maker_single_leg_trade_throughs", 0)
-            ),
-            "maker_both_leg_trade_throughs": int(
-                shadow_health.get("maker_both_leg_trade_throughs", 0)
-            ),
-            "complete_set_evaluations": complete_set_evaluations,
             "fok_passed": report["fok_passed"],
             "shadow_accepts": max(strategy_accepts, report["accepts"]),
             "model_accepts": (
@@ -1356,15 +1151,6 @@ def build_status(data_dir, log_file, state_file):
             "locked_complete": locked_complete,
             "session_strategy_evaluations": session_strategy_evaluations,
             "session_paired_evaluations": session_strategy_counts["paired_lock"]["evaluations"],
-            "session_split_sell_evaluations": session_strategy_counts[
-                "split_sell_lock"
-            ]["evaluations"],
-            "session_split_sell_accepts": session_strategy_counts[
-                "split_sell_lock"
-            ]["accepts"],
-            "session_maker_quote_candidates": session_strategy_counts[
-                "maker_complete_set_arb"
-            ]["accepts"],
         },
         "shadow_markets": list(latest_shadow.values()),
         "strategy_counts": strategy_counts,
@@ -1461,9 +1247,12 @@ def build_status(data_dir, log_file, state_file):
         "strategy_score": strategy_score,
         "current_pair": current_pair,
         "maker_accumulate": maker_accumulate,
-        "current_split_sell": current_split_sell,
-        "split_sell_near_misses": split_sell_near_misses,
-        "arbitrage_research": arbitrage_research,
+        "strategy_enablement": {
+            "late_window_directional_ev": directional_ev_enabled(),
+            "low_price_lottery_ev": lottery_ev_enabled(),
+            "paired_lock": True,
+            "maker_paired_accumulate": maker_accumulate_enabled(),
+        },
         "clob_readiness": clob_readiness,
         "pipeline_steps": {
             "ingest": "PASS" if markets else "BLOCKED",

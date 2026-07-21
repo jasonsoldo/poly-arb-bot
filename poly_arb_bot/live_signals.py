@@ -30,6 +30,9 @@ class LiveMarketSpec:
     tick_size: Optional[float] = None
     fee_exponent: Optional[float] = None
     fee_taker_only: Optional[bool] = None
+    settlement_verified: bool = True
+    settlement_block_reason: Optional[str] = None
+    fee_rebate_rate: Optional[float] = None
     max_allowed_price: float = 0.99
 
 

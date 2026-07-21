@@ -56,6 +56,7 @@ struct Market {
     std::string up, down, last_reason, split_sell_last_reason;
     std::string condition_id, asset, interval, window;
     std::string settlement_source, title, open_price_source, open_price_capture_mode;
+    bool settlement_verified = true;
     std::optional<double> open_price, open_price_source_timestamp_ms;
     double fee = .07, min_order_size = 0, tick_size = 0;
     double start_ts = 0, close_ts = 0, active_since = 0, last_audit = 0;
@@ -103,6 +104,7 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
         market.interval = row.get<std::string>("interval", "");
         market.settlement_source = row.get<std::string>("settlement_source", "");
         if (market.settlement_source == "null") market.settlement_source.clear();
+        market.settlement_verified = row.get<bool>("settlement_verified", true);
         market.title = row.get<std::string>("title", "");
         market.accepting_orders = row.get<bool>("accepting_orders", true);
         if (const auto value = row.get_optional<double>("open_price")) market.open_price = *value;
@@ -138,6 +140,13 @@ std::string environment_value(const char* name, const char* fallback) {
 
 double environment_double(const char* name, const char* fallback) {
     return std::stod(environment_value(name, fallback));
+}
+
+// Explicit strategy opt-in switches (AGENTS.md §26). All default OFF ("0")
+// so the default runtime surface is paired_lock + maker_paired_accumulate.
+bool environment_enabled(const char* name) {
+    const std::string value = environment_value(name, "0");
+    return value == "1" || value == "true" || value == "yes" || value == "on";
 }
 
 strategy::Config strategy_config_from_environment() {
@@ -953,6 +962,12 @@ private:
                             : std::optional<double>(1 - *lottery_probability.estimated_probability);
                 for (const std::string strategy_name : {"late_window_directional_ev", "low_price_lottery_ev"}) {
                     const bool is_lottery = strategy_name == "low_price_lottery_ev";
+                    const bool emission_enabled = is_lottery
+                        ? lottery_ev_enabled_ : directional_ev_enabled_;
+                    // Directional inputs also feed the maker complete-set
+                    // observer; keep collecting them when only it is enabled.
+                    if (!emission_enabled && (is_lottery || !maker_observer_enabled_))
+                        continue;
                     const auto raw_probability = is_lottery
                         ? lottery_raw_probability : directional_raw_probability;
                     strategy::EvaluationInput input;
@@ -994,7 +1009,8 @@ private:
                     input.order_book_imbalance = book_imbalance(book);
                     input.reference_quorum_met = reference.quorum;
                     input.reference_block_reason = reference.reason;
-                    input.settlement_source_verified = reference.settlement_verified;
+                    input.settlement_source_verified =
+                        reference.settlement_verified && market.settlement_verified;
                     input.probability_block_reason = probability_block_reason;
                     input.minimum_liquidity = strategy_config_.minimum_liquidity;
                     input.maximum_slippage = strategy_config_.maximum_slippage;
@@ -1008,6 +1024,7 @@ private:
                     if (!is_lottery) {
                         directional_inputs[outcome] = input;
                     }
+                    if (!emission_enabled) continue;
                     if (!strategy_audit_.available()) {
                         decision.decision = "REJECT";
                         decision.reason = "audit_backpressure";
@@ -1044,9 +1061,11 @@ private:
                                         book, rate, sizing_result);
                 }
             }
-            emit_complete_set_evaluations(
-                item.first, market, up_book, down_book, directional_inputs,
-                directional_probability.estimated_probability, timestamp);
+            if (maker_observer_enabled_) {
+                emit_complete_set_evaluations(
+                    item.first, market, up_book, down_book, directional_inputs,
+                    directional_probability.estimated_probability, timestamp);
+            }
         }
         const auto evaluation_finished = std::chrono::steady_clock::now();
         if (evaluated_any && last_clob_mutation_at_.time_since_epoch().count()) {
@@ -1628,7 +1647,7 @@ private:
             if (changed) last_clob_mutation_at_ = std::chrono::steady_clock::now();
             ++price_changes_;
         } else if (type == "last_trade_price" && books_.count(asset)) {
-            observe_maker_trade(message, asset);
+            if (maker_observer_enabled_) observe_maker_trade(message, asset);
         }
         if (type == "book" || (type == "price_change" && price_changes_ % 100 == 0))
             std::cerr << "WS_DATA type=" << type << " books=" << book_events_ << " changes=" << price_changes_ << "\n";
@@ -1883,6 +1902,7 @@ private:
     }
 
     void process_due_arb_attempts() {
+        if (!arb_research_enabled_) return;
         const double now_us = steady_now_us();
         for (auto item = pending_arb_attempts_.begin();
                 item != pending_arb_attempts_.end();) {
@@ -2336,20 +2356,24 @@ private:
                 std::abs(timestamp * 1000 - down_book.source_timestamp_ms));
             const double up_best_ask = best_ask(up_book), down_best_ask = best_ask(down_book);
             const double rate = item.second.fee > 0 ? item.second.fee : fallback_fee_;
-            evaluate_microstructure_reversion(
-                item.first, item.second, "Up", item.second.up, up_book, rate,
-                up_age_ms, seconds_to_close, timestamp);
-            evaluate_microstructure_reversion(
-                item.first, item.second, "Down", item.second.down, down_book, rate,
-                down_age_ms, seconds_to_close, timestamp);
-            emit_arbitrage_counterfactual(
-                item.first, item.second, up_book, down_book, rate,
-                books_synced, timestamp
-            );
-            update_observed_arbitrage(
-                item.first, item.second, up_book, down_book, rate,
-                books_synced, timestamp
-            );
+            if (reversion_enabled_) {
+                evaluate_microstructure_reversion(
+                    item.first, item.second, "Up", item.second.up, up_book, rate,
+                    up_age_ms, seconds_to_close, timestamp);
+                evaluate_microstructure_reversion(
+                    item.first, item.second, "Down", item.second.down, down_book, rate,
+                    down_age_ms, seconds_to_close, timestamp);
+            }
+            if (arb_research_enabled_) {
+                emit_arbitrage_counterfactual(
+                    item.first, item.second, up_book, down_book, rate,
+                    books_synced, timestamp
+                );
+                update_observed_arbitrage(
+                    item.first, item.second, up_book, down_book, rate,
+                    books_synced, timestamp
+                );
+            }
             sizing::PairedConfig paired_sizing_config;
             paired_sizing_config.shadow_capital_usd = shadow_sizing_capital_usd_;
             paired_sizing_config.maximum_capital_fraction = paired_max_capital_fraction_;
@@ -2533,57 +2557,136 @@ private:
                        << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n" << std::flush;
             }
 
-            const auto up_sell = sell_vwap(up_book, size_);
-            const auto down_sell = sell_vwap(down_book, size_);
-            const double up_sell_fee = std::round(
-                up_sell.first * rate * up_sell.second * (1 - up_sell.second) * 100000
-            ) / 100000;
-            const double down_sell_fee = std::round(
-                down_sell.first * rate * down_sell.second * (1 - down_sell.second) * 100000
-            ) / 100000;
-            const double split_sell_buffer = size_ * split_sell_buffer_per_share_;
-            const double sell_leg_1_probability = books_synced
-                ? std::min(1.0, up_sell.first / size_) : 0;
-            const double sell_leg_2_probability = books_synced
-                ? std::min(1.0, down_sell.first / size_) * latency_decay : 0;
-            const auto split_sell = complete_set::evaluate_split_sell({
-                size_, up_sell.first, down_sell.first,
-                up_sell.second, down_sell.second,
-                up_sell_fee, down_sell_fee, split_sell_buffer,
-                min_profit_, min_expected_value_,
-                sell_leg_1_probability, sell_leg_2_probability, orphan_leg_loss,
-            });
-            const bool split_sell_window = seconds_to_close >= 20 &&
-                seconds_to_close <= 7200;
-            const bool split_sell_good = books_synced && split_sell_window &&
-                split_sell.decision == "ACCEPT";
-            const std::string split_sell_reason = !books_synced
-                ? "clob_book_stale"
-                : seconds_to_close < 20
-                    ? "closing_window"
-                    : seconds_to_close > 7200
-                        ? "too_early"
-                        : split_sell.reason;
-            const bool split_sell_was_active =
-                item.second.split_sell_active_since > 0;
-            if (split_sell_good && !split_sell_was_active)
-                item.second.split_sell_active_since = timestamp;
-            if (!split_sell_good) item.second.split_sell_active_since = 0;
-            if (
-                split_sell_reason != item.second.split_sell_last_reason ||
-                timestamp - item.second.split_sell_last_audit >= 5
-            ) {
-                const unsigned long long sequence = ++evaluation_sequence_;
-                const std::string event_id = run_id_ + ":" +
-                    std::to_string(generation_) + ":" +
-                    std::to_string(ws_session_id_) + ":" + item.first +
-                    ":split_sell:" + std::to_string(sequence);
-                if (audit_) {
+            // --- split_sell_lock observer (read-only research) ---
+            // Runtime-disabled by default; set SPLIT_SELL_LOCK_ENABLE=1 to re-enable.
+            if (split_sell_enabled_) {
+                const auto up_sell = sell_vwap(up_book, size_);
+                const auto down_sell = sell_vwap(down_book, size_);
+                const double up_sell_fee = std::round(
+                    up_sell.first * rate * up_sell.second * (1 - up_sell.second) * 100000
+                ) / 100000;
+                const double down_sell_fee = std::round(
+                    down_sell.first * rate * down_sell.second * (1 - down_sell.second) * 100000
+                ) / 100000;
+                const double split_sell_buffer = size_ * split_sell_buffer_per_share_;
+                const double sell_leg_1_probability = books_synced
+                    ? std::min(1.0, up_sell.first / size_) : 0;
+                const double sell_leg_2_probability = books_synced
+                    ? std::min(1.0, down_sell.first / size_) * latency_decay : 0;
+                const auto split_sell = complete_set::evaluate_split_sell({
+                    size_, up_sell.first, down_sell.first,
+                    up_sell.second, down_sell.second,
+                    up_sell_fee, down_sell_fee, split_sell_buffer,
+                    min_profit_, min_expected_value_,
+                    sell_leg_1_probability, sell_leg_2_probability, orphan_leg_loss,
+                });
+                const bool split_sell_window = seconds_to_close >= 20 &&
+                    seconds_to_close <= 7200;
+                const bool split_sell_good = books_synced && split_sell_window &&
+                    split_sell.decision == "ACCEPT";
+                const std::string split_sell_reason = !books_synced
+                    ? "clob_book_stale"
+                    : seconds_to_close < 20
+                        ? "closing_window"
+                        : seconds_to_close > 7200
+                            ? "too_early"
+                            : split_sell.reason;
+                const bool split_sell_was_active =
+                    item.second.split_sell_active_since > 0;
+                if (split_sell_good && !split_sell_was_active)
+                    item.second.split_sell_active_since = timestamp;
+                if (!split_sell_good) item.second.split_sell_active_since = 0;
+                if (
+                    split_sell_reason != item.second.split_sell_last_reason ||
+                    timestamp - item.second.split_sell_last_audit >= 5
+                ) {
+                    const unsigned long long sequence = ++evaluation_sequence_;
+                    const std::string event_id = run_id_ + ":" +
+                        std::to_string(generation_) + ":" +
+                        std::to_string(ws_session_id_) + ":" + item.first +
+                        ":split_sell:" + std::to_string(sequence);
+                    if (audit_) {
+                        audit_ << "{\"ts\":" << timestamp << ",\"timestamp\":"
+                               << timestamp << ",\"event_id\":\"" << event_id
+                               << "\",\"run_id\":\"" << run_id_
+                               << "\",\"evaluation_sequence\":" << sequence
+                               << ",\"event_type\":\"shadow_split_sell_eval\""
+                               << ",\"strategy\":\"split_sell_lock\",\"arb_method\":\"SPLIT_AND_SELL_BOTH\""
+                               << ",\"market_id\":\"" << item.first
+                               << "\",\"condition_id\":\""
+                               << reference_ipc::escaped(item.second.condition_id)
+                               << "\",\"asset\":\""
+                               << reference_ipc::escaped(item.second.asset)
+                               << "\",\"timeframe\":\""
+                               << reference_ipc::escaped(item.second.interval)
+                               << "\",\"window\":\""
+                               << reference_ipc::escaped(item.second.window)
+                               << "\",\"generation\":" << generation_
+                               << ",\"session\":" << ws_session_id_
+                               << ",\"decision\":\""
+                               << (split_sell_good ? "ACCEPT" : "REJECT")
+                               << "\",\"reason\":\"" << split_sell_reason
+                               << "\",\"target_size\":" << size_
+                               << ",\"up_sell_fill\":" << up_sell.first
+                               << ",\"down_sell_fill\":" << down_sell.first
+                               << ",\"up_sell_vwap\":" << up_sell.second
+                               << ",\"down_sell_vwap\":" << down_sell.second
+                               << ",\"combined_bid_vwap\":"
+                               << split_sell.combined_bid_vwap
+                               << ",\"gross_proceeds\":" << split_sell.gross_proceeds
+                               << ",\"up_fee\":" << up_sell_fee
+                               << ",\"down_fee\":" << down_sell_fee
+                               << ",\"total_fees\":" << split_sell.total_fees
+                               << ",\"execution_buffer\":" << split_sell_buffer
+                               << ",\"net_proceeds\":" << split_sell.net_proceeds
+                               << ",\"split_collateral_cost\":"
+                               << split_sell.collateral_cost
+                               << ",\"locked_profit\":" << split_sell.locked_profit
+                               << ",\"locked_roi\":" << split_sell.locked_roi
+                               << ",\"observed_break_even_bid_sum\":"
+                               << split_sell.observed_break_even_bid_sum
+                               << ",\"observed_profit_threshold_bid_sum\":"
+                               << split_sell.observed_profit_threshold_bid_sum
+                               << ",\"profit_threshold_shortfall\":"
+                               << split_sell.profit_threshold_shortfall
+                               << ",\"required_gross_improvement_per_share\":"
+                               << split_sell.required_gross_improvement_per_share
+                               << ",\"required_gross_improvement_bps\":"
+                               << split_sell.required_gross_improvement_bps
+                               << ",\"expected_execution_value\":"
+                               << split_sell.expected_execution_value
+                               << ",\"leg_1_fill_probability\":"
+                               << sell_leg_1_probability
+                               << ",\"leg_2_fill_probability\":"
+                               << sell_leg_2_probability
+                               << ",\"time_between_legs_us\":" << leg_interval_us_
+                               << ",\"orphan_leg_loss\":" << orphan_leg_loss
+                               << ",\"inventory_assumption\":\"pre_split_complete_set_available\""
+                               << ",\"books_ready\":true,\"books_fresh\":"
+                               << (books_synced ? "true" : "false")
+                               << ",\"books_synced\":"
+                               << (books_synced ? "true" : "false")
+                               << ",\"seconds_to_close\":" << seconds_to_close
+                               << ",\"config_version\":\"split-sell-shadow-v2\""
+                               << ",\"config_hash\":\""
+                               << split_sell_strategy_config_hash_
+                               << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
+                               << std::flush;
+                    }
+                    record_session_strategy(
+                        "split_sell_lock", split_sell_good ? "ACCEPT" : "REJECT");
+                    item.second.split_sell_last_reason = split_sell_reason;
+                    item.second.split_sell_last_audit = timestamp;
+                }
+                if (split_sell_good && !split_sell_was_active && audit_) {
+                    const unsigned long long sequence = ++opportunity_sequence_;
                     audit_ << "{\"ts\":" << timestamp << ",\"timestamp\":"
-                           << timestamp << ",\"event_id\":\"" << event_id
+                           << timestamp << ",\"event_id\":\"" << run_id_ << ':'
+                           << generation_ << ':' << ws_session_id_ << ':' << item.first
+                           << ":split_sell_opportunity:" << sequence
                            << "\",\"run_id\":\"" << run_id_
                            << "\",\"evaluation_sequence\":" << sequence
-                           << ",\"event_type\":\"shadow_split_sell_eval\""
+                           << ",\"event_type\":\"shadow_split_sell_opportunity\""
                            << ",\"strategy\":\"split_sell_lock\",\"arb_method\":\"SPLIT_AND_SELL_BOTH\""
                            << ",\"market_id\":\"" << item.first
                            << "\",\"condition_id\":\""
@@ -2596,10 +2699,8 @@ private:
                            << reference_ipc::escaped(item.second.window)
                            << "\",\"generation\":" << generation_
                            << ",\"session\":" << ws_session_id_
-                           << ",\"decision\":\""
-                           << (split_sell_good ? "ACCEPT" : "REJECT")
-                           << "\",\"reason\":\"" << split_sell_reason
-                           << "\",\"target_size\":" << size_
+                           << ",\"decision\":\"ACCEPT\",\"reason\":\"split_sell_opportunity\""
+                           << ",\"target_size\":" << size_
                            << ",\"up_sell_fill\":" << up_sell.first
                            << ",\"down_sell_fill\":" << down_sell.first
                            << ",\"up_sell_vwap\":" << up_sell.second
@@ -2635,89 +2736,16 @@ private:
                            << ",\"time_between_legs_us\":" << leg_interval_us_
                            << ",\"orphan_leg_loss\":" << orphan_leg_loss
                            << ",\"inventory_assumption\":\"pre_split_complete_set_available\""
-                           << ",\"books_ready\":true,\"books_fresh\":"
-                           << (books_synced ? "true" : "false")
-                           << ",\"books_synced\":"
-                           << (books_synced ? "true" : "false")
+                           << ",\"books_ready\":true,\"books_fresh\":true,\"books_synced\":true"
                            << ",\"seconds_to_close\":" << seconds_to_close
+                           << ",\"duration_ms\":"
+                           << (timestamp - item.second.split_sell_active_since) * 1000
                            << ",\"config_version\":\"split-sell-shadow-v2\""
                            << ",\"config_hash\":\""
                            << split_sell_strategy_config_hash_
                            << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
                            << std::flush;
-                }
-                record_session_strategy(
-                    "split_sell_lock", split_sell_good ? "ACCEPT" : "REJECT");
-                item.second.split_sell_last_reason = split_sell_reason;
-                item.second.split_sell_last_audit = timestamp;
             }
-            if (split_sell_good && !split_sell_was_active && audit_) {
-                const unsigned long long sequence = ++opportunity_sequence_;
-                audit_ << "{\"ts\":" << timestamp << ",\"timestamp\":"
-                       << timestamp << ",\"event_id\":\"" << run_id_ << ':'
-                       << generation_ << ':' << ws_session_id_ << ':' << item.first
-                       << ":split_sell_opportunity:" << sequence
-                       << "\",\"run_id\":\"" << run_id_
-                       << "\",\"evaluation_sequence\":" << sequence
-                       << ",\"event_type\":\"shadow_split_sell_opportunity\""
-                       << ",\"strategy\":\"split_sell_lock\",\"arb_method\":\"SPLIT_AND_SELL_BOTH\""
-                       << ",\"market_id\":\"" << item.first
-                       << "\",\"condition_id\":\""
-                       << reference_ipc::escaped(item.second.condition_id)
-                       << "\",\"asset\":\""
-                       << reference_ipc::escaped(item.second.asset)
-                       << "\",\"timeframe\":\""
-                       << reference_ipc::escaped(item.second.interval)
-                       << "\",\"window\":\""
-                       << reference_ipc::escaped(item.second.window)
-                       << "\",\"generation\":" << generation_
-                       << ",\"session\":" << ws_session_id_
-                       << ",\"decision\":\"ACCEPT\",\"reason\":\"split_sell_opportunity\""
-                       << ",\"target_size\":" << size_
-                       << ",\"up_sell_fill\":" << up_sell.first
-                       << ",\"down_sell_fill\":" << down_sell.first
-                       << ",\"up_sell_vwap\":" << up_sell.second
-                       << ",\"down_sell_vwap\":" << down_sell.second
-                       << ",\"combined_bid_vwap\":"
-                       << split_sell.combined_bid_vwap
-                       << ",\"gross_proceeds\":" << split_sell.gross_proceeds
-                       << ",\"up_fee\":" << up_sell_fee
-                       << ",\"down_fee\":" << down_sell_fee
-                       << ",\"total_fees\":" << split_sell.total_fees
-                       << ",\"execution_buffer\":" << split_sell_buffer
-                       << ",\"net_proceeds\":" << split_sell.net_proceeds
-                       << ",\"split_collateral_cost\":"
-                       << split_sell.collateral_cost
-                       << ",\"locked_profit\":" << split_sell.locked_profit
-                       << ",\"locked_roi\":" << split_sell.locked_roi
-                       << ",\"observed_break_even_bid_sum\":"
-                       << split_sell.observed_break_even_bid_sum
-                       << ",\"observed_profit_threshold_bid_sum\":"
-                       << split_sell.observed_profit_threshold_bid_sum
-                       << ",\"profit_threshold_shortfall\":"
-                       << split_sell.profit_threshold_shortfall
-                       << ",\"required_gross_improvement_per_share\":"
-                       << split_sell.required_gross_improvement_per_share
-                       << ",\"required_gross_improvement_bps\":"
-                       << split_sell.required_gross_improvement_bps
-                       << ",\"expected_execution_value\":"
-                       << split_sell.expected_execution_value
-                       << ",\"leg_1_fill_probability\":"
-                       << sell_leg_1_probability
-                       << ",\"leg_2_fill_probability\":"
-                       << sell_leg_2_probability
-                       << ",\"time_between_legs_us\":" << leg_interval_us_
-                       << ",\"orphan_leg_loss\":" << orphan_leg_loss
-                       << ",\"inventory_assumption\":\"pre_split_complete_set_available\""
-                       << ",\"books_ready\":true,\"books_fresh\":true,\"books_synced\":true"
-                       << ",\"seconds_to_close\":" << seconds_to_close
-                       << ",\"duration_ms\":"
-                       << (timestamp - item.second.split_sell_active_since) * 1000
-                       << ",\"config_version\":\"split-sell-shadow-v2\""
-                       << ",\"config_hash\":\""
-                       << split_sell_strategy_config_hash_
-                       << "\",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n"
-                       << std::flush;
             }
         }
         process_due_arb_attempts();
@@ -3045,6 +3073,13 @@ private:
     BoundedAuditWriter strategy_audit_;
     std::string markets_path_, health_path_, run_id_;
     strategy::Config strategy_config_ = strategy_config_from_environment();
+    // Runtime strategy surface switches (default OFF, env opt-in).
+    const bool directional_ev_enabled_ = environment_enabled("DIRECTIONAL_EV_ENABLE");
+    const bool lottery_ev_enabled_ = environment_enabled("LOTTERY_EV_ENABLE");
+    const bool split_sell_enabled_ = environment_enabled("SPLIT_SELL_LOCK_ENABLE");
+    const bool maker_observer_enabled_ = environment_enabled("MAKER_COMPLETE_SET_ARB_ENABLE");
+    const bool reversion_enabled_ = environment_enabled("MICROSTRUCTURE_REVERSION_ENABLE");
+    const bool arb_research_enabled_ = environment_enabled("ARB_PATTERN_RESEARCH_ENABLE");
     double shadow_sizing_capital_usd_ = environment_double(
         "SHADOW_SIZING_CAPITAL_USD", "1000");
     double directional_fractional_kelly_ = environment_double(
@@ -3150,6 +3185,14 @@ int main(int argc, char** argv) {
         unsigned long long document_version = 0;
         std::map<std::string, Market> markets = load_markets(argv[1], &document_version);
         if (markets.empty()) { std::cerr << "NO_TOKENS live_markets.json contains no valid Up/Down tokens\n"; return 4; }
+        std::cerr << "STRATEGY_SURFACE paired_lock=1 "
+            << "directional_ev=" << environment_enabled("DIRECTIONAL_EV_ENABLE")
+            << " lottery_ev=" << environment_enabled("LOTTERY_EV_ENABLE")
+            << " split_sell_lock=" << environment_enabled("SPLIT_SELL_LOCK_ENABLE")
+            << " maker_complete_set_arb=" << environment_enabled("MAKER_COMPLETE_SET_ARB_ENABLE")
+            << " microstructure_reversion=" << environment_enabled("MICROSTRUCTURE_REVERSION_ENABLE")
+            << " arb_pattern_research=" << environment_enabled("ARB_PATTERN_RESEARCH_ENABLE")
+            << " (maker_paired_accumulate runs as the Python maker_shadow bridge)\n";
         const double size = argc > 2 ? std::stod(argv[2]) : 10, fee = argc > 3 ? std::stod(argv[3]) : .07;
         const std::string audit_path = argc > 4 ? argv[4] : "logs/shadow-audit.jsonl";
         const double buffer_per_share = argc > 5 ? std::stod(argv[5]) : .002;

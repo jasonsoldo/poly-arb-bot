@@ -255,7 +255,102 @@ def test_scanner_identifies_settlement_source_from_official_rules():
         base, rules="The resolution source is Binance BTC/USDT using the 1H candle open."
     ), interval="1h")
     assert chainlink.settlement_source == "chainlink"
+    assert chainlink.settlement_verified is True
+    assert chainlink.settlement_block_reason is None
     assert binance.settlement_source == "binance"
+    assert binance.settlement_verified is True
+    assert binance.settlement_block_reason is None
+
+
+def test_scanner_marks_undocumented_chainlink_assets_unverified():
+    base = {
+        "conditionId": "0xcondition", "outcomes": ["Up", "Down"],
+        "clobTokenIds": ["111", "222"], "endDate": "2026-07-14T02:00:00Z",
+        "resolutionSource": "https://data.chain.link/streams/hype-usd",
+        "rules": "The resolution source for this market is information from Chainlink, "
+                 "specifically the HYPE/USD data stream.",
+    }
+    for question, interval in (
+        ("HYPE Up or Down - test", "5m"),
+        ("HYPE Up or Down - test", "15m"),
+        ("HYPE Up or Down - test", "4h"),
+        ("BNB Up or Down - test", "5m"),
+        ("Dogecoin Up or Down - test", "15m"),
+    ):
+        spec = MarketScanner().spec_from_market(dict(base, question=question), interval=interval)
+        assert spec.settlement_source == "chainlink"
+        assert spec.settlement_verified is False
+        assert spec.settlement_block_reason == "chainlink_rtds_asset_unsupported"
+
+
+def test_scanner_marks_binance_perpetual_settlement_unverified():
+    market = {
+        "conditionId": "0xhype1h", "question": "HYPE Up or Down - test",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-14T02:00:00Z",
+        "resolutionSource": "https://www.binance.com/en/futures/HYPEUSDT",
+        "rules": "The resolution source for this market is information from Binance, "
+                 "specifically the HYPE/USDT pair.",
+    }
+    spec = MarketScanner().spec_from_market(market, interval="1h")
+    assert spec.settlement_source == "binance"
+    assert spec.settlement_verified is False
+    assert spec.settlement_block_reason == "binance_perpetual_settlement_unsupported"
+
+
+def test_scanner_verifies_binance_spot_settlement_for_supported_assets():
+    base = {
+        "conditionId": "0xcondition", "outcomes": ["Up", "Down"],
+        "clobTokenIds": ["111", "222"], "endDate": "2026-07-14T02:00:00Z",
+        "resolutionSource": "https://www.binance.com/en/trade/BNB_USDT",
+        "rules": "The resolution source for this market is information from Binance, "
+                 "specifically the BNB/USDT pair.",
+    }
+    for question in ("BNB Up or Down - test", "Dogecoin Up or Down - test"):
+        spec = MarketScanner().spec_from_market(dict(base, question=question), interval="1h")
+        assert spec.settlement_source == "binance"
+        assert spec.settlement_verified is True
+        assert spec.settlement_block_reason is None
+
+
+def test_scanner_marks_unidentified_settlement_source_unverified():
+    market = {
+        "conditionId": "0xcondition", "question": "Bitcoin Up or Down - test",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-14T02:00:00Z",
+    }
+    spec = MarketScanner().spec_from_market(market)
+    assert spec.settlement_source is None
+    assert spec.settlement_verified is False
+    assert spec.settlement_block_reason == "settlement_source_unidentified"
+
+
+def test_scanner_reads_fee_schedule_rebate_rate():
+    market = {
+        "conditionId": "0xcondition", "question": "Bitcoin Up or Down - test",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-14T02:00:00Z",
+        "feeSchedule": {"exponent": 1, "rate": 0.07, "takerOnly": True, "rebateRate": 0.2},
+    }
+    spec = MarketScanner().spec_from_market(market)
+    assert spec.fee_rate == 0.07
+    assert spec.fee_rebate_rate == 0.2
+
+
+def test_scanner_payload_records_settlement_verification_state():
+    market = {
+        "conditionId": "0xcondition", "question": "HYPE Up or Down - test",
+        "outcomes": ["Up", "Down"], "clobTokenIds": ["111", "222"],
+        "endDate": "2026-07-14T02:00:00Z",
+        "resolutionSource": "https://data.chain.link/streams/hype-usd",
+        "rules": "The resolution source is Chainlink HYPE/USD.",
+        "feeSchedule": {"exponent": 1, "rate": 0.07, "takerOnly": True, "rebateRate": 0.2},
+    }
+    row = MarketScanner().to_payload([MarketScanner().spec_from_market(market)])["markets"][0]
+    assert row["settlement_source"] == "chainlink"
+    assert row["settlement_verified"] is False
+    assert row["settlement_block_reason"] == "chainlink_rtds_asset_unsupported"
+    assert row["fee_rebate_rate"] == 0.2
 
 
 def test_scanner_spec_carries_canonical_asset_interval_and_series():

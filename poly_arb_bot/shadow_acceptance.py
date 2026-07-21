@@ -3,6 +3,7 @@ import os
 import time
 from pathlib import Path
 
+from .ev_shadow import directional_ev_enabled, lottery_ev_enabled
 from .web_monitor import build_status
 
 
@@ -12,29 +13,24 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
     shadow = status.get("shadow_report", {})
     reasons = shadow.get("rejection_reasons", {})
     strategy_counts = status.get("strategy_counts", {})
-    strategy_names = ("late_window_directional_ev", "low_price_lottery_ev", "paired_lock")
-    complete_set_strategy_names = ("split_sell_lock", "maker_complete_set_arb")
+    probability_strategy_names = tuple(
+        name for name, enabled in (
+            ("late_window_directional_ev", directional_ev_enabled()),
+            ("low_price_lottery_ev", lottery_ev_enabled()),
+        ) if enabled
+    )
+    disabled_strategy_names = tuple(
+        name for name in ("late_window_directional_ev", "low_price_lottery_ev")
+        if name not in probability_strategy_names
+    ) + ("split_sell_lock", "maker_complete_set_arb", "microstructure_reversion")
+    strategy_names = probability_strategy_names + ("paired_lock", "maker_paired_accumulate")
     strategy_rows = [strategy_counts.get(name, {}) for name in strategy_names]
-    probability_rows = [strategy_counts.get(name, {}) for name in strategy_names[:2]]
+    probability_rows = [strategy_counts.get(name, {}) for name in probability_strategy_names]
     counts = status.get("counts", {})
     execution = status.get("shadow_execution", {})
     lifecycle = status.get("shadow_lifecycle", {})
     health = status.get("shadow_health", {})
     probability_observations = status.get("probability_observations", {})
-    arbitrage_research = status.get("arbitrage_research", {})
-    arbitrage_funnels = arbitrage_research.get("funnels", {})
-    arbitrage_book_evidence_integrity = (
-        arbitrage_research.get("semantics") == "RESEARCH_ONLY_NOT_ORDERS_OR_PNL"
-        and bool(arbitrage_funnels)
-        and all(
-            "both_legs_filled" not in funnel
-            and all(field in funnel for field in (
-                "shadow_attempts", "leg_1_book_executable",
-                "both_legs_book_executable", "orphaned", "invalidated",
-            ))
-            for funnel in arbitrage_funnels.values()
-        )
-    )
     market_data_present = readiness.get("discovered_markets", 0) > 0
     max_reference_age = float(
         max_reference_ipc_age_p95_ms if max_reference_ipc_age_p95_ms is not None
@@ -109,9 +105,13 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
             issues.append("size_binding_constraint")
         return issues
 
+    # Dynamic sizing evidence lives on C++ shadow_eval rows (paired_lock and
+    # any enabled probability strategies). maker_paired_accumulate episodes
+    # carry their own maker-side accounting instead.
+    dynamic_sizing_strategy_names = probability_strategy_names + ("paired_lock",)
     dynamic_latest_failures = {
         name: issues
-        for name in strategy_names
+        for name in dynamic_sizing_strategy_names
         if (issues := dynamic_latest_issues(
             status.get("strategy_latest", {}).get(name, {})
         ))
@@ -154,28 +154,26 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                    real_counters_zero},
         {"name": "probability_observation_integrity", "passed":
          probability_observations.get("semantics") == "CALIBRATION_ONLY_NOT_ORDERS_OR_PNL"},
-        {"name": "arbitrage_book_evidence_integrity", "passed":
-         arbitrage_book_evidence_integrity},
         {"name": "dynamic_sizing_integrity", "passed": dynamic_sizing_integrity},
         {"name": "event_deduplication", "passed": shadow.get("duplicate_events", 0) == 0},
-        {"name": "three_strategy_evaluations",
+        {"name": "enabled_strategy_evaluations",
          "passed": all(row.get("evaluations", 0) > 0 for row in strategy_rows)},
-        {"name": "three_strategy_decisions",
+        {"name": "enabled_strategy_decisions",
          "passed": all(row.get("accepts", 0) + row.get("rejections", 0) == row.get("evaluations", 0)
                        for row in strategy_rows)},
         {"name": "probability_models_evaluated",
-         "passed": all(row.get("model_evaluations", 0) > 0 for row in probability_rows)},
-        {"name": "complete_set_strategies_evaluated",
+         "passed": not probability_rows or
+                   all(row.get("model_evaluations", 0) > 0 for row in probability_rows)},
+        {"name": "disabled_strategies_silent",
          "passed": all(
-             strategy_counts.get(name, {}).get("evaluations", 0) > 0
-             for name in complete_set_strategy_names
+             strategy_counts.get(name, {}).get("evaluations", 0) == 0
+             for name in disabled_strategy_names
          )},
     ]
     passed = all(item["passed"] for item in checks)
     incomplete_checks = {"analytics_ready", "market_data_present", "audit_data_present",
-                         "three_strategy_evaluations", "probability_models_evaluated",
+                         "enabled_strategy_evaluations", "probability_models_evaluated",
                          "low_latency_observed"}
-    incomplete_checks.add("complete_set_strategies_evaluated")
     incomplete_only = all(item["passed"] or item["name"] in incomplete_checks for item in checks)
     status = "PASS" if passed else "INCOMPLETE" if incomplete_only else "FAIL"
     return {"passed": passed, "status": status, "checks": checks,
@@ -183,7 +181,7 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                         "ready": readiness.get("paired_markets_ready", 0),
                         "evaluations": shadow.get("evaluations", 0),
                         "strategy_evaluations": {name: strategy_counts.get(name, {}).get("evaluations", 0)
-                                                 for name in strategy_names + complete_set_strategy_names},
+                                                 for name in strategy_names + disabled_strategy_names},
                         "duplicates": shadow.get("duplicate_events", 0),
                         "reference_ipc_receive_age_ms_p95": reference_age_p95,
                         "clob_to_strategy_evaluation_us_p95": strategy_latency_p95,
@@ -196,9 +194,6 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                         "book_resyncs_per_hour": book_resyncs_per_hour,
                         "max_ws_reconnects_per_hour": max_ws_reconnects_per_hour,
                         "max_book_resyncs_per_hour": max_book_resyncs_per_hour,
-                        "arbitrage_research_conclusion": arbitrage_research.get(
-                            "conclusion", "NO REPEATABLE ARBITRAGE FOUND"
-                        ),
                         "dynamic_active_positions": dynamic_sizing.get("active_positions"),
                         "dynamic_active_capital_usd": dynamic_sizing.get("active_capital_usd"),
                         "dynamic_maximum_loss_usd": dynamic_sizing.get("maximum_loss_usd"),

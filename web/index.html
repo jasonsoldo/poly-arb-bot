@@ -328,7 +328,7 @@ footer{padding:4px 12px 10px;display:flex;justify-content:space-between;font:500
 
   <!-- ============ P3a · DIRECTIONAL EV ============ -->
   <section class="panel s6">
-    <div class="phead"><h2>DIRECTIONAL EV · LATE WINDOW</h2><span class="meta" id="dirMeta">STRATEGY 1/3</span></div>
+    <div class="phead"><h2>DIRECTIONAL EV · LATE WINDOW</h2><span class="meta" id="dirMeta">STRATEGY 1/3</span> <span id="dirEnableChip"></span></div>
     <div class="strat-head">
       <span id="dirDecision"><span class="chip chip--gray">NO EVALUATION</span></span>
       <span class="sub" id="dirMarket">N/A</span>
@@ -339,7 +339,7 @@ footer{padding:4px 12px 10px;display:flex;justify-content:space-between;font:500
 
   <!-- ============ P3b · LOW-PRICE LOTTERY ============ -->
   <section class="panel s6">
-    <div class="phead"><h2>LOW-PRICE LOTTERY EV</h2><span class="meta">STRATEGY 2/3 · HIGH VARIANCE</span></div>
+    <div class="phead"><h2>LOW-PRICE LOTTERY EV</h2><span class="meta">STRATEGY 2/3 · HIGH VARIANCE</span> <span id="lotEnableChip"></span></div>
     <div class="strat-head">
       <span id="lotDecision"><span class="chip chip--gray">NO EVALUATION</span></span>
       <span class="sub" id="lotMarket">N/A</span>
@@ -430,12 +430,6 @@ footer{padding:4px 12px 10px;display:flex;justify-content:space-between;font:500
     <div id="calibration"><div class="empty">N/A</div></div>
   </section>
 
-  <!-- ============ P9c · RESEARCH ============ -->
-  <section class="panel s4">
-    <div class="phead"><h2>ARBITRAGE RESEARCH</h2><span class="meta"><span class="chip chip--orange">RESEARCH ONLY</span></span></div>
-    <div id="research"><div class="empty">N/A</div></div>
-  </section>
-
 </div>
 
 <!-- ============ P10 · BOTTOM BAR ============ -->
@@ -470,6 +464,7 @@ const signMoney=v=>{if(!isNum(v))return NA;const n=Number(v);return '<span class
 const signNum=(v,n,suf)=>{if(!isNum(v))return NA;const x=Number(v);return '<span class="'+(x>0?'g':x<0?'r':'')+'">'+(x>0?'+':'')+x.toFixed(n==null?2:n)+(suf||'')+'</span>';};
 const cnt=v=>isNum(v)?Number(v).toLocaleString('en-US'):NA;
 const dur=s=>{if(!isNum(s))return NA;s=Number(s);return s<60?s.toFixed(0)+'S':s<3600?(s/60).toFixed(1)+'M':(s/3600).toFixed(1)+'H';};
+const ageMs=v=>{if(!isNum(v))return'AGE N/A';const ms=Number(v);return ms<10000?ms.toFixed(0)+'MS':dur(ms/1000);};
 const fg=(label,val,cls)=>'<div class="fg"><label>'+label+'</label><b class="'+(cls||'')+'">'+val+'</b></div>';
 const cell=(label,val,cls)=>'<div class="cell '+(cls||'')+'"><label>'+label+'</label><b>'+val+'</b></div>';
 const kv=(k,v)=>'<div class="kv"><span>'+k+'</span><b>'+v+'</b></div>';
@@ -570,7 +565,7 @@ function renderReference(d){
         if(!x)return '<td>'+statusSpan('NOT_RECEIVED')+'</td>';
         const price=isNum(x.price)?px(x.price):null;
         return '<td>'+(price?'<b>'+price+'</b>':'')+statusSpan(x.status)+
-          '<small>'+(isNum(x.message_age_ms)?Number(x.message_age_ms).toFixed(0)+'MS':'AGE N/A')+(x.symbol?' · '+esc(x.symbol):'')+'</small></td>';
+          '<small>'+ageMs(x.message_age_ms)+(x.symbol?' · '+esc(x.symbol):'')+'</small></td>';
       }).join('')+'</tr>';
     });
     $('refTable').innerHTML=html+'</table>';
@@ -642,7 +637,16 @@ function stratCounts(d,key){
     '<span>TOP REJ <b>'+(reasons||'N/A')+'</b></span>';
 }
 function renderDirectional(d){
+  const enabled=((d.strategy_enablement||{}).late_window_directional_ev)!==false;
+  $('dirEnableChip').innerHTML=enabled?'<span class="chip chip--green">ENABLED</span>':'<span class="chip chip--gray">DISABLED</span>';
   const e=(d.strategy_latest||{}).late_window_directional_ev||{};
+  if(!enabled){
+    $('dirDecision').innerHTML='<span class="chip chip--gray">DISABLED · N/A</span>';
+    $('dirMarket').textContent='SET DIRECTIONAL_EV_ENABLE=1 TO ENABLE';
+    $('dirGrid').innerHTML='';
+    $('dirCounts').innerHTML='<span><b>STRATEGY DISABLED · NOT EVALUATED · NO EVENTS EXPECTED</b></span>';
+    return;
+  }
   $('dirDecision').innerHTML=decisionChip(e.decision);
   $('dirMarket').textContent=[e.asset,e.timeframe,e.outcome?String(e.outcome).toUpperCase():null].filter(Boolean).join(' · ')||'N/A';
   const riskBuf=(isNum(e.latency_risk_buffer)||isNum(e.settlement_risk_buffer))?
@@ -667,7 +671,16 @@ function renderDirectional(d){
   $('dirCounts').innerHTML=stratCounts(d,'late_window_directional_ev');
 }
 function renderLottery(d){
+  const enabled=((d.strategy_enablement||{}).low_price_lottery_ev)!==false;
+  $('lotEnableChip').innerHTML=enabled?'<span class="chip chip--green">ENABLED</span>':'<span class="chip chip--gray">DISABLED</span>';
   const e=(d.strategy_latest||{}).low_price_lottery_ev||{};
+  if(!enabled){
+    $('lotDecision').innerHTML='<span class="chip chip--gray">DISABLED · N/A</span>';
+    $('lotMarket').textContent='SET LOTTERY_EV_ENABLE=1 TO ENABLE';
+    $('lotGrid').innerHTML='';
+    $('lotCounts').innerHTML='<span><b>STRATEGY DISABLED · NOT EVALUATED · NO EVENTS EXPECTED</b></span>';
+    return;
+  }
   $('lotDecision').innerHTML=decisionChip(e.decision);
   $('lotMarket').textContent=[e.asset,e.timeframe,e.outcome?String(e.outcome).toUpperCase():null].filter(Boolean).join(' · ')||'N/A';
   const uncBuf=(isNum(e.model_uncertainty_buffer)||isNum(e.execution_risk_buffer))?
@@ -951,23 +964,6 @@ function renderCalibration(d){
       '</div></div>';
   }).join('')+'<span class="sub">CALIBRATION ONLY · NOT ORDERS OR PNL · STRICT ACCEPT REMAINS SEPARATE</span>';
 }
-function renderResearch(d){
-  const r=d.arbitrage_research||{},f=r.funnels||{};
-  const names={paired_lock:'PAIRED LOCK',split_sell_lock:'SPLIT+SELL',maker_complete_set_arb:'MAKER COMPLETE SET'};
-  const keys=Object.keys(f);
-  let html='';
-  keys.forEach(k=>{const x=f[k]||{};
-    html+='<div style="border:1px solid var(--line);padding:5px 8px;margin-bottom:5px">'+
-      '<b style="font:700 9px var(--font-mono);letter-spacing:.1em">'+esc(names[k]||k)+'</b>'+
-      '<div class="counts-strip" style="border:0;margin-top:3px;padding-top:0">'+
-      '<span>EVAL <b>'+(x.evaluations??'N/A')+'</b></span><span>EPISODES <b>'+(x.independent_episodes??'N/A')+'</b></span>'+
-      '<span>ATTEMPTS <b>'+(x.shadow_attempts??'N/A')+'</b></span><span>COMPLETED <b>'+(x.completed??'N/A')+'</b></span>'+
-      '<span>ORPHAN <b>'+(x.orphaned??0)+'</b></span></div></div>';});
-  if(keys.length||r.conclusion){
-    html+='<div class="sub">CONCLUSION: '+esc(r.conclusion||'N/A')+' · RESEARCH ONLY · BOOK EXECUTABLE ≠ FILL</div>';
-    $('research').innerHTML=html;
-  }else{$('research').innerHTML='<div class="empty">N/A · NO ARBITRAGE AUDIT</div>';}
-}
 
 /* ================= header / bottom ================= */
 function renderChrome(d){
@@ -983,7 +979,7 @@ function renderChrome(d){
   $('sysChip').className='chip '+(sys==='ONLINE'?'chip--green-fill':sys==='DEGRADED'?'chip--orange':'chip--red-fill');
   $('modeChip').textContent=d.mode||'DRY RUN';
   const lat=(d.latency_rankings||{}).polymarket||{};
-  $('msgAge').textContent='MSG AGE '+(isNum(lat.latest)?Number(lat.latest).toFixed(0)+(lat.unit||'ms').toUpperCase():'N/A');
+  $('msgAge').textContent='MSG AGE '+(isNum(lat.latest)?(String(lat.unit||'ms')==='ms'?ageMs(lat.latest):Number(lat.latest).toFixed(0)+String(lat.unit).toUpperCase()):'N/A');
   if(isNum(d.ts)){$('clock').innerHTML=new Date(Number(d.ts)*1000).toISOString().slice(11,19)+'<small> UTC</small>';
     $('sync').textContent=new Date(Number(d.ts)*1000).toLocaleTimeString();}
   $('rankbar').innerHTML=
@@ -1027,7 +1023,6 @@ function render(d){
   renderLatency(d);
   renderLog(d);
   renderCalibration(d);
-  renderResearch(d);
 }
 async function refresh(){
   try{
