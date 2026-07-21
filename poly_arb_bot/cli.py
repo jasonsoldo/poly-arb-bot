@@ -879,6 +879,7 @@ def main() -> int:
             "strategy-calibration",
             "probability-calibration",
             "paired-opportunity-report",
+            "maker-shadow",
         ],
     )
     parser.add_argument("--snapshot", default="data/sample_live_snapshot.json")
@@ -916,6 +917,20 @@ def main() -> int:
     parser.add_argument("--min-seconds-to-close", type=float, default=20.0)
     parser.add_argument("--opportunity-threshold", type=float, default=1.0)
     parser.add_argument("--max-run-gap-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--strategy-audit-file", default="logs/strategy-audit.jsonl",
+        help="maker-shadow: strategy audit JSONL the maker_paired_accumulate "
+             "events are appended to (one complete JSON object per line)")
+    parser.add_argument(
+        "--maker-state-file", default="state/maker-shadow.json",
+        help="maker-shadow: tail-offset/statistics state file")
+    parser.add_argument(
+        "--live-markets", default="data/live_markets.json",
+        help="maker-shadow: live market metadata used for active/tradable flags")
+    parser.add_argument(
+        "--venue-file", default="data/venue-status.json",
+        help="maker-shadow: reference venue status used for the per-asset "
+             "system clock skew (same source as the directional strategies)")
     args = parser.parse_args()
     if args.command == "web-monitor":
         serve(args.host, args.port, Path("web"), Path("data"), Path(args.log_file), Path(args.state_file or "state/orders.json"))
@@ -947,6 +962,23 @@ def main() -> int:
             watch=args.watch,
             state_path=args.report_state,
             json_output=args.output,
+        )
+    if args.command == "maker-shadow":
+        # Shadow bridge for the maker_paired_accumulate strategy: tails the C++
+        # paired_lock audit stream (--audit-file), drives the maker episode
+        # state machine, and appends maker events to --strategy-audit-file.
+        # Pure Shadow: real_order_submissions/real_orders/real_fills stay 0.
+        # Explicit enable flag: MAKER_ACCUMULATE_ENABLE=0 disables (default on,
+        # matching the repository convention that shadow strategies all run).
+        # Strategy thresholds are configured via MAKER_ACCUMULATE_* env vars
+        # (see MakerAccumulateConfig.from_env).
+        from .maker_shadow import run as run_maker_shadow
+        return run_maker_shadow(
+            args.audit_file,
+            args.strategy_audit_file,
+            args.maker_state_file,
+            args.live_markets,
+            venue_path=args.venue_file,
         )
 
     if args.command == "simulate":

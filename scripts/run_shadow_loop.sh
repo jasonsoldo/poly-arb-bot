@@ -55,7 +55,8 @@ scanner_pid=$!
 reference_pid=""
 execution_pid=""
 ev_pid=""
-trap 'kill "$scanner_pid" "$reference_pid" "$execution_pid" "$ev_pid" 2>/dev/null || true' EXIT INT TERM
+maker_pid=""
+trap 'kill "$scanner_pid" "$reference_pid" "$execution_pid" "$ev_pid" "$maker_pid" 2>/dev/null || true' EXIT INT TERM
 
 # Windows/MSYS2 OpenSSL has no default CA store; point the C++ engines at a CA
 # bundle when SSL_CERT_FILE is not already provided (Linux VPS is unaffected
@@ -90,6 +91,13 @@ execution_pid=$!
 EV_SHADOW_MODE=verify "$python_bin" -m poly_arb_bot.ev_shadow \
   logs/strategy-audit.jsonl logs/strategy-parity.jsonl state/ev-shadow-verify.json &
 ev_pid=$!
+# maker_paired_accumulate shadow bridge (4th independent strategy). Tails the
+# C++ paired_lock audit stream and appends maker episode events to
+# logs/strategy-audit.jsonl. Explicit opt-out: MAKER_ACCUMULATE_ENABLE=0.
+if [[ "${MAKER_ACCUMULATE_ENABLE:-1}" != "0" ]]; then
+  "$python_bin" -m poly_arb_bot.maker_shadow &
+  maker_pid=$!
+fi
 
 echo "SHADOW_LOOP engine_start dynamic_reload_s=5 market_scan_s=$refresh_seconds"
 ./build/market_ws_engine data/live_markets.json "$size" "$fee_rate" logs/shadow-audit.jsonl \

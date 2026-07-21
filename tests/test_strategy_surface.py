@@ -17,6 +17,14 @@ def test_strategy_roles_separate_primary_models_from_research_observers():
         "split_sell_lock",
         "maker_complete_set_arb",
     )
+    # maker_paired_accumulate is the 4th independent shadow strategy; its
+    # episode decisions are produced by poly_arb_bot.maker_shadow and counted
+    # from logs/strategy-audit.jsonl.
+    assert web_monitor.MAKER_ACCUMULATE_STRATEGIES == ("maker_paired_accumulate",)
+    assert "maker_paired_accumulate" in web_monitor.STRATEGIES
+    assert web_monitor.MAKER_ACCUMULATE_DECISION_EVENTS == frozenset({
+        "maker_episode_opened", "maker_episode_rejected",
+    })
     assert "inventory_rebalancing_arb" not in web_monitor.STRATEGIES
 
 

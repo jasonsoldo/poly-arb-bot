@@ -184,3 +184,41 @@ def test_dashboard_separates_probability_observation_from_strict_execution():
     assert "probability_observations" in source
     assert "probability_calibration" in source
     assert "brier_score" in source
+
+
+def test_dashboard_renders_maker_paired_accumulate_panel():
+    # 4th strategy panel (design §10): real maker_* audit bindings, N/A empty
+    # state, ESTIMATED REBATE and configured-queue-model labeling.
+    source = Path("web/index.html").read_text(encoding="utf-8")
+    assert "MAKER PAIRED ACCUMULATE · SHADOW" in source
+    assert "STRATEGY 4/4" in source
+    assert "maker_accumulate" in source
+    assert "renderMaker" in source
+    for element_id in (
+        "makerPanel", "makerStateGrid", "makerEpiStats", "makerLimits",
+        "makerEpisodes", "makerChain1", "makerChain2", "makerCounts",
+    ):
+        assert f'id="{element_id}"' in source
+    for label in (
+        "EPISODE STATE MACHINE", "LEG1 WORKING", "LEG2 WORKING",
+        "CLOSED LOSS", "ACTIVE EPISODES", "NO ACTIVE EPISODES",
+        "LEG1 AVG", "LEG2 MAX PRICE", "MAKER FEES", "BUFFER / SHARE",
+        "GAS / SHARE", "LOCKED MARGIN", "ESTIMATED REBATE",
+        "估计返佣", "未到账不计入利润", "CONFIGURED QUEUE MODEL",
+        "TOTAL EXPOSURE", "AT-RISK EXPOSURE", "DAILY LOSS",
+        "CONSEC ORPHANS", "ORPHAN CIRCUIT", "REALIZED SHADOW PNL",
+        "N/A · NO MAKER AUDIT DATA",
+    ):
+        assert label in source
+    # dual fill-mode accounting fields come from maker_leg_filled events
+    for field in (
+        "strict_would_fill", "queue_would_fill", "shadow_fill_mode",
+        "episode_realized_pnl", "estimated_rebate", "orphan_seconds",
+        "max_total_exposure", "max_at_risk_exposure", "max_daily_loss",
+        "circuit_breaker_open", "consecutive_orphans",
+    ):
+        assert field in source
+    # §16 / §10.3 compliance: no forbidden status words, MESSAGE AGE naming
+    assert "SAFE" not in source
+    assert "VERIFIED" not in source
+    assert ">LATENCY<" not in source

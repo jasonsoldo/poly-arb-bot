@@ -1198,3 +1198,180 @@ def test_web_status_rereads_health_after_analytics(tmp_path, monkeypatch):
     assert status["shadow_health"]["stale"] is False
     assert status["shadow_health"]["age_seconds"] < 5
 
+
+
+# ---------------------------------------------------------------------------
+# maker_paired_accumulate web aggregation (4th strategy panel)
+# ---------------------------------------------------------------------------
+
+def _maker_fixture(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    state = tmp_path / "state"
+    data.mkdir(); logs.mkdir(); state.mkdir()
+    (data / "live_markets.json").write_text(
+        json.dumps({"markets": [{"market_id": "m1"}]}), encoding="utf-8")
+    (logs / "shadow-audit.jsonl").write_text("", encoding="utf-8")
+    now = time.time()
+    events = [
+        # episode 1: opened -> leg1 filled -> leg2 quoting (still active)
+        {"ts": now - 30, "event_id": "mk-open-1", "event_type": "maker_episode_opened",
+         "strategy": "maker_paired_accumulate", "episode_id": "maker-episode:aaaabbbbcccc0001",
+         "market_id": "m1", "condition_id": "c1", "asset": "BTC", "timeframe": "5m",
+         "decision": "ACCEPT", "reason": "maker_pair_margins_pass",
+         "state_from": "IDLE", "state_to": "LEG1_WORKING", "leg1_outcome": "Down",
+         "leg1_quote_price": 0.46, "leg1_order_size": 25.0, "expected_margin": 0.012,
+         "seconds_to_close": 200, "shadow_fill_mode": "strict",
+         "real_order_submissions": 0, "real_orders": 0, "real_fills": 0},
+        {"ts": now - 20, "event_id": "mk-fill-1", "event_type": "maker_leg_filled",
+         "strategy": "maker_paired_accumulate", "episode_id": "maker-episode:aaaabbbbcccc0001",
+         "market_id": "m1", "condition_id": "c1", "asset": "BTC", "timeframe": "5m",
+         "decision": "FILLED", "reason": "leg1_filled", "leg": 1, "outcome": "Down",
+         "fill_price": 0.46, "fill_size": 25.0, "leg1_avg_price": 0.46,
+         "leg1_filled_size": 25.0, "fill_mode": "strict",
+         "strict_would_fill": True, "queue_would_fill": True,
+         "seconds_to_close": 190, "shadow_fill_mode": "strict"},
+        {"ts": now - 19, "event_id": "mk-sc-1", "event_type": "maker_episode_state_change",
+         "strategy": "maker_paired_accumulate", "episode_id": "maker-episode:aaaabbbbcccc0001",
+         "market_id": "m1", "condition_id": "c1", "asset": "BTC", "timeframe": "5m",
+         "decision": "STATE_CHANGE", "reason": "leg1_filled",
+         "state_from": "LEG1_WORKING", "state_to": "LEG1_FILLED",
+         "locked_size": 0.0, "at_risk_size": 25.0, "seconds_to_close": 190},
+        {"ts": now - 18, "event_id": "mk-quote-1", "event_type": "maker_quote_updated",
+         "strategy": "maker_paired_accumulate", "episode_id": "maker-episode:aaaabbbbcccc0001",
+         "market_id": "m1", "condition_id": "c1", "asset": "BTC", "timeframe": "5m",
+         "decision": "QUOTE", "reason": "leg2_opened", "leg": 2, "outcome": "Up",
+         "new_quote_price": 0.50, "leg2_max_price": 0.535, "leg2_best_bid": 0.49,
+         "leg2_best_ask": 0.51, "improve_attempt": 0, "max_improves": 5,
+         "seconds_to_close": 189},
+        # episode 2: opened -> completed (full cost chain)
+        {"ts": now - 15, "event_id": "mk-open-2", "event_type": "maker_episode_opened",
+         "strategy": "maker_paired_accumulate", "episode_id": "maker-episode:dddd2222",
+         "market_id": "m1", "condition_id": "c2", "asset": "ETH", "timeframe": "15m",
+         "decision": "ACCEPT", "reason": "maker_pair_margins_pass",
+         "state_from": "IDLE", "state_to": "LEG1_WORKING", "leg1_outcome": "Up",
+         "leg1_quote_price": 0.44, "leg1_order_size": 20.0, "expected_margin": 0.02,
+         "seconds_to_close": 700, "shadow_fill_mode": "strict"},
+        {"ts": now - 10, "event_id": "mk-complete-2", "event_type": "maker_episode_completed",
+         "strategy": "maker_paired_accumulate", "episode_id": "maker-episode:dddd2222",
+         "market_id": "m1", "condition_id": "c2", "asset": "ETH", "timeframe": "15m",
+         "decision": "COMPLETE", "reason": "pair_completed",
+         "gross_cost": 0.94, "maker_fees": 0.0, "hedge_taker_fee": 0.0,
+         "gas_cost_per_share": 0.0001, "buffer_per_share": 0.005,
+         "net_cost": 0.9451, "guaranteed_payout": 1.0, "locked_profit": 0.0549,
+         "locked_roi": 0.058, "locked_size": 20.0, "at_risk_size": 0.0,
+         "estimated_rebate": 0.009, "estimated_rebate_label": "ESTIMATED REBATE, NOT IN REALIZED PNL",
+         "realized_rebate": 0.0, "exit_path": "maker_complete",
+         "leg1_avg_price": 0.44, "leg2_avg_price": 0.50, "leg2_max_price": 0.555,
+         "leg1_filled_size": 20.0, "leg2_filled_size": 20.0,
+         "orphan_seconds": 12.5, "orphan_max_drawdown": 0.0,
+         "episode_realized_pnl": 1.196, "seconds_to_close": 650},
+        # a rejected evaluation (deduped decision event)
+        {"ts": now - 5, "event_id": "mk-reject-1", "event_type": "maker_episode_rejected",
+         "strategy": "maker_paired_accumulate", "episode_id": None,
+         "market_id": "m1", "condition_id": "c3", "asset": "SOL", "timeframe": "5m",
+         "decision": "REJECT", "reason": "expected_margin_below_threshold",
+         "blocking_reasons": ["expected_margin_below_threshold"],
+         "seconds_to_close": 100, "shadow_fill_mode": "strict",
+         "real_order_submissions": 0, "real_orders": 0, "real_fills": 0},
+    ]
+    (logs / "strategy-audit.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in events) + "\n", encoding="utf-8")
+    (state / "maker-shadow.json").write_text(json.dumps({
+        "updated_at": now,
+        "statistics": {
+            "strategy": "maker_paired_accumulate",
+            "episodes_opened": 2, "episodes_completed": 1,
+            "episodes_cancelled": 0, "episodes_closed_with_loss": 0,
+            "active_episodes": 1, "leg1_fill_rate": 1.0,
+            "leg2_completion_rate": 1.0, "orphan_rate": 0.0,
+            "average_locked_profit": 1.196, "average_orphan_loss": None,
+            "max_orphan_loss": None, "realized_shadow_pnl": 1.196,
+            "consecutive_orphans": 0, "circuit_breaker_open": False,
+            "active_total_exposure": 11.5, "active_at_risk_exposure": 11.5,
+            "daily_loss": 0.0,
+            "limits": {"max_notional_per_market": 25.0, "max_total_exposure": 100.0,
+                       "max_at_risk_exposure": 50.0, "max_daily_loss": 5.0,
+                       "max_consecutive_orphans": 3},
+            "real_order_submissions": 0, "real_orders": 0, "real_fills": 0,
+        },
+    }), encoding="utf-8")
+    return data, logs, state
+
+
+def test_web_status_exposes_maker_accumulate_panel_aggregation(tmp_path):
+    data, logs, state = _maker_fixture(tmp_path)
+
+    status = build_status(data, logs / "shadow-audit.jsonl", state / "orders.json")
+    maker = status["maker_accumulate"]
+
+    assert maker["available"] is True
+    assert maker["semantics"] == "SHADOW_ONLY_NOT_ORDERS_OR_REAL_PNL"
+    # state machine distribution (audit window)
+    assert maker["state_counts"]["LEG2_WORKING"] == 0  # quote update is not a state change
+    assert maker["state_counts"]["LEG1_FILLED"] == 1
+    assert maker["state_counts"]["COMPLETE"] == 1
+    assert maker["episodes_in_window"] == 2
+    # active episode detail
+    active = maker["active_episodes"]
+    assert len(active) == 1
+    row = active[0]
+    assert row["episode_short"] == "bbbbcccc0001"[-8:]
+    assert row["state"] == "LEG1_FILLED"
+    assert row["leg1_avg_price"] == 0.46
+    assert row["leg2_quote_price"] == 0.50
+    assert row["leg2_max_price"] == 0.535
+    assert row["at_risk_size"] == 25.0
+    assert row["at_risk_usd"] == 25.0 * 0.46
+    assert row["orphan_seconds"] is not None and row["orphan_seconds"] >= 15
+    # cost chain from the latest terminal event
+    chain = maker["cost_chain"]
+    assert chain["exit_path"] == "maker_complete"
+    assert chain["maker_fees"] == 0.0
+    assert chain["locked_profit"] == 0.0549
+    assert chain["estimated_rebate"] == 0.009
+    assert "ESTIMATED REBATE" in chain["estimated_rebate_label"]
+    assert chain["episode_realized_pnl"] == 1.196
+    # strict vs queue dual accounting from maker_leg_filled events
+    fills = maker["fill_modes"]
+    assert fills["samples"] == 1
+    assert fills["strict_would_fill"] == 1
+    assert fills["queue_would_fill"] == 1
+    assert fills["shadow_fill_mode"] == "strict"
+    # decision stats (opened=ACCEPT x2, rejected=REJECT x1)
+    assert maker["decisions"]["evaluations"] == 3
+    assert maker["decisions"]["accepts"] == 2
+    assert maker["decisions"]["rejections"] == 1
+    assert maker["top_reject_reasons"] == [
+        {"reason": "expected_margin_below_threshold", "count": 1}]
+    # portfolio limits from the bridge state statistics (real machine state)
+    expo = maker["exposure"]
+    assert expo["total"] == 11.5
+    assert expo["at_risk"] == 11.5
+    assert expo["daily_loss"] == 0.0
+    assert expo["circuit_breaker_open"] is False
+    assert expo["limits"]["max_total_exposure"] == 100.0
+    assert maker["statistics"]["realized_shadow_pnl"] == 1.196
+
+
+def test_web_status_maker_accumulate_empty_state_is_not_fabricated(tmp_path):
+    data = tmp_path / "data"
+    logs = tmp_path / "logs"
+    data.mkdir(); logs.mkdir()
+    (data / "live_markets.json").write_text(
+        json.dumps({"markets": []}), encoding="utf-8")
+    (logs / "shadow-audit.jsonl").write_text("", encoding="utf-8")
+
+    status = build_status(data, logs / "shadow-audit.jsonl", tmp_path / "orders.json")
+    maker = status["maker_accumulate"]
+
+    assert maker["available"] is False
+    assert maker["active_episodes"] == []
+    assert maker["cost_chain"] is None
+    assert maker["statistics"] is None
+    assert maker["fill_modes"]["samples"] == 0
+    assert maker["decisions"] == {
+        "evaluations": 0, "accepts": 0, "rejections": 0,
+        "session_evaluations": 0, "session_accepts": 0, "session_rejections": 0,
+    }
+    assert all(count == 0 for count in maker["state_counts"].values())

@@ -367,6 +367,33 @@ footer{padding:4px 12px 10px;display:flex;justify-content:space-between;font:500
     <div class="counts-strip" id="pairCounts"></div>
   </section>
 
+  <!-- ============ P4c · MAKER PAIRED ACCUMULATE ============ -->
+  <section class="panel s12" id="makerPanel">
+    <div class="phead"><h2>MAKER PAIRED ACCUMULATE · SHADOW</h2>
+      <span class="meta"><span class="chip chip--purple">SHADOW</span> STRATEGY 4/4 · MAKER SIDE · <span id="makerMeta">N/A</span></span></div>
+    <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:10px">
+      <div>
+        <span class="lbl">EPISODE STATE MACHINE · AUDIT-WINDOW COUNTS</span>
+        <div class="checks" style="grid-template-columns:repeat(4,1fr);margin-top:4px" id="makerStateGrid"></div>
+        <div class="counts-strip" id="makerEpiStats"></div>
+      </div>
+      <div>
+        <span class="lbl">PORTFOLIO LIMITS · CONFIGURED THRESHOLDS</span>
+        <div id="makerLimits" style="margin-top:4px"></div>
+      </div>
+    </div>
+    <div style="margin-top:8px">
+      <span class="lbl">ACTIVE EPISODES · SHADOW STATE MACHINE</span>
+      <div id="makerEpisodes" style="margin-top:3px"><div class="empty">NO ACTIVE EPISODES</div></div>
+    </div>
+    <div style="margin-top:8px">
+      <span class="lbl">COST CHAIN · LATEST TERMINAL EPISODE (COMPLETE / CLOSED WITH LOSS)</span>
+      <div class="chain" style="grid-template-columns:repeat(8,1fr);margin-top:3px" id="makerChain1"></div>
+      <div class="chain" style="grid-template-columns:repeat(8,1fr);margin-top:4px" id="makerChain2"></div>
+    </div>
+    <div class="counts-strip" id="makerCounts"></div>
+  </section>
+
   <!-- ============ P7 · MARKET MATRIX ============ -->
   <section class="panel s5">
     <div class="phead"><h2>MARKET MATRIX · ASSET × TIMEFRAME</h2><span class="meta" id="matrixMeta">COUNT · REF READY/TOTAL</span></div>
@@ -711,6 +738,108 @@ function renderPaired(d){
     '<span>EEV / FILL PROBABILITIES = <b>配置型压力模型 · CONFIG-MODEL ONLY</b></span>';
 }
 
+/* ================= P4c maker paired accumulate ================= */
+function makerMeter(label,used,limit){
+  const ok=isNum(used)&&isNum(limit)&&Number(limit)>0;
+  const pct=ok?Math.min(100,Number(used)/Number(limit)*100):0;
+  const cls=ok&&pct>=90?'bad':ok&&pct>=70?'warn':'';
+  return '<div class="bar-row" style="grid-template-columns:130px 1fr auto">'+
+    '<span class="nm">'+label+'</span>'+
+    '<div class="meter"><i class="'+cls+'" style="width:'+pct+'%"></i></div>'+
+    '<b style="white-space:nowrap">'+(ok?('$'+Number(used).toFixed(2)+' / $'+Number(limit).toFixed(2)):'N/A')+'</b></div>';
+}
+function renderMaker(d){
+  const m=d.maker_accumulate||{};
+  const has=m.available===true;
+  const stats=m.statistics||{};
+  const expo=m.exposure||{},limits=expo.limits||{};
+  const dec=m.decisions||{},fills=m.fill_modes||{};
+  const age=isNum(m.state_age_seconds)?Number(m.state_age_seconds).toFixed(0)+'S':'N/A';
+  $('makerMeta').textContent=has?('STATE AGE '+age+' · REAL ORDERS 0'):'NO MAKER AUDIT DATA · N/A';
+  /* --- state machine distribution --- */
+  const sc=m.state_counts||{};
+  const states=[
+    ['LEG1_WORKING','LEG1 WORKING',''],['LEG1_FILLED','LEG1 FILLED',''],
+    ['LEG2_WORKING','LEG2 WORKING',''],['HEDGING_DIRECTIONAL_EXIT','EXITING',''],
+    ['EMERGENCY_FLATTEN','EMERG FLATTEN','o'],['COMPLETE','COMPLETE','pass'],
+    ['LEG1_CANCELLED','CANCELLED',''],['CLOSED_WITH_LOSS','CLOSED LOSS','fail'],
+  ];
+  $('makerStateGrid').innerHTML=states.map(x=>{
+    const n=sc[x[0]];
+    const val=has?(isNum(n)?n:0):'N/A';
+    const cls=!has?'idle':(x[2]&&val>0)?x[2]:'';
+    return '<div class="check '+cls+'"><label>'+x[1]+'</label><b>'+val+'</b></div>';
+  }).join('');
+  $('makerEpiStats').innerHTML=
+    '<span>OPENED <b>'+(isNum(stats.episodes_opened)?stats.episodes_opened:'N/A')+'</b></span>'+
+    '<span>LEG1 FILL RATE <b>'+(isNum(stats.leg1_fill_rate)?(Number(stats.leg1_fill_rate)*100).toFixed(1)+'%':'N/A')+'</b></span>'+
+    '<span>LEG2 COMPL RATE <b>'+(isNum(stats.leg2_completion_rate)?(Number(stats.leg2_completion_rate)*100).toFixed(1)+'%':'N/A')+'</b></span>'+
+    '<span>ORPHAN RATE <b>'+(isNum(stats.orphan_rate)?(Number(stats.orphan_rate)*100).toFixed(1)+'%':'N/A')+'</b></span>'+
+    '<span>REALIZED SHADOW PNL <b>'+(isNum(stats.realized_shadow_pnl)?signMoney(stats.realized_shadow_pnl):'N/A')+'</b></span>'+
+    '<span>ACTIVE <b>'+(isNum(stats.active_episodes)?stats.active_episodes:(has?(m.active_episodes||[]).length:'N/A'))+'</b></span>';
+  /* --- portfolio limits --- */
+  const cb=expo.circuit_breaker_open;
+  $('makerLimits').innerHTML=
+    makerMeter('TOTAL EXPOSURE',expo.total,limits.max_total_exposure)+
+    makerMeter('AT-RISK EXPOSURE',expo.at_risk,limits.max_at_risk_exposure)+
+    makerMeter('DAILY LOSS',expo.daily_loss,limits.max_daily_loss)+
+    '<div class="counts-strip" style="border:0;margin-top:2px;padding-top:0">'+
+    '<span>CONSEC ORPHANS <b>'+(isNum(expo.consecutive_orphans)?expo.consecutive_orphans:'N/A')+'</b> / '+(isNum(limits.max_consecutive_orphans)?limits.max_consecutive_orphans:'N/A')+'</span>'+
+    '<span>ORPHAN CIRCUIT <b>'+(cb==null||cb===undefined?'<span class="na">N/A</span>':cb?'<span class="r">OPEN · HALTED</span>':'<span class="g">CLOSED</span>')+'</b></span></div>';
+  /* --- active episodes --- */
+  const eps=m.active_episodes||[];
+  if(!eps.length){
+    $('makerEpisodes').innerHTML='<div class="empty">'+(has?'NO ACTIVE EPISODES':'N/A · NO MAKER AUDIT DATA')+'</div>';
+  }else{
+    $('makerEpisodes').innerHTML=eps.map(e=>{
+      const st=String(e.state||'N/A');
+      const stCls=st==='LEG1_WORKING'?'chip--gray':st==='LEG2_WORKING'?'chip--orange':(st.indexOf('EMERGENCY')>=0||st.indexOf('HEDGING')>=0)?'chip--red':'chip--green';
+      return '<div class="trow" style="grid-template-columns:76px minmax(140px,320px) 104px 66px 88px 62px 76px">'+
+        '<span class="ts" title="'+esc(e.episode_id||'')+'">'+(e.episode_short?esc(e.episode_short):'N/A')+'</span>'+
+        '<span class="mkt">'+esc([e.asset,e.timeframe,String(e.market_id||'').slice(0,10)].filter(Boolean).join(' ')||'N/A')+'</span>'+
+        '<span><span class="chip '+stCls+'">'+esc(st.replace(/_/g,' '))+'</span></span>'+
+        '<span class="val">'+num(e.leg1_avg_price,3)+'<small>LEG1 AVG</small></span>'+
+        '<span class="val">'+num(e.leg2_quote_price,3)+' / '+num(e.leg2_max_price,3)+'<small>LEG2 Q/MAX</small></span>'+
+        '<span class="val">'+dur(e.orphan_seconds)+'<small>ORPHAN</small></span>'+
+        '<span class="val '+(isNum(e.at_risk_usd)&&Number(e.at_risk_usd)>0?'o':'')+'">'+money(e.at_risk_usd)+'<small>AT-RISK</small></span></div>';
+    }).join('');
+  }
+  /* --- cost chain (latest terminal episode) --- */
+  const cc=m.cost_chain||{};
+  const hasChain=!!m.cost_chain;
+  const rebateCls=hasChain?'warn':'';
+  $('makerChain1').innerHTML=
+    cell('LEG1 AVG',num(cc.leg1_avg_price,4))+
+    cell('LEG2 AVG',num(cc.leg2_avg_price,4))+
+    cell('LEG2 MAX PRICE',num(cc.leg2_max_price,4))+
+    cell('GROSS COST',num(cc.gross_cost,4))+
+    cell('MAKER FEES',hasChain?num(cc.maker_fees==null?0:cc.maker_fees,4):NA)+
+    cell('HEDGE TAKER FEE',num(cc.hedge_taker_fee,4))+
+    cell('BUFFER / SHARE',num(cc.buffer_per_share,4),hasChain?'warn':'')+
+    cell('GAS / SHARE',num(cc.gas_cost_per_share,4),hasChain?'warn':'');
+  const profitCls=isNum(cc.locked_profit)?(Number(cc.locked_profit)>0?'good':'bad'):'';
+  $('makerChain2').innerHTML=
+    cell('NET COST',num(cc.net_cost,4),hasChain?'hi':'')+
+    cell('LOCKED MARGIN',num(cc.locked_profit,4),profitCls)+
+    cell('LOCKED ROI',isNum(cc.locked_roi)?(Number(cc.locked_roi)*100).toFixed(3)+'%':NA,profitCls)+
+    cell('ESTIMATED REBATE',num(cc.estimated_rebate,4),rebateCls)+
+    cell('REALIZED PNL',signMoney(cc.episode_realized_pnl))+
+    cell('EXIT PATH',cc.exit_path?esc(cc.exit_path):NA)+
+    cell('ORPHAN SEC',num(cc.orphan_seconds,1))+
+    cell('DECISION',cc.decision?esc(cc.decision):NA,cc.decision==='COMPLETE'?'good':hasChain?'bad':'');
+  /* --- counts strip --- */
+  const reasons=(m.top_reject_reasons||[]).slice(0,3).map(x=>esc(x.reason)+' '+x.count).join(' / ');
+  $('makerCounts').innerHTML=
+    '<span>DECISIONS E <b>'+(dec.evaluations??0)+'</b> A <b>'+(dec.accepts??0)+'</b> R <b>'+(dec.rejections??0)+'</b></span>'+
+    '<span>SESSION E <b>'+(dec.session_evaluations??0)+'</b> A <b>'+(dec.session_accepts??0)+'</b></span>'+
+    '<span>TOP REJ <b>'+(reasons||'N/A')+'</b></span>'+
+    '<span>FILLS <b>'+(fills.samples??0)+'</b> STRICT <b>'+(fills.strict_would_fill??0)+'</b> QUEUE <b>'+(fills.queue_would_fill??0)+'</b></span>'+
+    '<span>FILL MODE <b>'+esc(fills.shadow_fill_mode||'N/A')+'</b></span>'+
+    '<span><b>QUEUE = CONFIGURED QUEUE MODEL · NOT A HISTORICAL FILL RATE</b></span>'+
+    '<span><b>ESTIMATED REBATE = 估计返佣 · 未到账不计入利润 · NOT IN REALIZED PNL</b></span>'+
+    '<span><b>SHADOW ONLY · REAL ORDERS 0 / REAL SUBMISSIONS 0</b></span>';
+}
+
 /* ================= P7 matrix ================= */
 function renderMatrix(d){
   const m=d.market_matrix||{},pnls=d.asset_latest_pnl||{};
@@ -892,6 +1021,7 @@ function render(d){
   renderDirectional(d);
   renderLottery(d);
   renderPaired(d);
+  renderMaker(d);
   renderMatrix(d);
   renderAcceptance(d);
   renderLatency(d);

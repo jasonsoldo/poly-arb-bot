@@ -41,8 +41,18 @@ ARBITRAGE_OBSERVERS = (
     "split_sell_lock",
     "maker_complete_set_arb",
 )
+# 4th independent shadow strategy (maker_paired_accumulate); episode
+# open/reject decisions are produced by poly_arb_bot.maker_shadow.
+MAKER_ACCUMULATE_STRATEGIES = ("maker_paired_accumulate",)
 CLOB_REVERSION_STRATEGIES = ("microstructure_reversion",)
-STRATEGIES = PRIMARY_STRATEGIES + ARBITRAGE_OBSERVERS + CLOB_REVERSION_STRATEGIES
+STRATEGIES = (PRIMARY_STRATEGIES + ARBITRAGE_OBSERVERS
+              + MAKER_ACCUMULATE_STRATEGIES + CLOB_REVERSION_STRATEGIES)
+# maker_paired_accumulate episode open/reject decisions counted as
+# evaluations (one per state-machine decision, deduped by event_id).
+MAKER_ACCUMULATE_DECISION_EVENTS = frozenset({
+    "maker_episode_opened",
+    "maker_episode_rejected",
+})
 
 
 def _report_cache_key(path, execution_path=None):
@@ -453,6 +463,7 @@ def _strategy_counts(paths):
                             if strategy not in state["counts"] or event_type not in {
                                 "shadow_eval", "shadow_maker_quote_eval",
                                 "shadow_split_sell_eval", "shadow_reversion_eval",
+                                *MAKER_ACCUMULATE_DECISION_EVENTS,
                             }:
                                 continue
                             event_id = row.get("event_id")
@@ -583,6 +594,276 @@ def _strategy_score(event):
             "components": components, "metrics": metrics, "checks": checks}
 
 
+# ---------------------------------------------------------------------------
+# maker_paired_accumulate aggregation (4th strategy web panel)
+# ---------------------------------------------------------------------------
+_MAKER_STRATEGY = "maker_paired_accumulate"
+_MAKER_ACTIVE_STATES = frozenset({
+    "LEG1_WORKING", "LEG1_FILLED", "LEG2_WORKING",
+    "HEDGING_DIRECTIONAL_EXIT", "EMERGENCY_FLATTEN",
+})
+_MAKER_STATE_ORDER = (
+    "LEG1_WORKING", "LEG1_FILLED", "LEG2_WORKING",
+    "HEDGING_DIRECTIONAL_EXIT", "EMERGENCY_FLATTEN",
+    "COMPLETE", "LEG1_CANCELLED", "CLOSED_WITH_LOSS",
+)
+_MAKER_COST_CHAIN_FIELDS = (
+    "event_type", "episode_id", "market_id", "condition_id", "asset",
+    "timeframe", "window", "ts", "decision", "reason", "exit_path",
+    "leg1_outcome", "leg2_outcome", "leg1_avg_price", "leg2_avg_price",
+    "leg2_max_price", "leg1_filled_size", "leg2_filled_size",
+    "gross_cost", "maker_fees", "hedge_taker_fee", "exit_taker_fee",
+    "fee_rate", "fee_formula_version", "gas_cost_per_share",
+    "buffer_per_share", "net_cost", "guaranteed_payout", "locked_profit",
+    "locked_roi", "locked_size", "at_risk_size", "min_realized_margin",
+    "estimated_rebate", "estimated_rebate_label",
+    "estimated_liquidity_reward", "estimated_liquidity_reward_label",
+    "realized_rebate", "exit_vwap", "orphan_seconds",
+    "orphan_max_drawdown", "episode_realized_pnl", "seconds_to_close",
+)
+
+
+def _maker_episode_default(item):
+    return {
+        "episode_id": item.get("episode_id"),
+        "market_id": item.get("market_id"),
+        "condition_id": item.get("condition_id"),
+        "asset": item.get("asset"),
+        "timeframe": item.get("timeframe"),
+        "state": None,
+        "opened_ts": None,
+        "last_ts": item.get("ts"),
+        "seconds_to_close": item.get("seconds_to_close"),
+        "leg1_outcome": None,
+        "leg1_quote_price": None,
+        "leg1_order_size": None,
+        "leg1_avg_price": None,
+        "leg1_filled_size": 0.0,
+        "leg1_fill_ts": None,
+        "leg2_quote_price": None,
+        "leg2_max_price": None,
+        "leg2_avg_price": None,
+        "leg2_filled_size": 0.0,
+        "locked_size": None,
+        "at_risk_size": None,
+        "expected_margin": None,
+        "improve_attempt": None,
+        "max_improves": None,
+        "terminal": False,
+        "terminal_reason": None,
+        "exit_path": None,
+    }
+
+
+def _maker_accumulate_view(events, strategy_counts, session_strategy_counts,
+                           strategy_recent, maker_state, now):
+    """Aggregate the maker_paired_accumulate web panel purely from canonical
+    audit events (strategy-audit.jsonl tail already loaded into ``events``)
+    plus the maker-shadow bridge state file. Nothing is fabricated: every
+    value traces to a maker_* audit event or to machine statistics persisted
+    by poly_arb_bot.maker_shadow."""
+    maker_events = [
+        item for item in events if item.get("strategy") == _MAKER_STRATEGY
+    ]
+    episodes = {}
+    fill_stats = {
+        "samples": 0, "strict_would_fill": 0, "queue_would_fill": 0,
+        "modes": {}, "shadow_fill_mode": None,
+    }
+    latest_terminal = None
+    for item in sorted(maker_events, key=lambda row: float(row.get("ts", 0))):
+        event_type = item.get("event_type")
+        if item.get("shadow_fill_mode"):
+            fill_stats["shadow_fill_mode"] = item["shadow_fill_mode"]
+        episode_id = item.get("episode_id")
+        episode = None
+        if episode_id:
+            episode = episodes.get(episode_id)
+            if episode is None:
+                episode = _maker_episode_default(item)
+                episodes[episode_id] = episode
+        if event_type == "maker_episode_opened" and episode is not None:
+            episode.update({
+                "state": item.get("state_to") or "LEG1_WORKING",
+                "opened_ts": item.get("ts"),
+                "leg1_outcome": item.get("leg1_outcome"),
+                "leg1_quote_price": item.get("leg1_quote_price"),
+                "leg1_order_size": item.get("leg1_order_size"),
+                "expected_margin": item.get("expected_margin"),
+            })
+        elif event_type == "maker_leg_filled":
+            strict = item.get("strict_would_fill")
+            queue = item.get("queue_would_fill")
+            if strict is not None or queue is not None:
+                fill_stats["samples"] += 1
+                fill_stats["strict_would_fill"] += int(strict is True)
+                fill_stats["queue_would_fill"] += int(queue is True)
+            mode = item.get("fill_mode") or "unknown"
+            fill_stats["modes"][mode] = fill_stats["modes"].get(mode, 0) + 1
+            if episode is not None:
+                if item.get("leg") == 1 and item.get("side") != "sell":
+                    if item.get("leg1_avg_price") is not None:
+                        episode["leg1_avg_price"] = item["leg1_avg_price"]
+                    if item.get("leg1_filled_size") is not None:
+                        episode["leg1_filled_size"] = item["leg1_filled_size"]
+                    if episode["leg1_fill_ts"] is None:
+                        episode["leg1_fill_ts"] = item.get("ts")
+                elif item.get("leg") == 2:
+                    if item.get("leg2_avg_price") is not None:
+                        episode["leg2_avg_price"] = item["leg2_avg_price"]
+                    if item.get("leg2_filled_size") is not None:
+                        episode["leg2_filled_size"] = item["leg2_filled_size"]
+                    if item.get("leg2_max_price") is not None:
+                        episode["leg2_max_price"] = item["leg2_max_price"]
+        elif event_type == "maker_quote_updated" and episode is not None:
+            if item.get("leg") == 2:
+                episode["leg2_quote_price"] = item.get("new_quote_price")
+                if item.get("leg2_max_price") is not None:
+                    episode["leg2_max_price"] = item["leg2_max_price"]
+                episode["improve_attempt"] = item.get("improve_attempt")
+                episode["max_improves"] = item.get("max_improves")
+        elif event_type == "maker_episode_state_change" and episode is not None:
+            episode["state"] = item.get("state_to")
+            if item.get("locked_size") is not None:
+                episode["locked_size"] = item["locked_size"]
+            if item.get("at_risk_size") is not None:
+                episode["at_risk_size"] = item["at_risk_size"]
+        elif event_type == "maker_leg1_cancelled" and episode is not None:
+            episode["state"] = "LEG1_CANCELLED"
+            episode["terminal"] = True
+            episode["terminal_reason"] = item.get("reason")
+        elif event_type in ("maker_episode_completed",
+                            "maker_episode_closed_with_loss"):
+            latest_terminal = item
+            if episode is not None:
+                episode["state"] = (
+                    "COMPLETE" if event_type == "maker_episode_completed"
+                    else "CLOSED_WITH_LOSS"
+                )
+                episode["terminal"] = True
+                episode["terminal_reason"] = item.get("reason")
+                episode["exit_path"] = item.get("exit_path")
+        if episode is not None:
+            episode["last_ts"] = item.get("ts")
+            if item.get("seconds_to_close") is not None:
+                episode["seconds_to_close"] = item["seconds_to_close"]
+
+    state_counts = {name: 0 for name in _MAKER_STATE_ORDER}
+    for episode in episodes.values():
+        if episode["state"] in state_counts:
+            state_counts[episode["state"]] += 1
+
+    active_episodes = []
+    for episode in episodes.values():
+        if episode["terminal"] or episode["state"] not in _MAKER_ACTIVE_STATES:
+            continue
+        leg1_avg = episode["leg1_avg_price"]
+        at_risk_size = episode["at_risk_size"]
+        if at_risk_size is None and episode["leg1_filled_size"]:
+            at_risk_size = max(
+                0.0, episode["leg1_filled_size"] - episode["leg2_filled_size"])
+        orphan_seconds = None
+        if episode["leg1_fill_ts"] is not None:
+            orphan_seconds = max(0.0, now - float(episode["leg1_fill_ts"]))
+        active_episodes.append({
+            "episode_id": episode["episode_id"],
+            "episode_short": str(episode["episode_id"] or "")[-8:],
+            "market_id": episode["market_id"],
+            "asset": episode["asset"],
+            "timeframe": episode["timeframe"],
+            "state": episode["state"],
+            "leg1_outcome": episode["leg1_outcome"],
+            "leg1_quote_price": episode["leg1_quote_price"],
+            "leg1_avg_price": leg1_avg,
+            "leg1_filled_size": episode["leg1_filled_size"],
+            "leg2_quote_price": episode["leg2_quote_price"],
+            "leg2_max_price": episode["leg2_max_price"],
+            "orphan_seconds": orphan_seconds,
+            "at_risk_size": at_risk_size,
+            "at_risk_usd": (
+                at_risk_size * leg1_avg
+                if at_risk_size is not None and leg1_avg is not None else None
+            ),
+            "seconds_to_close": episode["seconds_to_close"],
+            "expected_margin": episode["expected_margin"],
+            "improve_attempt": episode["improve_attempt"],
+            "max_improves": episode["max_improves"],
+        })
+    active_episodes.sort(key=lambda row: float(row.get("seconds_to_close") or 0))
+
+    # Event-window exposure fallback (used only when bridge statistics are
+    # missing, e.g. an older maker-shadow state file).
+    window_total = 0.0
+    window_at_risk = 0.0
+    for episode in episodes.values():
+        if episode["terminal"] or episode["state"] not in _MAKER_ACTIVE_STATES:
+            continue
+        leg1_avg = float(episode["leg1_avg_price"] or 0.0)
+        leg2_avg = float(episode["leg2_avg_price"] or 0.0)
+        window_total += (episode["leg1_filled_size"] * leg1_avg
+                         + episode["leg2_filled_size"] * leg2_avg)
+        if episode["state"] == "LEG1_WORKING" and episode["leg1_order_size"]:
+            window_total += max(
+                0.0,
+                (episode["leg1_order_size"] - episode["leg1_filled_size"])
+                * float(episode["leg1_quote_price"] or 0.0),
+            )
+        window_at_risk += max(
+            0.0, episode["leg1_filled_size"] - episode["leg2_filled_size"]
+        ) * leg1_avg
+
+    statistics = maker_state.get("statistics") or {}
+    limits = statistics.get("limits") or {}
+    decisions = strategy_counts.get(_MAKER_STRATEGY, {})
+    session_decisions = session_strategy_counts.get(_MAKER_STRATEGY, {})
+    recent = strategy_recent.get(_MAKER_STRATEGY, {})
+    top_reasons = sorted(
+        (recent.get("rejection_reasons") or {}).items(),
+        key=lambda row: (-row[1], row[0]),
+    )[:4]
+    available = bool(
+        statistics or episodes or decisions.get("evaluations")
+        or latest_terminal is not None
+    )
+    return {
+        "available": available,
+        "state_updated_at": maker_state.get("updated_at"),
+        "state_age_seconds": (
+            max(0.0, now - float(maker_state["updated_at"]))
+            if maker_state.get("updated_at") is not None else None
+        ),
+        "statistics": statistics or None,
+        "state_counts": state_counts,
+        "episodes_in_window": len(episodes),
+        "active_episodes": active_episodes[:8],
+        "cost_chain": (
+            {key: latest_terminal.get(key) for key in _MAKER_COST_CHAIN_FIELDS}
+            if latest_terminal is not None else None
+        ),
+        "fill_modes": fill_stats,
+        "decisions": {
+            "evaluations": decisions.get("evaluations", 0),
+            "accepts": decisions.get("accepts", 0),
+            "rejections": decisions.get("rejections", 0),
+            "session_evaluations": session_decisions.get("evaluations", 0),
+            "session_accepts": session_decisions.get("accepts", 0),
+            "session_rejections": session_decisions.get("rejections", 0),
+        },
+        "top_reject_reasons": [
+            {"reason": reason, "count": count} for reason, count in top_reasons
+        ],
+        "exposure": {
+            "total": statistics.get("active_total_exposure", window_total),
+            "at_risk": statistics.get("active_at_risk_exposure", window_at_risk),
+            "daily_loss": statistics.get("daily_loss"),
+            "consecutive_orphans": statistics.get("consecutive_orphans"),
+            "circuit_breaker_open": statistics.get("circuit_breaker_open"),
+            "limits": limits,
+        },
+        "semantics": "SHADOW_ONLY_NOT_ORDERS_OR_REAL_PNL",
+    }
+
+
 def _dynamic_position_issues(position):
     issues = []
     if position.get("sizing_mode") != "real_market_dynamic_v1":
@@ -645,6 +926,9 @@ def build_status(data_dir, log_file, state_file):
         "shadow_reversion_exit_book_executable",
         "shadow_reversion_timeout_exit_book_executable",
         "shadow_reversion_no_exit", "shadow_reversion_invalidated",
+        "maker_episode_opened", "maker_episode_rejected",
+        "maker_episode_completed", "maker_episode_closed_with_loss",
+        "maker_leg_filled", "maker_leg1_cancelled",
     }]
     paired_events = [item for item in shadow_events if item.get("strategy", "paired_lock") == "paired_lock"]
     latest_shadow = {}
@@ -662,6 +946,10 @@ def build_status(data_dir, log_file, state_file):
     lifecycle_state = _json(
         data_dir.parent / "state" / "strategy-shadow.json",
         {"positions": {}, "completed": []},
+    )
+    maker_shadow_state = _json(
+        data_dir.parent / "state" / "maker-shadow.json",
+        {},
     )
     reference_prices = _json(data_dir / "venue-status.json", {})
     reference_age_ms = time.time() * 1000 - reference_prices.get("updated_at_ms", 0)
@@ -814,6 +1102,8 @@ def build_status(data_dir, log_file, state_file):
             "shadow_reversion_exit_book_executable",
             "shadow_reversion_timeout_exit_book_executable",
             "shadow_reversion_no_exit", "shadow_reversion_invalidated",
+            "maker_episode_opened", "maker_episode_rejected",
+            "maker_episode_completed", "maker_episode_closed_with_loss",
         }:
             continue
         strategy = item.get("strategy", "paired_lock")
@@ -827,6 +1117,10 @@ def build_status(data_dir, log_file, state_file):
                 item.get("reason", "unknown") for item in recent if item.get("decision") == "REJECT"
             )),
         }
+    maker_accumulate = _maker_accumulate_view(
+        events, strategy_counts, session_strategy_counts,
+        strategy_recent, maker_shadow_state, time.time(),
+    )
     asset_latest_pnl = {asset: None for asset in ASSETS}
     asset_latest_pnl.update({
         asset: item for asset, item in report.get("asset_latest_pnl", {}).items()
@@ -1166,6 +1460,7 @@ def build_status(data_dir, log_file, state_file):
         "pnl_meter": {"simulated_pnl": report["performance"]["simulated_pnl"], "realized_pnl": 0.0},
         "strategy_score": strategy_score,
         "current_pair": current_pair,
+        "maker_accumulate": maker_accumulate,
         "current_split_sell": current_split_sell,
         "split_sell_near_misses": split_sell_near_misses,
         "arbitrage_research": arbitrage_research,
