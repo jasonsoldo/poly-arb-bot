@@ -587,12 +587,105 @@ def test_leg1_margin_deterioration_cancels():
 # Generation / session binding
 # ---------------------------------------------------------------------------
 
-def test_generation_change_cancels_unfilled_leg1():
+def test_generation_change_requotes_working_leg1():
     sm = machine()
     open_and_work(sm)
-    result = sm.evaluate(make_input(ts=T0 + 5, generation=2, session="s2"))
+    # New session arrives with snapshots not yet received: the episode
+    # survives, the old quote is voided, and a requote is pending.
+    result = sm.evaluate(make_input(ts=T0 + 5, generation=2, session="s2",
+                                    up=side(0.40, 0.42, received=False),
+                                    down=side(0.56, 0.57, received=False)))
+    assert result.decision.decision == "WORKING"
+    episode = sm.episodes["c1"]
+    assert episode.state == LEG1_WORKING
+    assert episode.requote_count == 1
+    assert (episode.generation, episode.session) == (2, "s2")
+    requotes = events_of(result, "maker_leg1_requote")
+    assert len(requotes) == 1
+    assert requotes[0]["requote_count"] == 1
+    assert requotes[0]["old_session"] == "s1"
+    assert requotes[0]["new_session"] == "s2"
+    assert requotes[0]["old_generation"] == 1
+    assert requotes[0]["new_generation"] == 2
+    assert not events_of(result, "maker_leg1_cancelled")
+    # Once the new session's books are ready, leg1 is re-quoted through the
+    # same quoting path as the open evaluation (improve one tick on 0.41).
+    follow = sm.evaluate(make_input(ts=T0 + 6, generation=2, session="s2",
+                                    up=side(0.41, 0.43)))
+    assert sm.episodes["c1"].state == LEG1_WORKING
+    updates = [e for e in events_of(follow, "maker_quote_updated")
+               if e["quote_reason"] == "leg1_requote"]
+    assert len(updates) == 1
+    assert updates[0]["old_quote_price"] == 0.41
+    assert updates[0]["new_quote_price"] == 0.42
+    assert updates[0]["requote_count"] == 1
+    assert sm.episodes["c1"].leg1_quote_price == 0.42
+    assert not sm.episodes["c1"].leg1_pending_requote
+    # The re-quoted order can still fill on the new session.
+    sm.evaluate(make_input(ts=T0 + 7, generation=2, session="s2",
+                           up=side(0.40, 0.41)))
+    assert sm.episodes["c1"].state == LEG2_WORKING
+
+
+def test_requote_margin_failure_cancels_episode():
+    sm = machine()
+    open_and_work(sm)
+    # Fresh book on the new session no longer clears the open margin:
+    # same cancellation reason as mid-episode margin deterioration.
+    result = sm.evaluate(make_input(ts=T0 + 5, generation=2, session="s2",
+                                    up=side(0.40, 0.42), down=side(0.59, 0.60)))
     assert result.decision.state == LEG1_CANCELLED
+    assert result.decision.reason == "expected_margin_below_threshold"
+    requotes = events_of(result, "maker_leg1_requote")
+    assert len(requotes) == 1  # requote was attempted before the margin check
+    cancelled = events_of(result, "maker_leg1_cancelled")
+    assert cancelled[0]["reason"] == "expected_margin_below_threshold"
+    assert cancelled[0]["requote_count"] == 1
+    assert "c1" not in sm.episodes
+
+
+def test_session_change_flattens_partially_filled_leg1_instead_of_requoting():
+    sm = machine()
+    open_and_work(sm)
+    sm.evaluate(make_input(ts=T0 + 1,
+                           up=side(0.39, 0.40, ask_size=10.0)))
+    assert sm.episodes["c1"].state == LEG1_WORKING
+    assert sm.episodes["c1"].leg1_filled_size == 10.0
+
+    result = sm.evaluate(make_input(
+        ts=T0 + 5, generation=2, session="s2",
+        up=side(0.38, 0.40), down=side(0.56, 0.57)))
+
+    assert not events_of(result, "maker_leg1_requote")
+    assert result.decision.state == CLOSED_WITH_LOSS
     assert result.decision.reason == "books_lost_mid_episode"
+    exit_fill = [event for event in events_of(result, "maker_leg_filled")
+                 if event.get("reason") == "taker_exit"]
+    assert len(exit_fill) == 1
+    assert exit_fill[0]["fill_size"] == 10.0
+    assert "c1" not in sm.episodes
+
+
+def test_leg1_requote_limit_exceeded_cancels():
+    sm = machine(max_leg1_requotes=2)
+    open_and_work(sm)
+    for index in (1, 2):
+        result = sm.evaluate(make_input(
+            ts=T0 + index * 5, generation=1 + index, session=f"s{1 + index}",
+            up=side(0.40, 0.42, received=False),
+            down=side(0.56, 0.57, received=False)))
+        assert result.decision.decision == "WORKING"
+        assert sm.episodes["c1"].requote_count == index
+    result = sm.evaluate(make_input(ts=T0 + 20, generation=4, session="s4",
+                                    up=side(0.40, 0.42, received=False),
+                                    down=side(0.56, 0.57, received=False)))
+    assert result.decision.state == LEG1_CANCELLED
+    assert result.decision.reason == "leg1_requote_limit_exceeded"
+    cancelled = events_of(result, "maker_leg1_cancelled")
+    assert cancelled[0]["reason"] == "leg1_requote_limit_exceeded"
+    stats = sm.statistics()
+    assert stats["episodes_cancelled"] == 1
+    assert stats["realized_shadow_pnl"] == 0.0
 
 
 def test_generation_change_flattens_holding_episode():
@@ -601,20 +694,40 @@ def test_generation_change_flattens_holding_episode():
     fill_leg1(sm)
     result = sm.evaluate(make_input(ts=T0 + 5, generation=2, session="s2",
                                     up=side(0.38, 0.40)))
+    # LEG2+ discipline is unchanged: forced exit, no requote continuation.
+    assert not events_of(result, "maker_leg1_requote")
     assert result.decision.state == CLOSED_WITH_LOSS
     assert result.decision.reason == "books_lost_mid_episode"
     closed = events_of(result, "maker_episode_closed_with_loss")[0]
     assert closed["generation"] == 2 and closed["session"] == "s2"
+    assert closed["requote_count"] == 0
 
 
 def test_late_message_from_old_session_is_dropped():
     sm = machine()
     open_and_work(sm)
-    sm.evaluate(make_input(ts=T0 + 5, generation=2, session="s2"))  # cancels episode
+    sm.evaluate(make_input(ts=T0 + 5, generation=2, session="s2"))  # requotes leg1
     late = sm.evaluate(make_input(ts=T0 + 6, generation=1, session="s1"))
     assert late.decision.decision == "REJECT"
     assert late.decision.reason == "stale_message_dropped"
     assert sm.statistics()["episodes_opened"] == 1  # no phantom episode from late data
+
+
+def test_unseen_older_numeric_session_is_dropped():
+    sm = machine()
+    open_and_work(sm)
+    current = sm.evaluate(make_input(
+        ts=T0 + 5, generation=1, session="20",
+        up=side(0.40, 0.42, received=False),
+        down=side(0.56, 0.57, received=False)))
+    assert events_of(current, "maker_leg1_requote")
+    late = sm.evaluate(make_input(
+        ts=T0 + 6, generation=1, session="19",
+        up=side(0.40, 0.42, received=False),
+        down=side(0.56, 0.57, received=False)))
+    assert late.decision.decision == "REJECT"
+    assert late.decision.reason == "stale_message_dropped"
+    assert (sm.episodes["c1"].generation, sm.episodes["c1"].session) == (1, "20")
 
 
 # ---------------------------------------------------------------------------

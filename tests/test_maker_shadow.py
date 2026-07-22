@@ -286,7 +286,7 @@ def test_orphan_circuit_breaker_trips_after_consecutive_losses(tmp_path):
     assert events2[0]["reason"] == "orphan_circuit_breaker_open"
 
 
-def test_session_change_cancels_working_leg1(tmp_path):
+def test_session_change_requotes_working_leg1(tmp_path):
     machine = MakerAccumulateStateMachine()
     rows = [
         split_sell_event(1, T0, 0.06, 0.90),
@@ -301,15 +301,19 @@ def test_session_change_cancels_working_leg1(tmp_path):
     ]
     _, events2, _ = run_bridge(tmp_path / "second", rows2, machine)
     event_types = [row["event_type"] for row in events2]
-    assert "maker_leg1_cancelled" in event_types
-    cancelled = next(row for row in events2
-                     if row["event_type"] == "maker_leg1_cancelled")
-    assert cancelled["reason"] == "books_lost_mid_episode"
-    assert not machine.episodes
+    assert "maker_leg1_requote" in event_types
+    assert "maker_quote_updated" in event_types
+    assert "maker_leg1_cancelled" not in event_types
+    assert len(machine.episodes) == 1
+    episode = machine.episodes[CONDITION_ID]
+    assert episode.state == "LEG1_WORKING"
+    assert episode.session == "20"
+    assert episode.requote_count == 1
     # Late message from the OLD session must be dropped.
     rows3 = [paired_event(5, T0 + 6, 0.065, 0.93, session=19)]
     emitted3, events3, _ = run_bridge(tmp_path / "third", rows3, machine)
     assert emitted3 == 0 and events3 == []
+    assert machine.episodes[CONDITION_ID].session == "20"
 
 
 # ---------------------------------------------------------------------------

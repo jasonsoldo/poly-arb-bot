@@ -88,6 +88,7 @@ LEG2_TERMINAL_REASONS = frozenset({
     "books_lost_mid_episode",
     "fee_schedule_lost_mid_episode",
     "leg1_timeout",
+    "leg1_requote_limit_exceeded",
     "orphan_seconds_exceeded",
     "orphan_loss_limit_exceeded",
 })
@@ -202,6 +203,9 @@ class MakerAccumulateConfig:
     max_consecutive_orphans: int = 3
     circuit_cooldown_seconds: float = 3600.0
     max_episodes_per_market_window: int = 3
+    # LEG1_WORKING session-change requote budget (cancel+replace across WS
+    # sessions; leg1 unfilled means no position, so re-quoting is risk-free).
+    max_leg1_requotes: int = 30
 
     def __post_init__(self):
         if self.shadow_fill_mode not in {FILL_STRICT, FILL_QUEUE}:
@@ -273,6 +277,7 @@ class MakerAccumulateConfig:
             max_consecutive_orphans=int(os.getenv("MAKER_ACCUMULATE_MAX_CONSECUTIVE_ORPHANS", "3")),
             circuit_cooldown_seconds=float(os.getenv("MAKER_ACCUMULATE_CIRCUIT_COOLDOWN_SECONDS", "3600")),
             max_episodes_per_market_window=int(os.getenv("MAKER_ACCUMULATE_MAX_EPISODES_PER_MARKET_WINDOW", "3")),
+            max_leg1_requotes=int(os.getenv("MAKER_ACCUMULATE_MAX_LEG1_REQUOTES", "30")),
         )
 
     def config_hash(self):
@@ -385,6 +390,21 @@ class PortfolioView:
 def _append_reason(reasons, reason):
     if reason and reason not in reasons:
         reasons.append(reason)
+
+
+def _binding_is_stale(binding, last, seen):
+    if binding in seen:
+        return True
+    if last is None:
+        return False
+    generation, session = binding
+    last_generation, last_session = last
+    if generation != last_generation:
+        return generation < last_generation
+    try:
+        return int(session) < int(last_session)
+    except (TypeError, ValueError):
+        return False
 
 
 def _fee_rate(row, config):
@@ -574,6 +594,11 @@ class MakerEpisode:
     leg1_fill_ts: Optional[float] = None
     leg1_estimated_fill_probability: Optional[float] = None
     leg1_queue_depth_ahead: float = 0.0
+    # Session-change cancel+replace bookkeeping (LEG1_WORKING only): the old
+    # session's working quote is void, but the episode intent survives by
+    # re-quoting on the new session's fresh book.
+    requote_count: int = 0
+    leg1_pending_requote: bool = False
     side_selection_score_gap: Optional[float] = None
     expected_margin: Optional[float] = None
     hedge_exit_margin: Optional[float] = None
@@ -685,6 +710,8 @@ class MakerAccumulateStateMachine:
             "real_orders": 0,
             "real_fills": 0,
         }
+        if episode is not None:
+            event["requote_count"] = episode.requote_count
         reference = row.reference
         event["fast_price"] = getattr(reference, "fast_price", None)
         event["consensus_price"] = getattr(reference, "consensus_price", None)
@@ -754,7 +781,7 @@ class MakerAccumulateStateMachine:
         seen = self._seen_bindings.setdefault(row.market_id, set())
 
         # Drop late messages from an old generation/session (design §4.4).
-        if binding != last and binding in seen:
+        if binding != last and _binding_is_stale(binding, last, seen):
             return MakerDecision(strategy=STRATEGY, decision="REJECT",
                                  reason="stale_message_dropped",
                                  state=episode.state if episode else IDLE,
@@ -766,15 +793,42 @@ class MakerAccumulateStateMachine:
         if episode is not None and binding_changed \
                 and binding != (episode.generation, episode.session):
             # Reconnect / resync / rotation: old-session working quotes are void.
-            # New episodes may only open on a later tick of the new session.
+            # LEG1_WORKING holds no position, so the episode intent survives as
+            # a cancel+replace on the new session's fresh book (bounded by
+            # max_leg1_requotes). LEG2+ keeps the strict forced-exit discipline.
             if episode.state == LEG1_WORKING:
-                self._cancel_leg1(events, row, episode, "books_lost_mid_episode")
-                return MakerDecision(strategy=STRATEGY, decision="COMPLETE",
-                                     reason="books_lost_mid_episode",
-                                     state=LEG1_CANCELLED,
-                                     episode_id=episode.episode_id, completed=True)
-            episode.forced_exit_reason = "books_lost_mid_episode"
-            episode.generation, episode.session = row.generation, row.session
+                if episode.leg1_filled_size > _EPS:
+                    episode.forced_exit_reason = "books_lost_mid_episode"
+                    episode.generation, episode.session = row.generation, row.session
+                    self._state_change(events, row, episode, LEG1_WORKING,
+                                       LEG1_FILLED, "books_lost_mid_episode")
+                elif episode.requote_count >= self.config.max_leg1_requotes:
+                    self._cancel_leg1(events, row, episode,
+                                      "leg1_requote_limit_exceeded")
+                    return MakerDecision(strategy=STRATEGY, decision="COMPLETE",
+                                         reason="leg1_requote_limit_exceeded",
+                                         state=LEG1_CANCELLED,
+                                         episode_id=episode.episode_id,
+                                         completed=True)
+                else:
+                    old_generation, old_session = episode.generation, episode.session
+                    episode.generation, episode.session = row.generation, row.session
+                    episode.requote_count += 1
+                    episode.leg1_pending_requote = True
+                    self._emit(events, row, "maker_leg1_requote", episode,
+                               "REQUOTE", "session_change_requote", {
+                                   "requote_count": episode.requote_count,
+                                   "old_generation": old_generation,
+                                   "old_session": old_session,
+                                   "new_generation": row.generation,
+                                   "new_session": row.session,
+                                   "leg1_outcome": episode.leg1_outcome,
+                                   "leg1_quote_price": episode.leg1_quote_price,
+                                   "leg1_filled_size": episode.leg1_filled_size,
+                               })
+            else:
+                episode.forced_exit_reason = "books_lost_mid_episode"
+                episode.generation, episode.session = row.generation, row.session
 
         if episode is None:
             return self._open_path(row, events)
@@ -914,6 +968,9 @@ class MakerAccumulateStateMachine:
             return
         if not self._books_evaluable(row):
             return
+        if episode.leg1_pending_requote:
+            self._requote_leg1(row, episode, events)
+            return
         side = self._side(row, episode.leg1_outcome)
         other = self._side(row, episode.leg2_outcome)
         # cancel if book deterioration breaks the open margins (design §4.2)
@@ -954,6 +1011,46 @@ class MakerAccumulateStateMachine:
         episode.leg1_fill_ts = row.timestamp
         self._state_change(events, row, episode, from_state, LEG1_FILLED, "leg1_filled")
         self._open_leg2(events, row, episode)
+
+    def _requote_leg1(self, row, episode, events):
+        """Cancel+replace of the voided leg1 quote on the new session's book.
+
+        Same quoting path as the open evaluation (leg1_quote + margin check);
+        the episode keeps its outcome/order size. If the fresh book no longer
+        clears the open margin, the episode is cancelled with the same
+        ``expected_margin_below_threshold`` reason as mid-episode deterioration."""
+        side = self._side(row, episode.leg1_outcome)
+        other = self._side(row, episode.leg2_outcome)
+        quote_price, quote_mode, queue_ahead, quote_reason = leg1_quote(
+            side, self.config)
+        if quote_price is None:
+            self._cancel_leg1(events, row, episode,
+                              quote_reason or "leg1_no_improve_room")
+            return
+        expected_margin = 1.0 - (quote_price + other.best_bid
+                                 + self.config.buffer_per_share)
+        if expected_margin < self.config.min_expected_locked_margin:
+            self._cancel_leg1(events, row, episode,
+                              "expected_margin_below_threshold")
+            return
+        old_quote = episode.leg1_quote_price
+        episode.leg1_quote_price = quote_price
+        episode.leg1_quote_mode = quote_mode
+        episode.leg1_queue_depth_ahead = queue_ahead or 0.0
+        episode.leg1_placed_ts = row.timestamp
+        episode.leg1_pending_requote = False
+        episode.expected_margin = expected_margin
+        self._emit(events, row, "maker_quote_updated", episode, "QUOTE",
+                   "leg1_requote", {
+                       "leg": 1, "outcome": episode.leg1_outcome,
+                       "old_quote_price": old_quote,
+                       "new_quote_price": quote_price,
+                       "quote_reason": "leg1_requote",
+                       "requote_count": episode.requote_count,
+                       "leg1_best_bid": side.best_bid,
+                       "leg1_best_ask": side.best_ask,
+                       "expected_margin": expected_margin,
+                   })
 
     # -- LEG2 ---------------------------------------------------------------------
     def _open_leg2(self, events, row, episode):

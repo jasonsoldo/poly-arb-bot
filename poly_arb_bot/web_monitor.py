@@ -499,6 +499,7 @@ def _maker_episode_default(item):
         "expected_margin": None,
         "improve_attempt": None,
         "max_improves": None,
+        "requote_count": 0,
         "terminal": False,
         "terminal_reason": None,
         "exit_path": None,
@@ -572,12 +573,19 @@ def _maker_accumulate_view(events, strategy_counts, session_strategy_counts,
                     episode["leg2_max_price"] = item["leg2_max_price"]
                 episode["improve_attempt"] = item.get("improve_attempt")
                 episode["max_improves"] = item.get("max_improves")
+            elif item.get("leg") == 1 and item.get("quote_reason") == "leg1_requote":
+                episode["leg1_quote_price"] = item.get("new_quote_price")
+                if item.get("expected_margin") is not None:
+                    episode["expected_margin"] = item["expected_margin"]
         elif event_type == "maker_episode_state_change" and episode is not None:
             episode["state"] = item.get("state_to")
             if item.get("locked_size") is not None:
                 episode["locked_size"] = item["locked_size"]
             if item.get("at_risk_size") is not None:
                 episode["at_risk_size"] = item["at_risk_size"]
+        elif event_type == "maker_leg1_requote" and episode is not None:
+            if item.get("requote_count") is not None:
+                episode["requote_count"] = item["requote_count"]
         elif event_type == "maker_leg1_cancelled" and episode is not None:
             episode["state"] = "LEG1_CANCELLED"
             episode["terminal"] = True
@@ -767,7 +775,7 @@ def build_status(data_dir, log_file, state_file):
         "shadow_eval", "shadow_opportunity",
         "maker_episode_opened", "maker_episode_rejected",
         "maker_episode_completed", "maker_episode_closed_with_loss",
-        "maker_leg_filled", "maker_leg1_cancelled",
+        "maker_leg_filled", "maker_leg1_cancelled", "maker_leg1_requote",
     }]
     paired_events = [item for item in shadow_events if item.get("strategy", "paired_lock") == "paired_lock"]
     latest_shadow = {}
