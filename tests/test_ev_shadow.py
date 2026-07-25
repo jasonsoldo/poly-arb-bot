@@ -338,8 +338,8 @@ def test_directional_and_lottery_use_independent_probability_models():
         if row["strategy"] == "low_price_lottery_ev" and row["outcome"] == "Up"
     )
 
-    assert directional["probability_model_id"] == "directional_normal_cdf_v1"
-    assert lottery["probability_model_id"] == "lottery_market_blend_v1"
+    assert directional["probability_model_id"] == "directional_logistic_projected_v2"
+    assert lottery["probability_model_id"] == "lottery_logistic_projected_blend_v2"
     assert directional["config_hash"] != lottery["config_hash"]
     assert directional["estimated_probability"] != lottery["estimated_probability"]
     assert lottery["raw_estimated_probability"] != lottery["estimated_probability"]

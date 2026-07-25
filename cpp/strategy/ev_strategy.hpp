@@ -25,10 +25,15 @@ struct Config {
     double maximum_reference_age_ms = 3000;
     double maximum_book_age_ms = 750;
     double maximum_clock_skew_ms = 250;
-    double momentum_z_per_bps = .002;
+    double model_min_horizon_seconds = 2.0;
+    double model_volatility_floor_per_sqrt_second = 1e-5;
+    double model_momentum_persistence_seconds = 120;
+    double momentum_projection_weight = 1.0;
+    double lottery_momentum_projection_weight = .5;
+    double model_imbalance_horizon_seconds = 60;
+    double model_logistic_scale = .6267;
     double imbalance_z = .25;
     double lottery_distance_weight = 1.0;
-    double lottery_momentum_z_per_bps = .001;
     double lottery_imbalance_z = .10;
     double lottery_market_blend = .50;
     double minimum_model_sample_span_seconds = 60;
@@ -61,6 +66,13 @@ struct ProbabilityOutput {
     std::optional<double> up_final_model_z;
 };
 
+inline double logistic_cdf(double z, double scale) {
+    const double x = z / scale;
+    if (x >= 40) return 1.0;
+    if (x <= -40) return 0.0;
+    return 1.0 / (1.0 + std::exp(-x));
+}
+
 inline ProbabilityOutput probability_model(const ProbabilityInput& row, const Config& config = {}) {
     ProbabilityOutput output;
     if (!row.settlement_reference || *row.settlement_reference == 0 ||
@@ -71,15 +83,21 @@ inline ProbabilityOutput probability_model(const ProbabilityInput& row, const Co
         row.seconds_to_close <= 0 || !row.momentum_bps_30s || !row.paired_book_imbalance) {
         return output;
     }
-    const double scale = *row.volatility_per_sqrt_second * std::sqrt(row.seconds_to_close);
+    const double t_eff = std::max(row.seconds_to_close, config.model_min_horizon_seconds);
+    const double sigma = std::max(
+        *row.volatility_per_sqrt_second, config.model_volatility_floor_per_sqrt_second);
+    const double scale = sigma * std::sqrt(t_eff);
     if (scale <= 0) return output;
     const double log_distance = std::log(*row.settlement_reference / *row.price_to_beat);
     const double standardized = log_distance / scale;
-    const double momentum_z = *row.momentum_bps_30s * config.momentum_z_per_bps;
-    const double imbalance_z = *row.paired_book_imbalance * config.imbalance_z;
+    const double drift = *row.momentum_bps_30s * 1e-4 *
+        std::min(t_eff, config.model_momentum_persistence_seconds) / 30.0;
+    const double momentum_z = config.momentum_projection_weight * drift / scale;
+    const double imbalance_z = config.imbalance_z * *row.paired_book_imbalance *
+        std::sqrt(std::min(t_eff, config.model_imbalance_horizon_seconds) / t_eff);
     const double final_z = standardized + momentum_z + imbalance_z;
     output.estimated_probability = std::clamp(
-        .5 * (1 + std::erf(final_z / std::sqrt(2.0))), .001, .999);
+        logistic_cdf(final_z, config.model_logistic_scale), .001, .999);
     output.expected_move_log_std = scale;
     output.reference_log_distance = log_distance;
     output.up_standardized_distance = standardized;
@@ -99,15 +117,21 @@ inline ProbabilityOutput lottery_probability_model(const ProbabilityInput& row, 
         row.seconds_to_close <= 0 || !row.momentum_bps_30s || !row.paired_book_imbalance) {
         return output;
     }
-    const double scale = *row.volatility_per_sqrt_second * std::sqrt(row.seconds_to_close);
+    const double t_eff = std::max(row.seconds_to_close, config.model_min_horizon_seconds);
+    const double sigma = std::max(
+        *row.volatility_per_sqrt_second, config.model_volatility_floor_per_sqrt_second);
+    const double scale = sigma * std::sqrt(t_eff);
     if (scale <= 0) return output;
     const double log_distance = std::log(*row.settlement_reference / *row.price_to_beat);
     const double standardized = log_distance / scale;
-    const double momentum_z = *row.momentum_bps_30s * config.lottery_momentum_z_per_bps;
-    const double imbalance_z = *row.paired_book_imbalance * config.lottery_imbalance_z;
+    const double drift = *row.momentum_bps_30s * 1e-4 *
+        std::min(t_eff, config.model_momentum_persistence_seconds) / 30.0;
+    const double momentum_z = config.lottery_momentum_projection_weight * drift / scale;
+    const double imbalance_z = config.lottery_imbalance_z * *row.paired_book_imbalance *
+        std::sqrt(std::min(t_eff, config.model_imbalance_horizon_seconds) / t_eff);
     const double final_z = standardized * config.lottery_distance_weight + momentum_z + imbalance_z;
     output.estimated_probability = std::clamp(
-        .5 * (1 + std::erf(final_z / std::sqrt(2.0))), .001, .999);
+        logistic_cdf(final_z, config.model_logistic_scale), .001, .999);
     output.expected_move_log_std = scale;
     output.reference_log_distance = log_distance;
     output.up_standardized_distance = standardized;

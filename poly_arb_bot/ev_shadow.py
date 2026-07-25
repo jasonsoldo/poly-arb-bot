@@ -72,10 +72,18 @@ def strategy_config(strategy=None):
         "coinbase_reference_max_age_ms": os.getenv("COINBASE_REFERENCE_MAX_AGE_MS", "10000"),
         "maximum_book_age_ms": os.getenv("CLOB_MAX_BOOK_AGE_MS", "750"),
         "maximum_clock_skew_ms": os.getenv("MAX_CLOCK_SKEW_MS", "250"),
-        "momentum_z_per_bps": os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"),
+        "model_min_horizon_seconds": os.getenv("MODEL_MIN_HORIZON_SECONDS", "2.0"),
+        "model_volatility_floor_per_sqrt_second": os.getenv(
+            "MODEL_VOLATILITY_FLOOR_PER_SQRT_SECOND", "1e-5"),
+        "model_momentum_persistence_seconds": os.getenv(
+            "MODEL_MOMENTUM_PERSISTENCE_SECONDS", "120"),
+        "momentum_projection_weight": os.getenv("MODEL_MOMENTUM_PROJECTION_WEIGHT", "1.0"),
+        "lottery_momentum_projection_weight": os.getenv(
+            "LOTTERY_MOMENTUM_PROJECTION_WEIGHT", "0.5"),
+        "model_imbalance_horizon_seconds": os.getenv("MODEL_IMBALANCE_HORIZON_SECONDS", "60"),
+        "model_logistic_scale": os.getenv("MODEL_LOGISTIC_SCALE", "0.6267"),
         "imbalance_z": os.getenv("MODEL_IMBALANCE_Z", "0.25"),
         "lottery_distance_weight": os.getenv("LOTTERY_DISTANCE_WEIGHT", "1.0"),
-        "lottery_momentum_z_per_bps": os.getenv("LOTTERY_MOMENTUM_Z_PER_BPS", "0.001"),
         "lottery_imbalance_z": os.getenv("LOTTERY_IMBALANCE_Z", "0.10"),
         "lottery_market_blend": os.getenv("LOTTERY_MARKET_BLEND", "0.50"),
         "minimum_model_sample_span_seconds": os.getenv("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"),
@@ -105,13 +113,19 @@ def strategy_config(strategy=None):
                 "directional_window_15m_min", "directional_window_15m_max",
                 "directional_window_1h_min", "directional_window_1h_max",
                 "directional_window_4h_min", "directional_window_4h_max",
-                "momentum_z_per_bps", "imbalance_z",
+                "momentum_projection_weight", "imbalance_z",
+                "model_min_horizon_seconds", "model_volatility_floor_per_sqrt_second",
+                "model_momentum_persistence_seconds", "model_imbalance_horizon_seconds",
+                "model_logistic_scale",
             },
             "low_price_lottery_ev": {
                 "lottery_min_price", "lottery_max_price", "lottery_min_net_ev",
                 "lottery_model_buffer", "lottery_execution_buffer",
-                "lottery_distance_weight", "lottery_momentum_z_per_bps",
+                "lottery_distance_weight", "lottery_momentum_projection_weight",
                 "lottery_imbalance_z", "lottery_market_blend",
+                "model_min_horizon_seconds", "model_volatility_floor_per_sqrt_second",
+                "model_momentum_persistence_seconds", "model_imbalance_horizon_seconds",
+                "model_logistic_scale",
             },
         }
         allowed = common_keys | strategy_keys.get(strategy, set())
@@ -272,6 +286,15 @@ def _reference_state(asset, settlement_source, maximum_age_ms, file_age_ms=0):
     return reference_state_for_asset(asset, settlement_source, maximum_age_ms, file_age_ms)
 
 
+def _logistic_cdf(z, scale):
+    x = z / scale
+    if x >= 40:
+        return 1.0
+    if x <= -40:
+        return 0.0
+    return 1.0 / (1.0 + math.exp(-x))
+
+
 def _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance=None):
     reference = asset.get("settlement_reference")
     volatility = asset.get("volatility_per_sqrt_second")
@@ -285,7 +308,10 @@ def _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance
     if (not reference or not price_to_beat or not volatility or samples < 20 or
             sample_span < minimum_span or seconds_to_close <= 0):
         return None, diagnostics
-    scale = float(volatility) * math.sqrt(seconds_to_close)
+    t_eff = max(float(seconds_to_close), float(os.getenv("MODEL_MIN_HORIZON_SECONDS", "2.0")))
+    sigma = max(float(volatility), float(
+        os.getenv("MODEL_VOLATILITY_FLOOR_PER_SQRT_SECOND", "1e-5")))
+    scale = sigma * math.sqrt(t_eff)
     if scale <= 0:
         return None, diagnostics
     momentum = asset.get("momentum_bps_30s")
@@ -293,10 +319,17 @@ def _up_probability_model(asset, price_to_beat, seconds_to_close, book_imbalance
         return None, diagnostics
     log_distance = math.log(float(reference) / float(price_to_beat))
     standardized_distance = log_distance / scale
-    momentum_z = float(momentum) * float(os.getenv("MODEL_MOMENTUM_Z_PER_BPS", "0.002"))
-    imbalance_z = float(book_imbalance) * float(os.getenv("MODEL_IMBALANCE_Z", "0.25"))
+    drift = (float(momentum) * 1e-4
+           * min(t_eff, float(os.getenv("MODEL_MOMENTUM_PERSISTENCE_SECONDS", "120"))) / 30.0)
+    momentum_z = float(os.getenv("MODEL_MOMENTUM_PROJECTION_WEIGHT", "1.0")) * drift / scale
+    imbalance_z = (
+        float(os.getenv("MODEL_IMBALANCE_Z", "0.25")) * float(book_imbalance)
+        * math.sqrt(min(t_eff, float(os.getenv("MODEL_IMBALANCE_HORIZON_SECONDS", "60")))
+                    / t_eff)
+    )
     final_z = standardized_distance + momentum_z + imbalance_z
-    probability = min(.999, max(.001, .5 * (1 + math.erf(final_z / math.sqrt(2)))))
+    probability = min(.999, max(.001, _logistic_cdf(
+        final_z, float(os.getenv("MODEL_LOGISTIC_SCALE", "0.6267")))))
     return probability, {
         **diagnostics,
         "volatility_per_sqrt_second": float(volatility),
@@ -323,7 +356,10 @@ def _lottery_up_probability_model(asset, price_to_beat, seconds_to_close, book_i
     if (not reference or not price_to_beat or not volatility or samples < 20 or
             sample_span < minimum_span or seconds_to_close <= 0):
         return None, diagnostics
-    scale = float(volatility) * math.sqrt(seconds_to_close)
+    t_eff = max(float(seconds_to_close), float(os.getenv("MODEL_MIN_HORIZON_SECONDS", "2.0")))
+    sigma = max(float(volatility), float(
+        os.getenv("MODEL_VOLATILITY_FLOOR_PER_SQRT_SECOND", "1e-5")))
+    scale = sigma * math.sqrt(t_eff)
     if scale <= 0:
         return None, diagnostics
     momentum = asset.get("momentum_bps_30s")
@@ -331,13 +367,21 @@ def _lottery_up_probability_model(asset, price_to_beat, seconds_to_close, book_i
         return None, diagnostics
     log_distance = math.log(float(reference) / float(price_to_beat))
     standardized_distance = log_distance / scale
-    momentum_z = float(momentum) * float(os.getenv("LOTTERY_MOMENTUM_Z_PER_BPS", "0.001"))
-    imbalance_z = float(book_imbalance) * float(os.getenv("LOTTERY_IMBALANCE_Z", "0.10"))
+    drift = (float(momentum) * 1e-4
+           * min(t_eff, float(os.getenv("MODEL_MOMENTUM_PERSISTENCE_SECONDS", "120"))) / 30.0)
+    momentum_z = (float(os.getenv("LOTTERY_MOMENTUM_PROJECTION_WEIGHT", "0.5"))
+                  * drift / scale)
+    imbalance_z = (
+        float(os.getenv("LOTTERY_IMBALANCE_Z", "0.10")) * float(book_imbalance)
+        * math.sqrt(min(t_eff, float(os.getenv("MODEL_IMBALANCE_HORIZON_SECONDS", "60")))
+                    / t_eff)
+    )
     final_z = (
         standardized_distance * float(os.getenv("LOTTERY_DISTANCE_WEIGHT", "1.0"))
         + momentum_z + imbalance_z
     )
-    probability = min(.999, max(.001, .5 * (1 + math.erf(final_z / math.sqrt(2)))))
+    probability = min(.999, max(.001, _logistic_cdf(
+        final_z, float(os.getenv("MODEL_LOGISTIC_SCALE", "0.6267")))))
     return probability, {
         **diagnostics,
         "volatility_per_sqrt_second": float(volatility),
@@ -547,7 +591,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                 int(event.get("evaluation_sequence", 0)), float(event.get("ts", now)),
             )
             audit["probability_model_id"] = (
-                "lottery_market_blend_v1" if is_lottery else "directional_normal_cdf_v1"
+                "lottery_logistic_projected_blend_v2" if is_lottery else "directional_logistic_projected_v2"
             )
             audit["raw_estimated_probability"] = raw_probability
             audit["model_type"] = (
@@ -882,7 +926,7 @@ def _verify_cpp_strategy_row(row):
     }
     if row.get("probability_model_id") is not None:
         expected["probability_model_id"] = (
-            "lottery_market_blend_v1" if is_lottery else "directional_normal_cdf_v1"
+            "lottery_logistic_projected_blend_v2" if is_lottery else "directional_logistic_projected_v2"
         )
     if all(row.get(key) is not None for key in (
         "settlement_reference", "volatility_per_sqrt_second", "model_sample_count",

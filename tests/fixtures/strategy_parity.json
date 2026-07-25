@@ -135,5 +135,54 @@
     "hedge_minimum_liquidity": 20.0,
     "hedge_maximum_slippage": 0.01,
     "hedge_target_depth_ok": true
+  },
+  {
+    "name": "probability_time_floor",
+    "mode": "probability",
+    "settlement_reference": 101.0,
+    "price_to_beat": 100.0,
+    "seconds_to_close": 1,
+    "volatility_per_sqrt_second": 0.001,
+    "model_sample_count": 40,
+    "model_sample_span_seconds": 120,
+    "momentum_bps_30s": 2.0,
+    "paired_book_imbalance": 0.2
+  },
+  {
+    "name": "probability_volatility_floor",
+    "mode": "probability",
+    "settlement_reference": 101.0,
+    "price_to_beat": 100.0,
+    "seconds_to_close": 45,
+    "volatility_per_sqrt_second": 0.000001,
+    "model_sample_count": 40,
+    "model_sample_span_seconds": 120,
+    "momentum_bps_30s": 2.0,
+    "paired_book_imbalance": 0.2
+  },
+  {
+    "name": "probability_momentum_persistence_cap",
+    "mode": "probability",
+    "settlement_reference": 101.0,
+    "price_to_beat": 100.0,
+    "seconds_to_close": 600,
+    "volatility_per_sqrt_second": 0.001,
+    "model_sample_count": 40,
+    "model_sample_span_seconds": 120,
+    "momentum_bps_30s": 50.0,
+    "paired_book_imbalance": 0.9
+  },
+  {
+    "name": "lottery_probability_time_floor",
+    "mode": "lottery_probability",
+    "settlement_reference": 101.0,
+    "price_to_beat": 100.0,
+    "seconds_to_close": 1,
+    "volatility_per_sqrt_second": 0.001,
+    "model_sample_count": 40,
+    "model_sample_span_seconds": 120,
+    "momentum_bps_30s": -8.0,
+    "paired_book_imbalance": -0.4,
+    "market_implied_probability": 0.03
   }
 ]

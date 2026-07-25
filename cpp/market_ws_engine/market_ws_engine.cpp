@@ -167,10 +167,18 @@ strategy::Config strategy_config_from_environment() {
     config.maximum_reference_age_ms = environment_double("REFERENCE_MAX_AGE_MS", "3000");
     config.maximum_book_age_ms = environment_double("CLOB_MAX_BOOK_AGE_MS", "750");
     config.maximum_clock_skew_ms = environment_double("MAX_CLOCK_SKEW_MS", "250");
-    config.momentum_z_per_bps = environment_double("MODEL_MOMENTUM_Z_PER_BPS", "0.002");
+    config.model_min_horizon_seconds = environment_double("MODEL_MIN_HORIZON_SECONDS", "2.0");
+    config.model_volatility_floor_per_sqrt_second = environment_double(
+        "MODEL_VOLATILITY_FLOOR_PER_SQRT_SECOND", "1e-5");
+    config.model_momentum_persistence_seconds = environment_double(
+        "MODEL_MOMENTUM_PERSISTENCE_SECONDS", "120");
+    config.momentum_projection_weight = environment_double("MODEL_MOMENTUM_PROJECTION_WEIGHT", "1.0");
+    config.lottery_momentum_projection_weight = environment_double(
+        "LOTTERY_MOMENTUM_PROJECTION_WEIGHT", "0.5");
+    config.model_imbalance_horizon_seconds = environment_double("MODEL_IMBALANCE_HORIZON_SECONDS", "60");
+    config.model_logistic_scale = environment_double("MODEL_LOGISTIC_SCALE", "0.6267");
     config.imbalance_z = environment_double("MODEL_IMBALANCE_Z", "0.25");
     config.lottery_distance_weight = environment_double("LOTTERY_DISTANCE_WEIGHT", "1.0");
-    config.lottery_momentum_z_per_bps = environment_double("LOTTERY_MOMENTUM_Z_PER_BPS", "0.001");
     config.lottery_imbalance_z = environment_double("LOTTERY_IMBALANCE_Z", "0.10");
     config.lottery_market_blend = environment_double("LOTTERY_MARKET_BLEND", "0.50");
     config.minimum_model_sample_span_seconds = environment_double("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60");
@@ -228,7 +236,8 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"lottery_min_price", environment_value("LOTTERY_MIN_PRICE", "0.01")},
         {"lottery_model_buffer", environment_value("LOTTERY_MODEL_BUFFER", "0.01")},
         {"lottery_distance_weight", environment_value("LOTTERY_DISTANCE_WEIGHT", "1.0")},
-        {"lottery_momentum_z_per_bps", environment_value("LOTTERY_MOMENTUM_Z_PER_BPS", "0.001")},
+        {"lottery_momentum_projection_weight", environment_value(
+            "LOTTERY_MOMENTUM_PROJECTION_WEIGHT", "0.5")},
         {"lottery_imbalance_z", environment_value("LOTTERY_IMBALANCE_Z", "0.10")},
         {"lottery_market_blend", environment_value("LOTTERY_MARKET_BLEND", "0.50")},
         {"lottery_fractional_kelly", environment_value("LOTTERY_FRACTIONAL_KELLY", "0.025")},
@@ -249,7 +258,14 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"maker_tick_size", environment_value("MAKER_TICK_SIZE", "0.01")},
         {"minimum_liquidity", environment_value("STRATEGY_MIN_LIQUIDITY", "20")},
         {"minimum_model_sample_span_seconds", environment_value("MODEL_MIN_SAMPLE_SPAN_SECONDS", "60")},
-        {"momentum_z_per_bps", environment_value("MODEL_MOMENTUM_Z_PER_BPS", "0.002")},
+        {"model_min_horizon_seconds", environment_value("MODEL_MIN_HORIZON_SECONDS", "2.0")},
+        {"model_volatility_floor_per_sqrt_second", environment_value(
+            "MODEL_VOLATILITY_FLOOR_PER_SQRT_SECOND", "1e-5")},
+        {"model_momentum_persistence_seconds", environment_value(
+            "MODEL_MOMENTUM_PERSISTENCE_SECONDS", "120")},
+        {"momentum_projection_weight", environment_value("MODEL_MOMENTUM_PROJECTION_WEIGHT", "1.0")},
+        {"model_imbalance_horizon_seconds", environment_value("MODEL_IMBALANCE_HORIZON_SECONDS", "60")},
+        {"model_logistic_scale", environment_value("MODEL_LOGISTIC_SCALE", "0.6267")},
         {"probability_reference", "settlement_reference"},
         {"shadow_buffer_per_share", environment_value("SHADOW_BUFFER_PER_SHARE", "0.002")},
         {"shadow_min_profit", environment_value("SHADOW_MIN_PROFIT", "0.01")},
@@ -277,8 +293,9 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
                  key == "directional_max_capital_fraction" ||
                  key == "directional_max_quantity" ||
                  key == "directional_probability_haircut" ||
-                key.rfind("directional_window_", 0) == 0 || key == "momentum_z_per_bps" ||
-                key == "imbalance_z";
+                key.rfind("directional_window_", 0) == 0 ||
+                key == "momentum_projection_weight" || key == "imbalance_z" ||
+                key.rfind("model_", 0) == 0;
             if (strategy_name == "low_price_lottery_ev") return common ||
                 key == "lottery_min_price" || key == "lottery_max_price" ||
                 key == "lottery_min_net_ev" || key == "lottery_model_buffer" ||
@@ -287,16 +304,16 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
                  key == "lottery_max_capital_fraction" ||
                  key == "lottery_max_quantity" ||
                  key == "lottery_probability_haircut" ||
-                key == "lottery_momentum_z_per_bps" || key == "lottery_imbalance_z" ||
-                key == "lottery_market_blend";
+                key == "lottery_momentum_projection_weight" || key == "lottery_imbalance_z" ||
+                key == "lottery_market_blend" || key.rfind("model_", 0) == 0;
             if (strategy_name == "inventory_rebalancing_arb") return common ||
                 key.rfind("inventory_", 0) == 0 || key.rfind("shadow_", 0) == 0 ||
                 key == "directional_latency_buffer" ||
                 key == "directional_settlement_buffer" ||
-                key == "momentum_z_per_bps" || key == "imbalance_z";
+                key == "imbalance_z";
             if (strategy_name == "maker_complete_set_arb") return common ||
                 key.rfind("maker_", 0) == 0 || key.rfind("shadow_", 0) == 0 ||
-                key == "momentum_z_per_bps" || key == "imbalance_z";
+                key == "imbalance_z";
             return true;
         };
         for (auto item = values.begin(); item != values.end();) {
@@ -1384,7 +1401,7 @@ private:
         const bool is_lottery = decision.strategy == "low_price_lottery_ev";
         out << ",\"confidence_type\":\"input_quality_not_historical_accuracy\""
             << ",\"probability_model_id\":\""
-            << (is_lottery ? "lottery_market_blend_v1" : "directional_normal_cdf_v1") << '"'
+            << (is_lottery ? "lottery_logistic_projected_blend_v2" : "directional_logistic_projected_v2") << '"'
             << ",\"model_type\":\""
             << (is_lottery ? "configured_lottery_market_blend_shadow" : "configured_distributional_shadow")
             << "\",\"model_source\":";

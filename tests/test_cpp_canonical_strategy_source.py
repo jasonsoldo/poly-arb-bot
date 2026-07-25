@@ -69,8 +69,8 @@ def test_cpp_strategy_audit_is_shadow_only_and_suppressed():
 def test_strategy_audit_identifies_independent_probability_models():
     assert '\\\"probability_model_id\\\"' in ENGINE
     assert '\\\"raw_estimated_probability\\\"' in ENGINE
-    assert "directional_normal_cdf_v1" in ENGINE
-    assert "lottery_market_blend_v1" in ENGINE
+    assert "directional_logistic_projected_v2" in ENGINE
+    assert "lottery_logistic_projected_blend_v2" in ENGINE
 
 
 def test_reference_mutation_drives_strategy_evaluation_without_gating_paired_lock():
