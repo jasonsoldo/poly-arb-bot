@@ -38,8 +38,8 @@
     "mode": "evaluate",
     "strategy": "late_window_directional_ev",
     "timeframe": "15m",
-    "expected_fill_price": 0.20,
-    "estimated_probability": 0.50,
+    "expected_fill_price": 0.2,
+    "estimated_probability": 0.5,
     "seconds_to_close": 21
   },
   {
@@ -57,8 +57,8 @@
     "mode": "evaluate",
     "strategy": "late_window_directional_ev",
     "timeframe": "1h",
-    "expected_fill_price": 0.20,
-    "estimated_probability": 0.50,
+    "expected_fill_price": 0.2,
+    "estimated_probability": 0.5,
     "seconds_to_close": 100,
     "reference_quorum_met": false,
     "reference_block_reason": "cross_source_divergence_exceeded"
@@ -68,7 +68,7 @@
     "mode": "evaluate",
     "strategy": "late_window_directional_ev",
     "timeframe": "4h",
-    "expected_fill_price": 0.20,
+    "expected_fill_price": 0.2,
     "estimated_probability": null,
     "seconds_to_close": 100,
     "book_age_ms": 10000,
@@ -90,7 +90,7 @@
     "strategy": "low_price_lottery_ev",
     "timeframe": "15m",
     "expected_fill_price": 0.08,
-    "estimated_probability": 0.20,
+    "estimated_probability": 0.2,
     "seconds_to_close": 300
   },
   {
@@ -99,7 +99,7 @@
     "strategy": "low_price_lottery_ev",
     "timeframe": "5m",
     "expected_fill_price": 0.03,
-    "estimated_probability": 0.20,
+    "estimated_probability": 0.2,
     "seconds_to_close": 60,
     "liquidity": 10,
     "target_depth_ok": false
@@ -154,7 +154,7 @@
     "settlement_reference": 101.0,
     "price_to_beat": 100.0,
     "seconds_to_close": 45,
-    "volatility_per_sqrt_second": 0.000001,
+    "volatility_per_sqrt_second": 1e-06,
     "model_sample_count": 40,
     "model_sample_span_seconds": 120,
     "momentum_bps_30s": 2.0,
@@ -184,5 +184,38 @@
     "momentum_bps_30s": -8.0,
     "paired_book_imbalance": -0.4,
     "market_implied_probability": 0.03
+  },
+  {
+    "name": "directional_dynamic_latency_buffer_accept",
+    "mode": "evaluate",
+    "strategy": "late_window_directional_ev",
+    "timeframe": "5m",
+    "expected_fill_price": 0.56,
+    "estimated_probability": 0.95,
+    "seconds_to_close": 10,
+    "reference_age_ms": 2000,
+    "volatility_per_sqrt_second": 0.01
+  },
+  {
+    "name": "directional_dynamic_latency_buffer_capped_reject",
+    "mode": "evaluate",
+    "strategy": "late_window_directional_ev",
+    "timeframe": "5m",
+    "expected_fill_price": 0.56,
+    "estimated_probability": 0.6,
+    "seconds_to_close": 10,
+    "reference_age_ms": 2000,
+    "volatility_per_sqrt_second": 0.5
+  },
+  {
+    "name": "directional_dynamic_latency_buffer_floor",
+    "mode": "evaluate",
+    "strategy": "late_window_directional_ev",
+    "timeframe": "5m",
+    "expected_fill_price": 0.56,
+    "estimated_probability": 0.95,
+    "seconds_to_close": 10,
+    "reference_age_ms": 0,
+    "volatility_per_sqrt_second": 0.0001
   }
 ]

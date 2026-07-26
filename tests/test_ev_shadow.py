@@ -12,6 +12,10 @@ def _enable_probability_strategies(monkeypatch):
     """Legacy tests exercise directional/lottery evaluators explicitly."""
     monkeypatch.setenv("DIRECTIONAL_EV_ENABLE", "1")
     monkeypatch.setenv("LOTTERY_EV_ENABLE", "1")
+    # Calibration gating is covered by dedicated tests; the rest of this file
+    # exercises the pre-calibration pipeline (raw fallback, no map file).
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_REQUIRE_MAP", "0")
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_MAP_PATH", "/nonexistent/map.json")
 
 
 def market():
@@ -216,7 +220,7 @@ def test_terminal_reject_inherits_directional_reason_and_keeps_candidate_fields(
     current_event = event()
     current_event.update(
         up_vwap=.60, up_best_ask=.60, up_fee=.01,
-        down_vwap=.40, down_best_ask=.40, down_fee=.01,
+        down_vwap=.55, down_best_ask=.55, down_fee=.01,
     )
 
     state = venue()
@@ -226,7 +230,9 @@ def test_terminal_reject_inherits_directional_reason_and_keeps_candidate_fields(
     rows = evaluate_market_event(current_event, current_market, state, now=1000.0)
 
     combined = next(row for row in rows if row["event_type"] == "shadow_hedge_eval")
-    assert combined["reason"] == "model_confidence_below_threshold"
+    # p=0.5 with both fills above 0.5: both directional sides are negative EV.
+    # Entry is gated by net EV (the fixed probability floor is retired).
+    assert combined["reason"] == "net_ev_below_threshold"
     assert combined["main_outcome"] in {"Up", "Down"}
     assert combined["estimated_probability"] is not None
     assert combined["main_expected_fill_price"] is not None
@@ -629,3 +635,74 @@ def test_strategy_env_enabled_truthy_values(monkeypatch):
     assert ev_shadow.directional_ev_enabled() is True
     monkeypatch.setenv("DIRECTIONAL_EV_ENABLE", "0")
     assert ev_shadow.directional_ev_enabled() is False
+
+
+def test_calibrated_probability_drives_decision_and_audit_fields(tmp_path, monkeypatch):
+    # Zero-slippage event: 0.45-0.44 in floating point trips slippage_exceeded.
+    clean_event = event()
+    clean_event.update(up_best_ask=0.45, down_best_ask=0.56)
+    # First pass (fixture default: require_map=0, no map) reveals the raw
+    # model probability the calibration map keys on.
+    probe = evaluate_market_event(clean_event, market(), venue(), now=1000.0)
+    model_up = next(
+        row for row in probe
+        if row["strategy"] == "late_window_directional_ev" and row["outcome"] == "Up"
+    )["calibration_input_probability"]
+    assert 0.8 <= model_up < 0.9
+
+    map_path = tmp_path / "map.json"
+    map_path.write_text(json.dumps({
+        "version": 1, "generated_at": 999.0,
+        "config": {"min_bucket_samples": 30, "prior_weight": 30.0},
+        "strategies": {"late_window_directional_ev": {
+            "timeframes": {"5m": {"0.8-0.9": {
+                "samples": 100, "expected_up_rate": 0.85, "realized_up_rate": 0.30}}},
+            "overall": {},
+        }},
+    }), encoding="utf-8")
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_MAP_PATH", str(map_path))
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")
+
+    rows = evaluate_market_event(clean_event, market(), venue(), now=1000.0)
+    calibrated = (30 + 30 * 0.85) / 130  # (actual + prior*expected)/(samples+prior)
+    up = next(
+        row for row in rows
+        if row["strategy"] == "late_window_directional_ev" and row["outcome"] == "Up"
+    )
+    assert up["estimated_probability"] == pytest.approx(calibrated, abs=1e-9)
+    assert up["calibrated_probability"] == pytest.approx(calibrated, abs=1e-9)
+    assert up["calibration_input_probability"] == pytest.approx(model_up, abs=1e-12)
+    assert up["calibration_scope"] == "timeframe"
+    assert up["calibration_bucket"] == "0.8-0.9"
+    assert up["calibration_bucket_samples"] == 100
+    # Calibrated 0.427 vs fill 0.45: negative EV, rejected — the raw model's
+    # overconfident 0.89 would have been accepted before calibration.
+    assert up["decision"] == "REJECT"
+    assert up["reason"] == "net_ev_below_threshold"
+    down = next(
+        row for row in rows
+        if row["strategy"] == "late_window_directional_ev" and row["outcome"] == "Down"
+    )
+    assert down["estimated_probability"] == pytest.approx(1 - calibrated, abs=1e-9)
+
+
+def test_missing_calibration_map_fails_closed_but_keeps_observing(monkeypatch):
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_MAP_PATH", "/nonexistent/map.json")
+    clean_event = event()
+    clean_event.update(up_best_ask=0.45, down_best_ask=0.56)
+    rows = evaluate_market_event(clean_event, market(), venue(), now=1000.0)
+    shadow_rows = [row for row in rows if row["event_type"] == "shadow_eval"]
+    assert shadow_rows
+    for row in shadow_rows:
+        assert row["decision"] == "REJECT"
+        assert "probability_calibration_unavailable" in row["blocking_reasons"]
+        # Raw probability retained so prediction observations keep flowing.
+        assert row["estimated_probability"] is not None
+        assert row["calibrated_probability"] is None
+        assert row["calibration_scope"] == "none"
+    up = next(
+        row for row in shadow_rows
+        if row["strategy"] == "late_window_directional_ev" and row["outcome"] == "Up"
+    )
+    assert up["reason"] == "probability_calibration_unavailable"

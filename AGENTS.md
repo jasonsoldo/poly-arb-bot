@@ -474,6 +474,42 @@ net_ev_per_share =
 
 模型 confidence 不等于历史准确率。
 
+### 校准概率与动态延迟入场（2026-07-26 起）
+
+方向/彩票策略的 EV 门不再使用固定概率下限（原 `DIRECTIONAL_MIN_PROBABILITY=0.90` 已取消，配置项保留、默认 `0` 即关闭）。
+
+入场由以下两项决定：
+
+1. **校准概率**：`estimated_probability` 在进入 EV 计算前，先经桶级校准映射修正。映射由 Python shadow 生命周期从已结算的 `shadow_prediction_complete` 事件按 `(strategy, timeframe, probability bucket)` 聚合实测命中率，原子发布到 `data/probability-calibration-map.json`；C++ 引擎消费时应用收缩公式：
+
+```text
+calibrated = (actual_up + prior_weight * expected_up_rate) / (samples + prior_weight)
+```
+
+桶样本不足时回退到策略级（全周期）桶；仍不足或映射缺失/过期时 fail closed：
+
+```text
+decision = REJECT
+reason = probability_calibration_unavailable
+```
+
+校准不可用的事件保留原始模型概率以便预测观测继续累积（无死锁），但禁止 ACCEPT。审计必须同时记录 `calibration_input_probability`（映射键，即校准前的模型概率）与 `calibrated_probability`，预测分桶必须以 `calibration_input_probability` 为键。
+
+2. **动态结算源延迟风险缓冲**：固定 `latency_risk_buffer` 替换为按实测波动率、结算源消息年龄与入场价缩放的动态值：
+
+```text
+latency_risk_buffer =
+    clamp(
+        z * volatility_per_sqrt_second
+          * sqrt(reference_age_seconds + reaction_seconds)
+          * expected_fill_price,
+        floor = DIRECTIONAL_LATENCY_BUFFER,
+        cap   = DIRECTIONAL_LATENCY_BUFFER_CAP
+    )
+```
+
+波动率或消息年龄不可得时回退到下限（上游 freshness 门已 fail closed）。
+
 ### 默认时间窗口
 
 方向策略必须按周期配置独立尾盘窗口。
@@ -507,6 +543,7 @@ Shadow 初始范围可为：
 - clock skew 超阈值
 - 目标规模深度不足
 - net EV 未过线
+- 概率校准映射缺失、过期或对应桶样本不足
 - 不在策略时间窗口
 - 市场已结束
 - 市场不可交易
@@ -1209,6 +1246,12 @@ event identity 必须能区分：
 - `distance_to_price_to_beat`
 - `reference_age_ms`
 - `book_age_ms`
+- `calibration_input_probability`
+- `calibrated_probability`
+- `calibration_bucket`
+- `calibration_bucket_samples`
+- `calibration_scope`
+- `calibration_map_age_seconds`
 
 ### paired_lock 字段
 
@@ -1868,6 +1911,8 @@ Mock 测试不能替代官方实网集成成功。
 - max cross-source divergence bps
 - outlier threshold bps
 - allowed market types by strategy
+- probability calibration map path / max age / min bucket samples / prior weight / require map
+- directional latency z / reaction seconds / buffer floor / buffer cap
 
 禁止隐藏 magic number。
 

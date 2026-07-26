@@ -147,6 +147,11 @@ def run(audit_path, state_path, log_path, poll_seconds=0.5,
     audit_path = Path(audit_path)
     machine = ShadowExecutionStateMachine(state_path, log_path)
     lifecycle = StrategyShadowLifecycle(strategy_state_path, log_path)
+    from .probability_calibration_map import (
+        publish_calibration_map, publish_seconds_from_env,
+    )
+    calibration_map_path = "data/probability-calibration-map.json"
+    last_map_publish = 0.0
     try:
         while True:
             markets = {row.get("market_id"): row for row in _json(market_path, {"markets": []}).get("markets", [])}
@@ -154,6 +159,13 @@ def run(audit_path, state_path, log_path, poll_seconds=0.5,
             process_strategy_audit_once(strategy_audit_path, lifecycle, markets)
             lifecycle.settle(markets, _json(venue_path, {}), time.time())
             lifecycle.refresh_risk_status()
+            now = time.monotonic()
+            if now - last_map_publish >= publish_seconds_from_env():
+                try:
+                    publish_calibration_map(log_path, calibration_map_path)
+                except OSError:
+                    pass  # keep the previous map; C++ treats staleness fail-closed
+                last_map_publish = now
             time.sleep(poll_seconds)
     finally:
         machine.flush()

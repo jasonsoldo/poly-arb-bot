@@ -356,7 +356,13 @@ class StrategyShadowLifecycle:
             or row.get("settlement_source_verified") is not True
         ):
             return False
-        probability = float(row["estimated_probability"])
+        # Bucket on the pre-calibration model probability (the key the
+        # calibration map is built and consumed on), falling back to the
+        # legacy estimated_probability for rows predating the field.
+        calibration_input = row.get("calibration_input_probability")
+        probability = float(
+            calibration_input if calibration_input is not None
+            else row["estimated_probability"])
         if not 0 <= probability <= 1:
             return False
         prediction_id = self._prediction_id(row, horizon)

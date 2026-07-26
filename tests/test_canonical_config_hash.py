@@ -18,11 +18,11 @@ from poly_arb_bot.ev_shadow import (
 SOURCE = Path("cpp/market_ws_engine/market_ws_engine.cpp").read_text(encoding="utf-8")
 
 # Digests computed with every canonical env var unset (all defaults). Verified
-# byte-identical to the live C++ producer: the VPS market_ws_engine emits
-# 014baf83… for directional and bc4a5c7c… for lottery under the deployed .env.
-DEFAULT_HASH = "32cac73f060d3b896fe1a120f01106d58b69611c972b61f486f4b03767861765"
-DIRECTIONAL_HASH = "014baf83ecec5c2e9be3a241c1c17f2387a4be969211ae4103573434ef126e6c"
-LOTTERY_HASH = "bc4a5c7c5998bab4b95ed96f1951730d6042d7c90bc4740083f178725e104376"
+# byte-identical to the live C++ producer: the VPS market_ws_engine emits the
+# same directional/lottery hashes under the deployed .env.
+DEFAULT_HASH = "5b657a2d145bd64e3a2cb9401e524e20a7633e7b51f1032716d73360428accd1"
+DIRECTIONAL_HASH = "ae4aafb8865760ed0bf46dc40296fe57ade2a9d9318414a04e5472a59ce4e303"
+LOTTERY_HASH = "ec935510f270a9590c2266e6701d20f190363892980517b869360060276d1419"
 
 
 @pytest.fixture

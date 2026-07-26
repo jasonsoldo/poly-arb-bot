@@ -1,3 +1,4 @@
+import math
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -113,7 +114,30 @@ def _common_rejections(row):
     return reasons
 
 
-def evaluate_directional(row, min_net_ev=.015, min_probability=.90, windows=None,
+def directional_latency_risk_buffer(expected_fill_price, volatility_per_sqrt_second=None,
+                                    reference_age_ms=None, floor=None, cap=None, z=None,
+                                    reaction_seconds=None):
+    """Mirror of strategy::directional_latency_risk_buffer (ev_strategy.hpp).
+
+    Dynamic settlement-source latency risk: scales with measured short-horizon
+    volatility, the reference message staleness plus reaction time, and the
+    entry price; clamped to [floor, cap]. Falls back to the floor when
+    volatility/age are unavailable.
+    """
+    floor = float(os.getenv("DIRECTIONAL_LATENCY_BUFFER", "0.003")) if floor is None else floor
+    if volatility_per_sqrt_second is None or reference_age_ms is None:
+        return floor
+    cap = float(os.getenv("DIRECTIONAL_LATENCY_BUFFER_CAP", "0.05")) if cap is None else cap
+    z = float(os.getenv("DIRECTIONAL_LATENCY_Z", "1.0")) if z is None else z
+    reaction = (float(os.getenv("DIRECTIONAL_LATENCY_REACTION_SECONDS", "1.0"))
+                if reaction_seconds is None else reaction_seconds)
+    dynamic = (z * volatility_per_sqrt_second
+               * math.sqrt(max(0.0, reference_age_ms / 1000.0) + reaction)
+               * expected_fill_price)
+    return min(max(dynamic, floor), cap)
+
+
+def evaluate_directional(row, min_net_ev=.015, min_probability=0, windows=None,
                          enforce_time_window=True):
     reasons = _common_rejections(row)
     window = (windows or directional_windows()).get(row.timeframe)

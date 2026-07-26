@@ -101,6 +101,8 @@ int main() {
         value.slippage_per_share = row.get<double>("slippage_per_share", .002);
         value.liquidity = row.get<double>("liquidity", 100);
         value.book_age_ms = row.get<double>("book_age_ms", 50);
+        value.reference_age_ms = optional_number(row, "reference_age_ms", 50.0);
+        value.volatility_per_sqrt_second = optional_number(row, "volatility_per_sqrt_second");
         value.reference_quorum_met = row.get<bool>("reference_quorum_met", true);
         value.reference_block_reason = row.get<std::string>("reference_block_reason", "");
         value.target_depth_ok = row.get<bool>("target_depth_ok", true);
@@ -108,6 +110,14 @@ int main() {
         strategy::Config config;
         config.directional_enforce_time_window = row.get<bool>(
             "directional_enforce_time_window", true);
+        config.directional_min_net_ev = row.get<double>("directional_min_net_ev", .015);
+        config.directional_min_probability = row.get<double>("directional_min_probability", .0);
+        config.directional_latency_buffer = row.get<double>("directional_latency_buffer", .003);
+        config.directional_latency_z = row.get<double>("directional_latency_z", 1.0);
+        config.directional_latency_reaction_seconds = row.get<double>(
+            "directional_latency_reaction_seconds", 1.0);
+        config.directional_latency_buffer_cap = row.get<double>(
+            "directional_latency_buffer_cap", .05);
         const auto output = value.strategy == "late_window_directional_ev"
             ? strategy::evaluate_directional(value, config)
             : strategy::evaluate_lottery(value, config);

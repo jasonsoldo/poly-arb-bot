@@ -11,9 +11,15 @@ namespace strategy {
 
 struct Config {
     double directional_min_net_ev = .015;
-    double directional_min_probability = .90;
+    // Fixed probability floor is retired (entry is decided by calibrated
+    // probability vs price net EV); keep the knob for rollback. 0 disables it.
+    double directional_min_probability = .0;
     bool directional_enforce_time_window = true;
+    // Floor of the dynamic settlement-source latency risk buffer.
     double directional_latency_buffer = .003;
+    double directional_latency_z = 1.0;
+    double directional_latency_reaction_seconds = 1.0;
+    double directional_latency_buffer_cap = .05;
     double directional_settlement_buffer = .002;
     double lottery_min_price = .01;
     double lottery_max_price = .05;
@@ -163,6 +169,7 @@ struct EvaluationInput {
     double liquidity = 100;
     double book_age_ms = 50;
     std::optional<double> reference_age_ms = 50;
+    std::optional<double> volatility_per_sqrt_second;
     std::optional<double> clock_skew_ms = 10;
     bool market_active = true;
     bool market_tradable = true;
@@ -318,6 +325,24 @@ inline std::optional<std::pair<int, int>> directional_window(
     return found == config.directional_windows.end() ? std::nullopt : std::optional(found->second);
 }
 
+// Dynamic settlement-source latency risk: the reference price is
+// reference_age_ms old, so the true probability can drift over that staleness
+// window plus our reaction time. Scale the buffer with measured short-horizon
+// volatility and the entry price, clamped to [floor, cap]. Falls back to the
+// floor when volatility/age are unavailable (upstream gates reject stale data
+// anyway, so the fallback only shapes the EV number, never an ACCEPT).
+inline double directional_latency_risk_buffer(const EvaluationInput& row, const Config& config = {}) {
+    if (!row.volatility_per_sqrt_second || !row.reference_age_ms)
+        return config.directional_latency_buffer;
+    const double age_seconds = std::max(0.0, *row.reference_age_ms / 1000.0);
+    const double dynamic_part = config.directional_latency_z *
+        *row.volatility_per_sqrt_second *
+        std::sqrt(age_seconds + config.directional_latency_reaction_seconds) *
+        row.expected_fill_price;
+    return std::clamp(dynamic_part, config.directional_latency_buffer,
+                      config.directional_latency_buffer_cap);
+}
+
 inline Decision evaluate_directional(const EvaluationInput& row, const Config& config = {}) {
     auto reasons = common_rejections(row);
     const auto window = directional_window(row.timeframe, config);
@@ -332,7 +357,7 @@ inline Decision evaluate_directional(const EvaluationInput& row, const Config& c
     if (row.estimated_probability) {
         gross = *row.estimated_probability - row.expected_fill_price;
         net = *gross - row.fee_per_share - row.slippage_per_share -
-              config.directional_latency_buffer - config.directional_settlement_buffer;
+              directional_latency_risk_buffer(row, config) - config.directional_settlement_buffer;
         if (*net < config.directional_min_net_ev) append_reason(reasons, "net_ev_below_threshold");
     }
     return {"late_window_directional_ev", gross, net,

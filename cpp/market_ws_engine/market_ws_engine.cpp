@@ -130,6 +130,53 @@ std::map<std::string, Market> load_markets(const std::string& path, unsigned lon
     return markets;
 }
 
+// Probability calibration map (data/probability-calibration-map.json), published
+// by the Python shadow lifecycle from settled shadow_prediction_complete rows.
+// The C++ engine is the canonical ACCEPT producer; it replaces raw model
+// probabilities with empirically calibrated ones in the EV gate. Shrinkage
+// formula must stay byte-identical to poly_arb_bot/probability_calibration_map.py
+// and the Python parity verifier:
+//   calibrated = (actual_up + prior_weight * expected_up_rate) / (samples + prior_weight)
+// with actual_up = realized_up_rate * samples.
+struct CalibrationBucket {
+    int samples = 0;
+    double expected_up_rate = 0;
+    double realized_up_rate = 0;
+};
+
+struct CalibrationStrategyMap {
+    std::map<std::string, std::map<std::string, CalibrationBucket>> timeframes;
+    std::map<std::string, CalibrationBucket> overall;
+};
+
+struct CalibrationResult {
+    std::optional<double> input_probability;  // Up-oriented pre-calibration key
+    std::optional<double> probability;        // calibrated Up probability
+    std::string bucket;
+    int samples = 0;
+    std::string scope = "none";  // timeframe | strategy | raw | none
+};
+
+std::string calibration_bucket_name(double probability) {
+    const int index = std::min(9, std::max(0, static_cast<int>(probability * 10)));
+    std::ostringstream name;
+    name << std::fixed << std::setprecision(1)
+         << (index / 10.0) << "-" << ((index + 1) / 10.0);
+    return name.str();
+}
+
+std::map<std::string, CalibrationBucket> parse_calibration_buckets(const ptree& node) {
+    std::map<std::string, CalibrationBucket> buckets;
+    for (const auto& item : node) {
+        CalibrationBucket bucket;
+        bucket.samples = item.second.get<int>("samples", 0);
+        bucket.expected_up_rate = item.second.get<double>("expected_up_rate", 0);
+        bucket.realized_up_rate = item.second.get<double>("realized_up_rate", 0);
+        buckets[item.first] = bucket;
+    }
+    return buckets;
+}
+
 double now_seconds() { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); }
 double number(const ptree& row, const std::string& key) { return row.get<double>(key, 0); }
 
@@ -152,10 +199,15 @@ bool environment_enabled(const char* name) {
 strategy::Config strategy_config_from_environment() {
     strategy::Config config;
     config.directional_min_net_ev = environment_double("DIRECTIONAL_MIN_NET_EV", "0.015");
-    config.directional_min_probability = environment_double("DIRECTIONAL_MIN_PROBABILITY", "0.90");
+    config.directional_min_probability = environment_double("DIRECTIONAL_MIN_PROBABILITY", "0");
     config.directional_enforce_time_window =
         environment_value("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0") != "0";
     config.directional_latency_buffer = environment_double("DIRECTIONAL_LATENCY_BUFFER", "0.003");
+    config.directional_latency_z = environment_double("DIRECTIONAL_LATENCY_Z", "1.0");
+    config.directional_latency_reaction_seconds = environment_double(
+        "DIRECTIONAL_LATENCY_REACTION_SECONDS", "1.0");
+    config.directional_latency_buffer_cap = environment_double(
+        "DIRECTIONAL_LATENCY_BUFFER_CAP", "0.05");
     config.directional_settlement_buffer = environment_double("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002");
     config.lottery_min_price = environment_double("LOTTERY_MIN_PRICE", "0.01");
     config.lottery_max_price = environment_double("LOTTERY_MAX_PRICE", "0.05");
@@ -205,8 +257,12 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"coinbase_reference_max_age_ms", environment_value("COINBASE_REFERENCE_MAX_AGE_MS", "10000")},
         {"directional_latency_buffer", environment_value("DIRECTIONAL_LATENCY_BUFFER", "0.003")},
         {"directional_min_net_ev", environment_value("DIRECTIONAL_MIN_NET_EV", "0.015")},
-        {"directional_min_probability", environment_value("DIRECTIONAL_MIN_PROBABILITY", "0.90")},
+        {"directional_min_probability", environment_value("DIRECTIONAL_MIN_PROBABILITY", "0")},
         {"directional_enforce_time_window", environment_value("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0")},
+        {"directional_latency_z", environment_value("DIRECTIONAL_LATENCY_Z", "1.0")},
+        {"directional_latency_reaction_seconds", environment_value(
+            "DIRECTIONAL_LATENCY_REACTION_SECONDS", "1.0")},
+        {"directional_latency_buffer_cap", environment_value("DIRECTIONAL_LATENCY_BUFFER_CAP", "0.05")},
         {"directional_window_5m_min", environment_value("DIRECTIONAL_WINDOW_5M_MIN", "5")},
         {"directional_window_5m_max", environment_value("DIRECTIONAL_WINDOW_5M_MAX", "15")},
         {"directional_window_15m_min", environment_value("DIRECTIONAL_WINDOW_15M_MIN", "5")},
@@ -267,6 +323,14 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"model_imbalance_horizon_seconds", environment_value("MODEL_IMBALANCE_HORIZON_SECONDS", "60")},
         {"model_logistic_scale", environment_value("MODEL_LOGISTIC_SCALE", "0.6267")},
         {"probability_reference", "settlement_reference"},
+        {"probability_calibration_map_max_age_seconds", environment_value(
+            "PROBABILITY_CALIBRATION_MAP_MAX_AGE_SECONDS", "120")},
+        {"probability_calibration_min_bucket_samples", environment_value(
+            "PROBABILITY_CALIBRATION_MIN_BUCKET_SAMPLES", "30")},
+        {"probability_calibration_prior_weight", environment_value(
+            "PROBABILITY_CALIBRATION_PRIOR_WEIGHT", "30")},
+        {"probability_calibration_require_map", environment_value(
+            "PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")},
         {"shadow_buffer_per_share", environment_value("SHADOW_BUFFER_PER_SHARE", "0.002")},
         {"shadow_min_profit", environment_value("SHADOW_MIN_PROFIT", "0.01")},
         {"shadow_sizing_capital_usd", environment_value("SHADOW_SIZING_CAPITAL_USD", "1000")},
@@ -283,12 +347,16 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
                 key == "maximum_reference_age_ms" || key == "maximum_book_age_ms" ||
                 key == "maximum_clock_skew_ms" || key == "minimum_model_sample_span_seconds" ||
                 key == "probability_reference" ||
+                key.rfind("probability_calibration_", 0) == 0 ||
                 key == "shadow_sizing_capital_usd" ||
                 key == "shadow_profit_exit_buffer_per_share";
             if (strategy_name == "late_window_directional_ev") return common ||
                 key == "directional_min_net_ev" || key == "directional_latency_buffer" ||
                  key == "directional_settlement_buffer" || key == "directional_min_probability" ||
                  key == "directional_enforce_time_window" ||
+                 key == "directional_latency_z" ||
+                 key == "directional_latency_reaction_seconds" ||
+                 key == "directional_latency_buffer_cap" ||
                  key == "directional_fractional_kelly" ||
                  key == "directional_max_capital_fraction" ||
                  key == "directional_max_quantity" ||
@@ -964,6 +1032,7 @@ private:
                 else probability_block_reason = "probability_model_unavailable";
             }
             const double rate = market.fee > 0 ? market.fee : fallback_fee_;
+            const double up_ask = best_ask(up_book);
             std::map<std::string, strategy::EvaluationInput> directional_inputs;
             for (const std::string outcome : {"Up", "Down"}) {
                 const bool is_up = outcome == "Up";
@@ -987,11 +1056,25 @@ private:
                         continue;
                     const auto raw_probability = is_lottery
                         ? lottery_raw_probability : directional_raw_probability;
+                    // Calibration keys on the Up-oriented pre-calibration
+                    // probability (raw model for directional, market-blended for
+                    // lottery) — the same quantity shadow predictions bucket on.
+                    const auto model_up_probability = is_lottery
+                        ? strategy::lottery_market_blend_probability(
+                            lottery_probability.estimated_probability, up_ask,
+                            strategy_config_)
+                        : directional_probability.estimated_probability;
+                    const CalibrationResult calibration = calibrate_probability(
+                        strategy_name, market.interval, model_up_probability, timestamp);
                     strategy::EvaluationInput input;
                     input.strategy = strategy_name;
-                    input.estimated_probability = is_lottery
-                        ? strategy::lottery_market_blend_probability(raw_probability, ask, strategy_config_)
-                        : raw_probability;
+                    // Uncalibrated rows keep the raw probability so prediction
+                    // observations keep flowing (no calibration deadlock); the
+                    // require_map override below still forces the REJECT.
+                    input.estimated_probability = !calibration.probability
+                        ? raw_probability
+                        : is_up ? calibration.probability
+                                : std::optional<double>(1 - *calibration.probability);
                     const double input_quality = probability_input_quality(
                         probability_input, reference, input.estimated_probability);
                     const auto sizing_result = sizing::size_probability_position(
@@ -1023,6 +1106,8 @@ private:
                     input.target_depth_ok = sizing_result.accepted &&
                         fill.first + 1e-9 >= evaluation_quantity;
                     input.momentum_bps_30s = asset ? asset->momentum_bps_30s : std::nullopt;
+                    input.volatility_per_sqrt_second =
+                        asset ? asset->volatility_per_sqrt_second : std::nullopt;
                     input.order_book_imbalance = book_imbalance(book);
                     input.reference_quorum_met = reference.quorum;
                     input.reference_block_reason = reference.reason;
@@ -1037,6 +1122,18 @@ private:
                     strategy::Decision decision = strategy_name == "late_window_directional_ev"
                         ? strategy::evaluate_directional(input, strategy_config_)
                         : strategy::evaluate_lottery(input, strategy_config_);
+                    // Fail closed when the model produced a probability but the
+                    // calibration map cannot vouch for it (missing, stale, or
+                    // insufficient bucket samples). Prediction observations keep
+                    // flowing regardless, so calibration data keeps accumulating.
+                    if (calibration_require_map_ && model_up_probability &&
+                            !calibration.probability) {
+                        strategy::append_reason(
+                            decision.blocking_reasons, "probability_calibration_unavailable");
+                        decision.decision = "REJECT";
+                        if (decision.reason.empty() || decision.reason == "positive_net_ev")
+                            decision.reason = "probability_calibration_unavailable";
+                    }
                     apply_sizing_rejection(decision, sizing_result);
                     if (!is_lottery) {
                         directional_inputs[outcome] = input;
@@ -1060,7 +1157,7 @@ private:
                                 emit_strategy_audit(item.first, market, outcome, input, probability_input,
                                     is_lottery ? lottery_probability : directional_probability,
                                     raw_probability, reference, decision, timestamp, ask,
-                                    book, rate, sizing_result,
+                                    book, rate, sizing_result, calibration,
                                     "shadow_prediction_observation", horizon->second)) {
                                 probability_observations_emitted_.insert(observation_key);
                             }
@@ -1075,7 +1172,7 @@ private:
                     emit_strategy_audit(item.first, market, outcome, input, probability_input,
                                         is_lottery ? lottery_probability : directional_probability,
                                         raw_probability, reference, decision, timestamp, ask,
-                                        book, rate, sizing_result);
+                                        book, rate, sizing_result, calibration);
                 }
             }
             if (maker_observer_enabled_) {
@@ -1278,6 +1375,7 @@ private:
                              double timestamp, double market_price,
                              const Book& outcome_book, double fee_rate,
                              const sizing::Result& sizing_result,
+                             const CalibrationResult& calibration,
                              const std::string& event_type = "shadow_eval",
                              double calibration_horizon_seconds = 0) {
         const unsigned long long sequence = ++strategy_evaluation_sequence_;
@@ -1313,6 +1411,17 @@ private:
             << input.expected_fill_price << ",\"estimated_probability\":";
         optional(input.estimated_probability);
         out << ",\"raw_estimated_probability\":"; optional(raw_estimated_probability);
+        out << ",\"calibration_input_probability\":"; optional(calibration.input_probability);
+        out << ",\"calibrated_probability\":"; optional(calibration.probability);
+        out << ",\"calibration_bucket\":";
+        if (calibration.bucket.empty()) out << "null";
+        else out << '"' << calibration.bucket << '"';
+        out << ",\"calibration_bucket_samples\":" << calibration.samples
+            << ",\"calibration_scope\":\"" << calibration.scope << "\""
+            << ",\"calibration_map_age_seconds\":";
+        if (std::isfinite(calibration_map_age_seconds(timestamp)))
+            out << calibration_map_age_seconds(timestamp);
+        else out << "null";
         out << ",\"market_implied_probability\":" << market_price << ",\"gross_edge\":";
         optional(decision.gross_edge);
         out << ",\"fees\":" << input.fee_per_share << ",\"slippage\":";
@@ -1320,7 +1429,9 @@ private:
             out << std::max(0.0, sizing_result.dynamic_vwap - market_price);
         else out << "null";
         out
-            << ",\"latency_risk_buffer\":" << strategy_config_.directional_latency_buffer
+            << ",\"latency_risk_buffer\":" << (decision.strategy == "low_price_lottery_ev"
+                ? strategy_config_.directional_latency_buffer
+                : strategy::directional_latency_risk_buffer(input, strategy_config_))
             << ",\"settlement_risk_buffer\":" << strategy_config_.directional_settlement_buffer
             << ",\"model_uncertainty_buffer\":" << strategy_config_.lottery_model_buffer
             << ",\"execution_risk_buffer\":" << strategy_config_.lottery_execution_buffer
@@ -2911,9 +3022,106 @@ private:
         queue_write(subscription({token}, "subscribe"));
     }
 
+    std::string calibration_map_path() const {
+        const char* env_path = std::getenv("PROBABILITY_CALIBRATION_MAP_PATH");
+        if (env_path && *env_path) return env_path;
+        const auto slash = markets_path_.find_last_of('/');
+        return (slash == std::string::npos ? "" : markets_path_.substr(0, slash + 1)) +
+            "probability-calibration-map.json";
+    }
+
+    void load_calibration_map() {
+        try {
+            std::ifstream file(calibration_map_path());
+            if (!file) return;  // keep the previous map; staleness is fail-closed
+            ptree root;
+            boost::property_tree::read_json(file, root);
+            std::map<std::string, CalibrationStrategyMap> next;
+            const ptree empty;
+            for (const auto& strategy_node : root.get_child("strategies", empty)) {
+                CalibrationStrategyMap entry;
+                for (const auto& timeframe : strategy_node.second.get_child("timeframes", empty))
+                    entry.timeframes[timeframe.first] =
+                        parse_calibration_buckets(timeframe.second);
+                entry.overall =
+                    parse_calibration_buckets(strategy_node.second.get_child("overall", empty));
+                next[strategy_node.first] = std::move(entry);
+            }
+            calibration_map_ = std::move(next);
+            calibration_map_generated_at_ = root.get<double>("generated_at", 0);
+        } catch (const std::exception& error) {
+            // Keep the previous map on parse/IO failure.
+            std::cerr << "CALIBRATION_MAP_ERROR message=" << error.what() << "\n";
+        }
+    }
+
+    double calibration_map_age_seconds(double timestamp) const {
+        return calibration_map_generated_at_ > 0
+            ? timestamp - calibration_map_generated_at_
+            : std::numeric_limits<double>::infinity();
+    }
+
+    CalibrationResult calibrate_probability(
+            const std::string& strategy_name, const std::string& timeframe,
+            const std::optional<double>& up_probability, double timestamp) const {
+        CalibrationResult result;
+        if (!up_probability) return result;
+        result.input_probability = up_probability;
+        result.bucket = calibration_bucket_name(*up_probability);
+        const auto raw_fallback = [&]() {
+            if (!calibration_require_map_) {
+                result.probability = up_probability;
+                result.scope = "raw";
+            }
+        };
+        if (!(calibration_map_age_seconds(timestamp) <= calibration_map_max_age_seconds_)) {
+            raw_fallback();
+            return result;
+        }
+        const auto strategy = calibration_map_.find(strategy_name);
+        if (strategy == calibration_map_.end()) {
+            raw_fallback();
+            return result;
+        }
+        const CalibrationBucket* selected = nullptr;
+        std::string scope;
+        const auto timeframes = strategy->second.timeframes.find(timeframe);
+        if (timeframes != strategy->second.timeframes.end()) {
+            const auto bucket = timeframes->second.find(result.bucket);
+            if (bucket != timeframes->second.end() &&
+                    bucket->second.samples >= calibration_min_bucket_samples_) {
+                selected = &bucket->second;
+                scope = "timeframe";
+            }
+        }
+        if (!selected) {
+            const auto bucket = strategy->second.overall.find(result.bucket);
+            if (bucket != strategy->second.overall.end() &&
+                    bucket->second.samples >= calibration_min_bucket_samples_) {
+                selected = &bucket->second;
+                scope = "strategy";
+            }
+        }
+        if (!selected) {
+            raw_fallback();
+            return result;
+        }
+        result.samples = selected->samples;
+        result.scope = scope;
+        // calibrated = (actual_up + prior * expected) / (samples + prior),
+        // actual_up = realized_up_rate * samples (mirror of the Python publisher).
+        const double calibrated =
+            (selected->realized_up_rate * selected->samples +
+             calibration_prior_weight_ * selected->expected_up_rate) /
+            (selected->samples + calibration_prior_weight_);
+        result.probability = std::clamp(calibrated, 0.001, 0.999);
+        return result;
+    }
+
     void reload_markets() {
         try {
             unsigned long long next_version = 0;
+            load_calibration_map();
             auto next = load_markets(markets_path_, &next_version);
             if (next_version <= document_version_) return;
             std::map<std::string, bool> old_tokens, next_tokens;
@@ -3119,6 +3327,17 @@ private:
         "LOTTERY_PROBABILITY_HAIRCUT", "0.05");
     double lottery_max_quantity_ = environment_double(
         "LOTTERY_MAX_QUANTITY", "100");
+    // Probability calibration map consumption (see CalibrationBucket above).
+    double calibration_map_max_age_seconds_ = environment_double(
+        "PROBABILITY_CALIBRATION_MAP_MAX_AGE_SECONDS", "120");
+    int calibration_min_bucket_samples_ = static_cast<int>(environment_double(
+        "PROBABILITY_CALIBRATION_MIN_BUCKET_SAMPLES", "30"));
+    double calibration_prior_weight_ = environment_double(
+        "PROBABILITY_CALIBRATION_PRIOR_WEIGHT", "30");
+    bool calibration_require_map_ =
+        environment_value("PROBABILITY_CALIBRATION_REQUIRE_MAP", "1") != "0";
+    std::map<std::string, CalibrationStrategyMap> calibration_map_;
+    double calibration_map_generated_at_ = 0;
     double paired_max_capital_fraction_ = environment_double(
         "PAIRED_MAX_CAPITAL_FRACTION", "0.02");
     double paired_max_quantity_ = environment_double(

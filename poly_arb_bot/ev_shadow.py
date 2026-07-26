@@ -6,6 +6,7 @@ import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -13,9 +14,15 @@ from urllib.request import Request, urlopen
 from .ev_strategies import (
     DirectionalInput,
     decision_audit,
+    directional_latency_risk_buffer,
     directional_windows,
     evaluate_directional,
     evaluate_lottery,
+)
+from .probability_calibration_map import (
+    calibrate_probability,
+    load_calibration_map,
+    require_map_from_env,
 )
 from .reference_layer import ReferenceState, reference_source_maximum_age_ms, reference_state_for_asset
 
@@ -49,7 +56,7 @@ def lottery_ev_enabled():
 def strategy_config(strategy=None):
     values = {
         "directional_min_net_ev": os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015"),
-        "directional_min_probability": os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0.90"),
+        "directional_min_probability": os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0"),
         "directional_enforce_time_window": os.getenv("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0"),
         "directional_window_5m_min": os.getenv("DIRECTIONAL_WINDOW_5M_MIN", "5"),
         "directional_window_5m_max": os.getenv("DIRECTIONAL_WINDOW_5M_MAX", "15"),
@@ -160,10 +167,13 @@ _CANONICAL_STRATEGY_CONFIG_ENV = (
     ("directional_enforce_time_window", "DIRECTIONAL_ENFORCE_TIME_WINDOW", "0"),
     ("directional_fractional_kelly", "DIRECTIONAL_FRACTIONAL_KELLY", "0.10"),
     ("directional_latency_buffer", "DIRECTIONAL_LATENCY_BUFFER", "0.003"),
+    ("directional_latency_z", "DIRECTIONAL_LATENCY_Z", "1.0"),
+    ("directional_latency_reaction_seconds", "DIRECTIONAL_LATENCY_REACTION_SECONDS", "1.0"),
+    ("directional_latency_buffer_cap", "DIRECTIONAL_LATENCY_BUFFER_CAP", "0.05"),
     ("directional_max_capital_fraction", "DIRECTIONAL_MAX_CAPITAL_FRACTION", "0.02"),
     ("directional_max_quantity", "DIRECTIONAL_MAX_QUANTITY", "100"),
     ("directional_min_net_ev", "DIRECTIONAL_MIN_NET_EV", "0.015"),
-    ("directional_min_probability", "DIRECTIONAL_MIN_PROBABILITY", "0.90"),
+    ("directional_min_probability", "DIRECTIONAL_MIN_PROBABILITY", "0"),
     ("directional_probability_haircut", "DIRECTIONAL_PROBABILITY_HAIRCUT", "0.02"),
     ("directional_settlement_buffer", "DIRECTIONAL_SETTLEMENT_BUFFER", "0.002"),
     ("directional_window_15m_max", "DIRECTIONAL_WINDOW_15M_MAX", "20"),
@@ -216,6 +226,10 @@ _CANONICAL_STRATEGY_CONFIG_ENV = (
     ("model_momentum_persistence_seconds", "MODEL_MOMENTUM_PERSISTENCE_SECONDS", "120"),
     ("model_volatility_floor_per_sqrt_second", "MODEL_VOLATILITY_FLOOR_PER_SQRT_SECOND", "1e-5"),
     ("momentum_projection_weight", "MODEL_MOMENTUM_PROJECTION_WEIGHT", "1.0"),
+    ("probability_calibration_map_max_age_seconds", "PROBABILITY_CALIBRATION_MAP_MAX_AGE_SECONDS", "120"),
+    ("probability_calibration_min_bucket_samples", "PROBABILITY_CALIBRATION_MIN_BUCKET_SAMPLES", "30"),
+    ("probability_calibration_prior_weight", "PROBABILITY_CALIBRATION_PRIOR_WEIGHT", "30"),
+    ("probability_calibration_require_map", "PROBABILITY_CALIBRATION_REQUIRE_MAP", "1"),
     ("shadow_buffer_per_share", "SHADOW_BUFFER_PER_SHARE", "0.002"),
     ("shadow_min_profit", "SHADOW_MIN_PROFIT", "0.01"),
     ("shadow_profit_exit_buffer_per_share", "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE", "0.001"),
@@ -228,6 +242,10 @@ _CANONICAL_COMMON_KEYS = frozenset({
     "coinbase_reference_max_age_ms", "minimum_liquidity", "maximum_slippage",
     "maximum_reference_age_ms", "maximum_book_age_ms", "maximum_clock_skew_ms",
     "minimum_model_sample_span_seconds", "probability_reference",
+    "probability_calibration_map_max_age_seconds",
+    "probability_calibration_min_bucket_samples",
+    "probability_calibration_prior_weight",
+    "probability_calibration_require_map",
     "shadow_sizing_capital_usd", "shadow_profit_exit_buffer_per_share",
 })
 _CANONICAL_DIRECTIONAL_KEYS = frozenset({
@@ -236,6 +254,8 @@ _CANONICAL_DIRECTIONAL_KEYS = frozenset({
     "directional_enforce_time_window", "directional_fractional_kelly",
     "directional_max_capital_fraction", "directional_max_quantity",
     "directional_probability_haircut", "momentum_projection_weight", "imbalance_z",
+    "directional_latency_z", "directional_latency_reaction_seconds",
+    "directional_latency_buffer_cap",
 })
 _CANONICAL_LOTTERY_KEYS = frozenset({
     "lottery_min_price", "lottery_max_price", "lottery_min_net_ev",
@@ -630,6 +650,13 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         else:
             probability_block_reason = "probability_model_unavailable"
     size = max(float(event.get("size", 0)), 1e-9)
+    up_best_ask = event.get("up_best_ask")
+    up_implied_probability = (
+        float(up_best_ask) if up_best_ask is not None else float(event.get("up_vwap", 1))
+    )
+    calibration_payload = load_calibration_map()
+    calibration_required = require_map_from_env()
+    calibration_map_generated_at = float((calibration_payload or {}).get("generated_at", 0) or 0)
     rows = []
     for outcome, fill_key, ask_key, fee_key, depth_key, imbalance_key, directional_raw, lottery_raw in (
         ("Up", "up_vwap", "up_best_ask", "up_fee", "up_available_depth", "up_book_imbalance",
@@ -665,7 +692,8 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             seconds_to_close=seconds_to_close, price_to_beat=price_to_beat,
             reference=reference, fee_per_share=float(event.get(fee_key, 0)) / size,
             slippage_per_share=slippage,
-            latency_risk_buffer=float(os.getenv("DIRECTIONAL_LATENCY_BUFFER", "0.003")),
+            latency_risk_buffer=directional_latency_risk_buffer(
+                fill, model_asset.get("volatility_per_sqrt_second"), reference_age_ms),
             settlement_risk_buffer=float(os.getenv("DIRECTIONAL_SETTLEMENT_BUFFER", "0.002")),
             model_uncertainty_buffer=float(os.getenv("LOTTERY_MODEL_BUFFER", "0.01")),
             execution_risk_buffer=float(os.getenv("LOTTERY_EXECUTION_BUFFER", "0.005")),
@@ -700,9 +728,24 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
         for strategy, evaluator in strategy_evaluators:
             is_lottery = strategy == "low_price_lottery_ev"
             raw_probability = lottery_raw if is_lottery else directional_raw
+            # Calibration keys on the Up-oriented pre-calibration probability
+            # (raw model for directional, market-blended for lottery) — mirrors
+            # the C++ engine and the quantity shadow predictions bucket on.
+            model_up_probability = (
+                _lottery_market_blend_probability(lottery_up_probability, up_implied_probability)
+                if is_lottery else directional_up_probability
+            )
+            calibration = calibrate_probability(
+                calibration_payload, strategy, market.get("interval", ""),
+                model_up_probability, now,
+            )
+            calibrated_up = calibration["probability"]
+            # Uncalibrated rows keep the raw probability so prediction
+            # observations keep flowing (no calibration deadlock); the
+            # require_map override below still forces the REJECT.
             probability = (
-                _lottery_market_blend_probability(raw_probability, common["market_price"])
-                if is_lottery else raw_probability
+                raw_probability if calibrated_up is None
+                else calibrated_up if outcome == "Up" else 1 - calibrated_up
             )
             diagnostics = lottery_diagnostics if is_lottery else directional_diagnostics
             input_row = DirectionalInput(
@@ -712,7 +755,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                 result = evaluator(
                     input_row,
                     float(os.getenv("DIRECTIONAL_MIN_NET_EV", "0.015")),
-                    float(os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0.90")),
+                    float(os.getenv("DIRECTIONAL_MIN_PROBABILITY", "0")),
                     enforce_time_window=(
                         os.getenv("DIRECTIONAL_ENFORCE_TIME_WINDOW", "0").strip().lower()
                         not in {"0", "false", "no", "off"}
@@ -723,6 +766,19 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                     input_row, float(os.getenv("LOTTERY_MIN_PRICE", "0.01")),
                     float(os.getenv("LOTTERY_MAX_PRICE", "0.05")),
                     float(os.getenv("LOTTERY_MIN_NET_EV", "0.015")),
+                )
+            # Fail closed when the model produced a probability but the
+            # calibration map cannot vouch for it (mirrors the C++ engine).
+            if (calibration_required and model_up_probability is not None
+                    and calibration["probability"] is None):
+                blocking = list(result.blocking_reasons)
+                if "probability_calibration_unavailable" not in blocking:
+                    blocking.append("probability_calibration_unavailable")
+                result = replace(
+                    result, decision="REJECT",
+                    reason=("probability_calibration_unavailable"
+                            if result.reason in ("", "positive_net_ev") else result.reason),
+                    blocking_reasons=tuple(blocking),
                 )
             event_id = f'{event.get("event_id", market.get("market_id"))}:{strategy}:{outcome}'
             audit = decision_audit(
@@ -735,6 +791,15 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                 "lottery_logistic_projected_blend_v2" if is_lottery else "directional_logistic_projected_v2"
             )
             audit["raw_estimated_probability"] = raw_probability
+            audit["calibration_input_probability"] = calibration["input_probability"]
+            audit["calibrated_probability"] = calibration["probability"]
+            audit["calibration_bucket"] = calibration["bucket"]
+            audit["calibration_bucket_samples"] = calibration["samples"]
+            audit["calibration_scope"] = calibration["scope"]
+            audit["calibration_map_age_seconds"] = (
+                now - calibration_map_generated_at
+                if calibration_map_generated_at > 0 else None
+            )
             audit["model_type"] = (
                 "configured_lottery_market_blend_shadow"
                 if is_lottery else "configured_distributional_shadow"

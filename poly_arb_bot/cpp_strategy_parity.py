@@ -7,7 +7,12 @@ from .ev_shadow import (
     _lottery_up_probability_model,
     _up_probability_model,
 )
-from .ev_strategies import DirectionalInput, evaluate_directional, evaluate_lottery
+from .ev_strategies import (
+    DirectionalInput,
+    directional_latency_risk_buffer,
+    evaluate_directional,
+    evaluate_lottery,
+)
 from .reference_layer import ReferenceState
 
 
@@ -119,7 +124,16 @@ def python_result(case):
         price_to_beat=case.get("price_to_beat", 100), reference=reference,
         fee_per_share=case.get("fee_per_share", .01),
         slippage_per_share=case.get("slippage_per_share", .002),
-        latency_risk_buffer=.003, settlement_risk_buffer=.002,
+        latency_risk_buffer=directional_latency_risk_buffer(
+            case["expected_fill_price"],
+            case.get("volatility_per_sqrt_second"),
+            case.get("reference_age_ms", 50),
+            floor=case.get("directional_latency_buffer", .003),
+            cap=case.get("directional_latency_buffer_cap", .05),
+            z=case.get("directional_latency_z", 1.0),
+            reaction_seconds=case.get("directional_latency_reaction_seconds", 1.0),
+        ),
+        settlement_risk_buffer=.002,
         model_uncertainty_buffer=.01, execution_risk_buffer=.005,
         liquidity=case.get("liquidity", 100),
         book_age_ms=case.get("book_age_ms", 50), reference_age_ms=50,
@@ -132,6 +146,8 @@ def python_result(case):
     )
     decision = evaluate_directional(
         row,
+        min_net_ev=case.get("directional_min_net_ev", .015),
+        min_probability=case.get("directional_min_probability", 0),
         enforce_time_window=case.get("directional_enforce_time_window", True),
     ) if case["strategy"] == "late_window_directional_ev" else evaluate_lottery(row)
     return {
