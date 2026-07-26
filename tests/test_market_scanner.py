@@ -262,7 +262,7 @@ def test_scanner_identifies_settlement_source_from_official_rules():
     assert binance.settlement_block_reason is None
 
 
-def test_scanner_marks_undocumented_chainlink_assets_unverified():
+def test_scanner_verifies_chainlink_settlement_for_all_rtds_assets():
     base = {
         "conditionId": "0xcondition", "outcomes": ["Up", "Down"],
         "clobTokenIds": ["111", "222"], "endDate": "2026-07-14T02:00:00Z",
@@ -270,6 +270,9 @@ def test_scanner_marks_undocumented_chainlink_assets_unverified():
         "rules": "The resolution source for this market is information from Chainlink, "
                  "specifically the HYPE/USD data stream.",
     }
+    # BNB/DOGE/HYPE streams are not in the official RTDS docs but were verified
+    # by raw probe (docs/diagnosis-reference-stale.md §2): all 7 symbols push
+    # ~0.95 msg/s and the reference engine observed all 7 FRESH.
     for question, interval in (
         ("HYPE Up or Down - test", "5m"),
         ("HYPE Up or Down - test", "15m"),
@@ -279,8 +282,8 @@ def test_scanner_marks_undocumented_chainlink_assets_unverified():
     ):
         spec = MarketScanner().spec_from_market(dict(base, question=question), interval=interval)
         assert spec.settlement_source == "chainlink"
-        assert spec.settlement_verified is False
-        assert spec.settlement_block_reason == "chainlink_rtds_asset_unsupported"
+        assert spec.settlement_verified is True
+        assert spec.settlement_block_reason is None
 
 
 def test_scanner_marks_binance_perpetual_settlement_unverified():
@@ -348,8 +351,8 @@ def test_scanner_payload_records_settlement_verification_state():
     }
     row = MarketScanner().to_payload([MarketScanner().spec_from_market(market)])["markets"][0]
     assert row["settlement_source"] == "chainlink"
-    assert row["settlement_verified"] is False
-    assert row["settlement_block_reason"] == "chainlink_rtds_asset_unsupported"
+    assert row["settlement_verified"] is True
+    assert row["settlement_block_reason"] is None
     assert row["fee_rebate_rate"] == 0.2
 
 

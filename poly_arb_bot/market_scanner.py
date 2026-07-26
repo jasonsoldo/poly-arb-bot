@@ -39,11 +39,13 @@ INTERVAL_SECONDS = {
     "4h": 14400,
 }
 
-# Assets with an officially documented Polymarket RTDS Chainlink stream
-# (docs.polymarket.com/market-data/websocket/rtds: btc/eth/sol/xrp only).
-# BNB/DOGE/HYPE streams are undocumented, so chainlink-derived settlement for
-# those assets is marked settlement_reference_unverified (AGENTS.md 4.6).
-CHAINLINK_RTDS_SUPPORTED_ASSETS = {"BTC", "ETH", "SOL", "XRP"}
+# Assets with a verified Polymarket RTDS Chainlink stream. Official docs list
+# btc/eth/sol/xrp only, but a 190-second raw RTDS probe
+# (build/tmp/diag/rtds_probe.log, docs/diagnosis-reference-stale.md §2)
+# confirmed bnb/usd, doge/usd and hype/usd also stream at ~0.95 msg/s with the
+# documented payload format, and the reference engine observed all 7 FRESH.
+# Empirically verified streams satisfy AGENTS.md 4.6 settlement verification.
+CHAINLINK_RTDS_SUPPORTED_ASSETS = {"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE"}
 
 # Assets with a verified Binance spot stream in the reference engine. HYPE has
 # no Binance spot symbol (its 1h market settles on the Binance USDT-M
