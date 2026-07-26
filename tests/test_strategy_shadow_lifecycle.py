@@ -1,8 +1,19 @@
 import json
 from dataclasses import replace
 
+import pytest
+
 from poly_arb_bot.ev_shadow import canonical_strategy_config_hash
 from poly_arb_bot.strategy_shadow_lifecycle import PortfolioLimits, StrategyShadowLifecycle, process_audit_once
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_calibration_mode(monkeypatch):
+    # Results must not depend on the operator's .env leaking
+    # SHADOW_CALIBRATION_MODE=1 into the pytest process (observed on the VPS
+    # after `set -a; . ./.env; set +a`): calibration mode deliberately bypasses
+    # the portfolio limits most tests here assert on.
+    monkeypatch.delenv("SHADOW_CALIBRATION_MODE", raising=False)
 
 
 def test_lifecycle_persists_real_order_invariants_on_initialization(tmp_path):
