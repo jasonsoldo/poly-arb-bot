@@ -1,7 +1,7 @@
 import json
 import time
 
-from poly_arb_bot.ev_shadow import strategy_config
+from poly_arb_bot.ev_shadow import canonical_strategy_config_hash
 from poly_arb_bot.shadow_report import IncrementalReport, build_report
 
 
@@ -58,7 +58,7 @@ def test_shadow_report_uses_realized_shadow_complete_pnl(tmp_path):
     audit = tmp_path / "audit.jsonl"
     execution = tmp_path / "execution.jsonl"
     audit.write_text("", encoding="utf-8")
-    current_hash = strategy_config()[1]
+    current_hash = canonical_strategy_config_hash()
     execution.write_text(json.dumps({
         "ts": 1101, "event_type": "shadow_complete", "event_id": "p1",
         "strategy": "late_window_directional_ev", "market_id": "m1",
@@ -77,7 +77,7 @@ def test_shadow_report_keeps_terminal_hedge_fields_in_ledger(tmp_path):
     audit = tmp_path / "audit.jsonl"
     execution = tmp_path / "execution.jsonl"
     audit.write_text("", encoding="utf-8")
-    current_hash = strategy_config("late_window_directional_ev")[1]
+    current_hash = canonical_strategy_config_hash("late_window_directional_ev")
     execution.write_text(json.dumps({
         "ts": 1101, "event_type": "shadow_complete", "event_id": "h1",
         "strategy": "late_window_directional_ev", "market_id": "m1",
@@ -99,7 +99,7 @@ def test_shadow_report_excludes_other_hash_from_current_performance(tmp_path):
     audit = tmp_path / "audit.jsonl"
     execution = tmp_path / "execution.jsonl"
     audit.write_text("", encoding="utf-8")
-    current_hash = strategy_config()[1]
+    current_hash = canonical_strategy_config_hash()
     rows = [
         {"ts": 1, "event_type": "shadow_complete", "event_id": "current",
          "strategy": "late_window_directional_ev", "strategy_config_hash": current_hash,
@@ -249,7 +249,7 @@ def test_incremental_report_matches_clean_full_build(tmp_path):
     audit = tmp_path / "audit.jsonl"
     execution = tmp_path / "execution.jsonl"
     state = tmp_path / "summary.json"
-    current_hash = strategy_config()[1]
+    current_hash = canonical_strategy_config_hash()
     audit_rows = [
         {"ts": time.time(), "event_id": "e1", "event_type": "shadow_eval",
          "market_id": "m1", "decision": "REJECT", "reason": "no_edge",

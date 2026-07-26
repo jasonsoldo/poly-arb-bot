@@ -6,7 +6,7 @@ import time
 from collections import Counter, deque
 from pathlib import Path
 
-from .ev_shadow import strategy_config
+from .ev_shadow import canonical_strategy_config_hash
 
 
 def percentile(values, fraction):
@@ -78,9 +78,9 @@ def _performance_from_rows(rows, current_complete_set_hashes=None):
         item.update({field: row.get(field) for field in fields})
         ledger.append(item)
     ledger.sort(key=lambda item: item["ts"])
-    current_hash = strategy_config()[1]
+    current_hash = canonical_strategy_config_hash()
     current_hashes = {
-        strategy: strategy_config(strategy)[1]
+        strategy: canonical_strategy_config_hash(strategy)
         for strategy in ("late_window_directional_ev", "low_price_lottery_ev")
     }
     hash_selected_strategies = {

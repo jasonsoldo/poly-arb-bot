@@ -6,7 +6,7 @@ import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .ev_shadow import strategy_config
+from .ev_shadow import canonical_strategy_config_hash
 from .jsonl_history import history_paths, open_history
 from .logger import JsonlLogger
 
@@ -87,9 +87,11 @@ class StrategyShadowLifecycle:
             for timeframe, default in DEFAULT_CALIBRATION_HORIZONS.items()
         }
         self.config_version = "shadow-portfolio-v7"
-        self.strategy_config_hash = strategy_config()[1]
+        # Compare against C++-emitted row hashes with the canonical mirror —
+        # strategy_config()[1] uses a different key set and would never match.
+        self.strategy_config_hash = canonical_strategy_config_hash()
         self.strategy_config_hashes = {
-            strategy: strategy_config(strategy)[1]
+            strategy: canonical_strategy_config_hash(strategy)
             for strategy in ("late_window_directional_ev", "low_price_lottery_ev")
         }
         config_payload = {

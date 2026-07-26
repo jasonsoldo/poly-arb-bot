@@ -135,6 +135,147 @@ def strategy_config(strategy=None):
     return values, hashlib.sha256(encoded).hexdigest()
 
 
+# Canonical strategy config hash — byte-for-byte mirror of the C++ producer's
+# strategy_config_hash() in cpp/market_ws_engine/market_ws_engine.cpp.
+#
+# C++ is the canonical audit producer, so every config_hash stored in
+# strategy-audit / shadow-complete rows comes from the C++ key set below, which
+# is NOT the same set as strategy_config() above (the Python verifier's own
+# evaluation view). Python consumers that compare row hashes against "current
+# config" (shadow_report current-config filtering, strategy_shadow_lifecycle
+# daily-loss / consecutive-loss limits) MUST use this mirror, otherwise no
+# C++-emitted row ever matches and those features silently see zero trades.
+#
+# Parity requirements with the C++ implementation:
+# - identical key set, env var names, and string defaults (raw env strings are
+#   hashed, never parsed);
+# - identical per-strategy key filter (common keys + strategy keys below);
+# - identical serialization: JSON object, keys sorted, no whitespace, string
+#   values (std::map iteration order == json.dumps(sort_keys=True); env values
+#   are numeric/plain strings so C++ escaping == JSON escaping).
+# tests/test_canonical_config_hash.py pins the digests and cross-checks the
+# key/env/default triples against the C++ source. Update both sides together.
+_CANONICAL_STRATEGY_CONFIG_ENV = (
+    ("coinbase_reference_max_age_ms", "COINBASE_REFERENCE_MAX_AGE_MS", "10000"),
+    ("directional_enforce_time_window", "DIRECTIONAL_ENFORCE_TIME_WINDOW", "0"),
+    ("directional_fractional_kelly", "DIRECTIONAL_FRACTIONAL_KELLY", "0.10"),
+    ("directional_latency_buffer", "DIRECTIONAL_LATENCY_BUFFER", "0.003"),
+    ("directional_max_capital_fraction", "DIRECTIONAL_MAX_CAPITAL_FRACTION", "0.02"),
+    ("directional_max_quantity", "DIRECTIONAL_MAX_QUANTITY", "100"),
+    ("directional_min_net_ev", "DIRECTIONAL_MIN_NET_EV", "0.015"),
+    ("directional_min_probability", "DIRECTIONAL_MIN_PROBABILITY", "0.90"),
+    ("directional_probability_haircut", "DIRECTIONAL_PROBABILITY_HAIRCUT", "0.02"),
+    ("directional_settlement_buffer", "DIRECTIONAL_SETTLEMENT_BUFFER", "0.002"),
+    ("directional_window_15m_max", "DIRECTIONAL_WINDOW_15M_MAX", "20"),
+    ("directional_window_15m_min", "DIRECTIONAL_WINDOW_15M_MIN", "5"),
+    ("directional_window_1h_max", "DIRECTIONAL_WINDOW_1H_MAX", "30"),
+    ("directional_window_1h_min", "DIRECTIONAL_WINDOW_1H_MIN", "8"),
+    ("directional_window_4h_max", "DIRECTIONAL_WINDOW_4H_MAX", "45"),
+    ("directional_window_4h_min", "DIRECTIONAL_WINDOW_4H_MIN", "10"),
+    ("directional_window_5m_max", "DIRECTIONAL_WINDOW_5M_MAX", "15"),
+    ("directional_window_5m_min", "DIRECTIONAL_WINDOW_5M_MIN", "5"),
+    ("imbalance_z", "MODEL_IMBALANCE_Z", "0.25"),
+    ("inventory_legacy_max_guaranteed_loss", "INVENTORY_LEGACY_MAX_GUARANTEED_LOSS", "0.50"),
+    ("inventory_legacy_min_loss_reduction_ratio", "INVENTORY_LEGACY_MIN_LOSS_REDUCTION_RATIO", "0.75"),
+    ("inventory_max_complement_gap", "INVENTORY_MAX_COMPLEMENT_GAP", "0.03"),
+    ("inventory_max_initial_price", "INVENTORY_MAX_INITIAL_PRICE", "0.20"),
+    ("inventory_max_total_unmatched_notional", "INVENTORY_MAX_TOTAL_UNMATCHED_NOTIONAL", "3.0"),
+    ("inventory_max_unmatched_notional", "INVENTORY_MAX_UNMATCHED_NOTIONAL", "0.50"),
+    ("inventory_min_entry_edge", "INVENTORY_MIN_ENTRY_EDGE", "0.05"),
+    ("inventory_min_entry_ev_roi", "INVENTORY_MIN_ENTRY_EV_ROI", "0.25"),
+    ("inventory_min_locked_roi", "INVENTORY_MIN_LOCKED_ROI", "0.02"),
+    ("lottery_distance_weight", "LOTTERY_DISTANCE_WEIGHT", "1.0"),
+    ("lottery_execution_buffer", "LOTTERY_EXECUTION_BUFFER", "0.005"),
+    ("lottery_fractional_kelly", "LOTTERY_FRACTIONAL_KELLY", "0.025"),
+    ("lottery_imbalance_z", "LOTTERY_IMBALANCE_Z", "0.10"),
+    ("lottery_market_blend", "LOTTERY_MARKET_BLEND", "0.50"),
+    ("lottery_max_capital_fraction", "LOTTERY_MAX_CAPITAL_FRACTION", "0.005"),
+    ("lottery_max_price", "LOTTERY_MAX_PRICE", "0.05"),
+    ("lottery_max_quantity", "LOTTERY_MAX_QUANTITY", "100"),
+    ("lottery_min_net_ev", "LOTTERY_MIN_NET_EV", "0.015"),
+    ("lottery_min_price", "LOTTERY_MIN_PRICE", "0.01"),
+    ("lottery_model_buffer", "LOTTERY_MODEL_BUFFER", "0.01"),
+    ("lottery_momentum_projection_weight", "LOTTERY_MOMENTUM_PROJECTION_WEIGHT", "0.5"),
+    ("lottery_probability_haircut", "LOTTERY_PROBABILITY_HAIRCUT", "0.05"),
+    ("maker_both_fill_probability", "MAKER_BOTH_FILL_PROBABILITY", "0"),
+    ("maker_expected_rebate_per_pair", "MAKER_EXPECTED_REBATE_PER_PAIR", "0"),
+    ("maker_minimum_pair_edge", "MAKER_MINIMUM_PAIR_EDGE", "0.01"),
+    ("maker_observation_window_seconds", "MAKER_OBSERVATION_WINDOW_SECONDS", "30"),
+    ("maker_orphan_loss", "MAKER_ORPHAN_LOSS", "0.02"),
+    ("maker_quote_half_spread", "MAKER_QUOTE_HALF_SPREAD", "0.02"),
+    ("maker_tick_size", "MAKER_TICK_SIZE", "0.01"),
+    ("maximum_book_age_ms", "CLOB_MAX_BOOK_AGE_MS", "750"),
+    ("maximum_clock_skew_ms", "MAX_CLOCK_SKEW_MS", "250"),
+    ("maximum_reference_age_ms", "REFERENCE_MAX_AGE_MS", "3000"),
+    ("maximum_slippage", "STRATEGY_MAX_SLIPPAGE", "0.01"),
+    ("minimum_liquidity", "STRATEGY_MIN_LIQUIDITY", "20"),
+    ("minimum_model_sample_span_seconds", "MODEL_MIN_SAMPLE_SPAN_SECONDS", "60"),
+    ("model_imbalance_horizon_seconds", "MODEL_IMBALANCE_HORIZON_SECONDS", "60"),
+    ("model_logistic_scale", "MODEL_LOGISTIC_SCALE", "0.6267"),
+    ("model_min_horizon_seconds", "MODEL_MIN_HORIZON_SECONDS", "2.0"),
+    ("model_momentum_persistence_seconds", "MODEL_MOMENTUM_PERSISTENCE_SECONDS", "120"),
+    ("model_volatility_floor_per_sqrt_second", "MODEL_VOLATILITY_FLOOR_PER_SQRT_SECOND", "1e-5"),
+    ("momentum_projection_weight", "MODEL_MOMENTUM_PROJECTION_WEIGHT", "1.0"),
+    ("shadow_buffer_per_share", "SHADOW_BUFFER_PER_SHARE", "0.002"),
+    ("shadow_min_profit", "SHADOW_MIN_PROFIT", "0.01"),
+    ("shadow_profit_exit_buffer_per_share", "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE", "0.001"),
+    ("shadow_size", "SHADOW_SIZE", "10"),
+    ("shadow_sizing_capital_usd", "SHADOW_SIZING_CAPITAL_USD", "1000"),
+    ("split_sell_buffer_per_share", "SPLIT_SELL_BUFFER_PER_SHARE", "0.003"),
+)
+
+_CANONICAL_COMMON_KEYS = frozenset({
+    "coinbase_reference_max_age_ms", "minimum_liquidity", "maximum_slippage",
+    "maximum_reference_age_ms", "maximum_book_age_ms", "maximum_clock_skew_ms",
+    "minimum_model_sample_span_seconds", "probability_reference",
+    "shadow_sizing_capital_usd", "shadow_profit_exit_buffer_per_share",
+})
+_CANONICAL_DIRECTIONAL_KEYS = frozenset({
+    "directional_min_net_ev", "directional_latency_buffer",
+    "directional_settlement_buffer", "directional_min_probability",
+    "directional_enforce_time_window", "directional_fractional_kelly",
+    "directional_max_capital_fraction", "directional_max_quantity",
+    "directional_probability_haircut", "momentum_projection_weight", "imbalance_z",
+})
+_CANONICAL_LOTTERY_KEYS = frozenset({
+    "lottery_min_price", "lottery_max_price", "lottery_min_net_ev",
+    "lottery_model_buffer", "lottery_execution_buffer", "lottery_distance_weight",
+    "lottery_fractional_kelly", "lottery_max_capital_fraction",
+    "lottery_max_quantity", "lottery_probability_haircut",
+    "lottery_momentum_projection_weight", "lottery_imbalance_z", "lottery_market_blend",
+})
+
+
+def _canonical_strategy_relevant(strategy, key):
+    if key in _CANONICAL_COMMON_KEYS:
+        return True
+    if strategy == "late_window_directional_ev":
+        return (key in _CANONICAL_DIRECTIONAL_KEYS
+                or key.startswith("directional_window_")
+                or key.startswith("model_"))
+    if strategy == "low_price_lottery_ev":
+        return key in _CANONICAL_LOTTERY_KEYS or key.startswith("model_")
+    return True
+
+
+def canonical_strategy_config_hash(strategy=None):
+    """SHA-256 of the canonical (C++ producer) strategy config view.
+
+    Mirrors strategy_config_hash() in cpp/market_ws_engine/market_ws_engine.cpp;
+    use this — not strategy_config()[1] — whenever comparing against
+    config_hash values emitted by the C++ engine.
+    """
+    values = {key: os.getenv(env, default)
+              for key, env, default in _CANONICAL_STRATEGY_CONFIG_ENV}
+    values["probability_reference"] = "settlement_reference"
+    if strategy:
+        values = {key: value for key, value in values.items()
+                  if _canonical_strategy_relevant(strategy, key)}
+        values["strategy"] = strategy
+    encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _market_start_ts(market):
     explicit_start = float(market.get("start_ts") or 0)
     close_ts = float(market.get("close_ts") or 0)

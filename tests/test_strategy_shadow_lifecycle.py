@@ -1,7 +1,7 @@
 import json
 from dataclasses import replace
 
-from poly_arb_bot.ev_shadow import strategy_config
+from poly_arb_bot.ev_shadow import canonical_strategy_config_hash
 from poly_arb_bot.strategy_shadow_lifecycle import PortfolioLimits, StrategyShadowLifecycle, process_audit_once
 
 
@@ -19,7 +19,7 @@ def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up")
         "event_id": event_id, "event_type": "shadow_eval", "strategy": strategy,
         "market_id": "m1", "asset": "BTC", "timeframe": "5m", "outcome": outcome,
         "decision": "ACCEPT", "expected_fill_price": 0.4, "fees": 0.01,
-        "target_size": 10, "ts": 1000, "config_hash": strategy_config()[1],
+        "target_size": 10, "ts": 1000, "config_hash": canonical_strategy_config_hash(),
         "config_version": "shadow-buy-rules-v9",
         "sizing_mode": "real_market_dynamic_v1",
         "dynamic_target_size": 10,
@@ -867,7 +867,7 @@ def test_existing_completion_log_is_backfilled_for_loss_limits(tmp_path, monkeyp
     log.write_text(json.dumps({
         "ts": 1101, "event_id": "old:complete", "event_type": "shadow_complete",
         "strategy": "late_window_directional_ev", "market_id": "old",
-        "strategy_config_hash": strategy_config()[1],
+        "strategy_config_hash": canonical_strategy_config_hash(),
         "realized_simulated_pnl": -6.0,
     }) + "\n", encoding="utf-8")
     limits = replace(PortfolioLimits(), directional_max_daily_loss=5.0)
@@ -890,7 +890,7 @@ def test_old_config_loss_does_not_block_current_strategy(tmp_path, monkeypatch):
 
 
 def test_existing_state_trade_hash_is_migrated_from_canonical_log(tmp_path):
-    current_hash = strategy_config()[1]
+    current_hash = canonical_strategy_config_hash()
     state = tmp_path / "state.json"
     state.write_text(json.dumps({
         "positions": {}, "completed": ["done"], "completed_trades": [{
@@ -909,7 +909,7 @@ def test_existing_state_trade_hash_is_migrated_from_canonical_log(tmp_path):
 
 
 def test_existing_state_trade_hash_is_migrated_from_rotated_log(tmp_path):
-    current_hash = strategy_config()[1]
+    current_hash = canonical_strategy_config_hash()
     state = tmp_path / "state.json"
     state.write_text(json.dumps({
         "positions": {}, "completed": ["done"], "completed_trades": [{
