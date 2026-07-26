@@ -139,7 +139,14 @@ Any mismatch blocks release. Do not loosen fees, buffers, freshness, depth, quor
 
 ## 7. Shadow acceptance and real-order invariants
 
+The acceptance CLI reads strategy enable flags (`DIRECTIONAL_EV_ENABLE`,
+`LOTTERY_EV_ENABLE`) from the process environment. systemd loads `.env` for the
+services, but an interactive shell does not — run the checks with `.env` loaded
+or `disabled_strategies_silent` will fail on a healthy system.
+
 ```bash
+cd /opt/poly-arb-bot
+set -a; . ./.env; set +a
 . .venv/bin/activate
 python -m poly_arb_bot.cli shadow-acceptance
 curl -fsS --max-time 30 http://127.0.0.1:8787/api/status \

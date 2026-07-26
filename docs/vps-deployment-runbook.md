@@ -280,6 +280,7 @@ sudo ufw status verbose
 
 ```bash
 cd /opt/poly-arb-bot
+set -a; . ./.env; set +a   # 验收脚本从环境读策略开关；不加载 .env 会把健康系统误判 disabled_strategies_silent FAIL
 curl -fsS --max-time 30 http://127.0.0.1:8787/api/status -o /tmp/poly-status.json
 .venv/bin/python -m poly_arb_bot.cli shadow-acceptance
 echo "exit=$?"        # 0=PASS 1=invariant FAIL 2=INCOMPLETE；INCOMPLETE 不得当 PASS
@@ -328,6 +329,7 @@ tail -F logs/shadow-audit.jsonl logs/strategy-audit.jsonl
 jq '{ws_connected, reference_connected, ready_markets, full_resyncs,
      reference_ipc_receive_age_ms_p95, clob_to_strategy_evaluation_us_p95,
      strategy_audit_backpressure}' data/shadow-health.json
+set -a; . ./.env; set +a   # shadow-acceptance 需要 .env 中的策略开关
 .venv/bin/python -m poly_arb_bot.cli shadow-acceptance | jq '{status, failed: [.checks[] | select(.passed | not) | .name]}'
 df -h / ; du -sh logs/ /var/log/poly-arb-*.log
 ```
