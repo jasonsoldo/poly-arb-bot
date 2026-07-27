@@ -497,6 +497,8 @@ struct MakerQuoteObservation {
 struct ProbabilityShadowPosition {
     std::string strategy, market_id, outcome, entry_event_id;
     double quantity = 0, entry_cost = 0, entry_ts = 0;
+    // Calibrated probability of the held outcome at entry; -1 = unknown.
+    double estimated_probability = -1;
 };
 
 ReferenceView build_reference_view(const reference_ipc::AssetSnapshot& asset,
@@ -873,7 +875,8 @@ private:
             const std::string& market_id, const std::string& outcome,
             const strategy::Decision& decision,
             const sizing::Result& sizing_result, const std::string& event_id,
-            double timestamp) {
+            double timestamp,
+            const std::optional<double>& estimated_probability) {
         if (decision.decision != "ACCEPT" ||
             (decision.strategy != "late_window_directional_ev" &&
              decision.strategy != "low_price_lottery_ev")) return;
@@ -885,6 +888,7 @@ private:
             decision.strategy, market_id, outcome, event_id,
             sizing_result.dynamic_target_size,
             sizing_result.dynamic_all_in_cost, timestamp,
+            estimated_probability ? *estimated_probability : -1,
         };
     }
 
@@ -912,6 +916,15 @@ private:
             position.quantity * exit_fill.second - exit_fee - exit_buffer;
         const double profit = net_proceeds - position.entry_cost;
         if (profit + 1e-12 < profit_exit_min_pnl_) return false;
+        if (profit_exit_mode_ev_) {
+            // Fail closed toward holding: without probability evidence there
+            // is no justification for clipping the settlement payoff early.
+            if (position.estimated_probability < 0) return false;
+            const double expected_settlement =
+                position.estimated_probability * position.quantity;
+            if (net_proceeds + 1e-12 <
+                    expected_settlement + profit_exit_ev_margin_) return false;
+        }
 
         const unsigned long long sequence = ++strategy_evaluation_sequence_;
         const std::string event_id = run_id_ + ":" +
@@ -945,6 +958,17 @@ private:
             << ",\"exit_net_proceeds\":" << net_proceeds
             << ",\"expected_profit\":" << profit
             << ",\"minimum_profit\":" << profit_exit_min_pnl_
+            << ",\"profit_exit_mode\":\""
+            << (profit_exit_mode_ev_ ? "ev" : "flat") << "\""
+            << ",\"expected_settlement_value\":";
+        if (profit_exit_mode_ev_ && position.estimated_probability >= 0) {
+            out << position.estimated_probability * position.quantity;
+        } else {
+            out << "null";
+        }
+        out << ",\"exit_ev_margin\":";
+        if (profit_exit_mode_ev_) out << profit_exit_ev_margin_; else out << "null";
+        out
             << ",\"exit_depth_ok\":true,\"exit_book_fresh\":true"
             << ",\"observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\""
             << ",\"exit_observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\""
@@ -1589,7 +1613,8 @@ private:
         else if (event_type == "shadow_eval") {
             record_session_strategy(decision.strategy, decision.decision);
             remember_probability_shadow_position(
-                market_id, outcome, decision, sizing_result, event_id, timestamp);
+                market_id, outcome, decision, sizing_result, event_id, timestamp,
+                input.estimated_probability);
         }
         return queued;
     }
@@ -3275,6 +3300,14 @@ private:
         "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE", "0.001");
     double profit_exit_min_pnl_ = environment_double(
         "SHADOW_PROFIT_EXIT_MIN_PNL", "0.10");
+    // "ev" (default): only emit a profit-exit observation when exit proceeds
+    // beat the expected value of holding to settlement
+    // (estimated_probability * quantity + margin). "flat": legacy behavior,
+    // emit as soon as net profit >= profit_exit_min_pnl_.
+    const bool profit_exit_mode_ev_ = environment_value(
+        "SHADOW_PROFIT_EXIT_MODE", "ev") != "flat";
+    double profit_exit_ev_margin_ = environment_double(
+        "SHADOW_PROFIT_EXIT_EV_MARGIN", "0");
     double reversion_lookback_ms_ = environment_double(
         "REVERSION_LOOKBACK_MS", "5000");
     double reversion_minimum_discount_per_share_ = environment_double(

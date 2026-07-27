@@ -1220,6 +1220,12 @@ event identity 必须能区分：
 - `real_order_submissions`
 - `real_orders`
 
+止盈退出事件（`profit_target_book_executable`）必须额外记录：
+
+- `profit_exit_mode`（`flat` / `ev`）
+- `expected_settlement_value`（持有到结算的期望价值，flat 模式为 null）
+- `exit_ev_margin`
+
 ### 方向策略字段
 
 - `outcome`
@@ -1913,6 +1919,7 @@ Mock 测试不能替代官方实网集成成功。
 - allowed market types by strategy
 - probability calibration map path / max age / min bucket samples / prior weight / require map
 - directional latency z / reaction seconds / buffer floor / buffer cap
+- profit exit mode（`flat` 固定最低盈利 / `ev` 与持有到结算的期望价值比较）、EV margin、每策略覆盖（`DIRECTIONAL_PROFIT_EXIT_MODE` / `LOTTERY_PROFIT_EXIT_MODE`）
 
 禁止隐藏 magic number。
 

@@ -14,6 +14,12 @@ def _deterministic_calibration_mode(monkeypatch):
     # after `set -a; . ./.env; set +a`): calibration mode deliberately bypasses
     # the portfolio limits most tests here assert on.
     monkeypatch.delenv("SHADOW_CALIBRATION_MODE", raising=False)
+    # Same leak concern for the profit-exit knobs: default "ev" mode behavior
+    # must not depend on the operator's .env.
+    monkeypatch.delenv("SHADOW_PROFIT_EXIT_MODE", raising=False)
+    monkeypatch.delenv("SHADOW_PROFIT_EXIT_EV_MARGIN", raising=False)
+    monkeypatch.delenv("DIRECTIONAL_PROFIT_EXIT_MODE", raising=False)
+    monkeypatch.delenv("LOTTERY_PROFIT_EXIT_MODE", raising=False)
 
 
 def test_lifecycle_persists_real_order_invariants_on_initialization(tmp_path):
@@ -31,6 +37,7 @@ def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up")
         "market_id": "m1", "asset": "BTC", "timeframe": "5m", "outcome": outcome,
         "decision": "ACCEPT", "expected_fill_price": 0.4, "fees": 0.01,
         "target_size": 10, "ts": 1000, "config_hash": canonical_strategy_config_hash(),
+        "estimated_probability": 0.7,
         "config_version": "shadow-buy-rules-v9",
         "sizing_mode": "real_market_dynamic_v1",
         "dynamic_target_size": 10,
@@ -177,6 +184,7 @@ def test_probability_position_exits_on_future_full_bid_depth_after_all_costs(tmp
     log = tmp_path / "events.jsonl"
     lifecycle = StrategyShadowLifecycle(
         tmp_path / "state.json", log, profit_exit_min_pnl=.25,
+        profit_exit_mode="flat",
     )
     entry = accepted()
     entry["config_version"] = "shadow-buy-rules-v9"
@@ -245,6 +253,7 @@ def test_probability_position_does_not_fake_exit_without_full_bid_depth(tmp_path
 def test_probability_position_keeps_holding_when_net_profit_is_below_target(tmp_path):
     lifecycle = StrategyShadowLifecycle(
         tmp_path / "state.json", tmp_path / "events.jsonl", profit_exit_min_pnl=.50,
+        profit_exit_mode="flat",
     )
     entry = accepted()
     entry["config_version"] = "shadow-buy-rules-v9"
@@ -265,6 +274,104 @@ def test_probability_position_keeps_holding_when_net_profit_is_below_target(tmp_
 
     assert lifecycle.consume(quote, {"m1": market()}) is False
     assert len(lifecycle.data["positions"]) == 1
+
+
+def _exit_quote(entry, event_id="exit-1", ts=1010, vwap=.45):
+    return {
+        **entry,
+        "event_id": event_id,
+        "event_type": "shadow_probability_profit_exit_book_executable",
+        "decision": "REJECT",
+        "ts": ts,
+        "exit_fill_quantity": 10,
+        "exit_vwap": vwap,
+        "exit_total_fee": .02,
+        "exit_execution_buffer": .01,
+        "exit_depth_ok": True,
+        "exit_book_fresh": True,
+        "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+    }
+
+
+def test_ev_mode_holds_when_exit_proceeds_below_expected_settlement(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+        profit_exit_min_pnl=.10,
+    )
+    entry = accepted()  # estimated_probability 0.7, size 10 -> settlement EV 7.0
+    entry["config_version"] = "shadow-buy-rules-v9"
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    # Proceeds 4.47 are a real profit (pnl .37 >= min .10) but holding to
+    # settlement is worth 7.0 in expectation: EV mode must keep holding.
+    assert lifecycle.consume(_exit_quote(entry), {"m1": market()}) is False
+    assert len(lifecycle.data["positions"]) == 1
+
+
+def test_ev_mode_exits_when_proceeds_beat_expected_settlement(tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", log, profit_exit_min_pnl=.10,
+    )
+    entry = accepted()
+    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["estimated_probability"] = 0.3  # settlement EV 3.0 < proceeds 4.47
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    assert lifecycle.consume(_exit_quote(entry), {"m1": market()}) is True
+    assert lifecycle.data["positions"] == {}
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["completion_reason"] == "profit_target_book_executable"
+    assert complete["profit_exit_mode"] == "ev"
+    assert complete["expected_settlement_value"] == 3.0
+    assert complete["exit_ev_margin"] == 0.0
+    assert complete["realized_simulated_pnl"] == .37
+
+
+def test_ev_mode_respects_configured_margin(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+        profit_exit_min_pnl=.10, profit_exit_ev_margin=2.0,
+    )
+    entry = accepted()
+    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["estimated_probability"] = 0.3  # settlement EV 3.0 + margin 2.0 > 4.47
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    assert lifecycle.consume(_exit_quote(entry), {"m1": market()}) is False
+    assert len(lifecycle.data["positions"]) == 1
+
+
+def test_ev_mode_holds_without_probability_evidence(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+        profit_exit_min_pnl=.10,
+    )
+    entry = accepted()
+    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["estimated_probability"] = None
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    assert lifecycle.consume(_exit_quote(entry), {"m1": market()}) is False
+    assert len(lifecycle.data["positions"]) == 1
+
+
+def test_per_strategy_env_override_restores_flat_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOTTERY_PROFIT_EXIT_MODE", "flat")
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", log, profit_exit_min_pnl=.10,
+    )
+    entry = accepted(strategy="low_price_lottery_ev")
+    entry["config_version"] = "shadow-buy-rules-v9"
+    assert lifecycle.consume(entry, {"m1": market()}) is True
+
+    # Global default is EV mode (which would hold at proceeds 4.47 < 7.0),
+    # but the lottery override restores the legacy flat rule and exits.
+    assert lifecycle.consume(_exit_quote(entry), {"m1": market()}) is True
+    complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert complete["profit_exit_mode"] == "flat"
+    assert complete["expected_settlement_value"] is None
 
 
 def test_stale_dedicated_profit_exit_cannot_close_a_newer_position(tmp_path):
@@ -299,6 +406,7 @@ def test_current_generation_profit_exit_reprices_position_after_entry_id_rebind(
     log = tmp_path / "events.jsonl"
     lifecycle = StrategyShadowLifecycle(
         tmp_path / "state.json", log, profit_exit_min_pnl=.10,
+        profit_exit_mode="flat",
     )
     entry = accepted("current-entry", outcome="Down")
     entry.update({
@@ -335,6 +443,7 @@ def test_new_session_profit_exit_reprices_position_kept_across_restart(tmp_path)
     log = tmp_path / "events.jsonl"
     lifecycle = StrategyShadowLifecycle(
         tmp_path / "state.json", log, profit_exit_min_pnl=.10,
+        profit_exit_mode="flat",
     )
     entry = accepted("old-session-entry", outcome="Down")
     entry.update({

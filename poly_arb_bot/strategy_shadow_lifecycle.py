@@ -54,7 +54,8 @@ class PortfolioLimits:
 class StrategyShadowLifecycle:
     def __init__(self, state_path, log_path, limits=None, orphan_after_seconds=None,
                  checkpoint_interval_seconds=5, calibration_mode=None,
-                 profit_exit_min_pnl=None):
+                 profit_exit_min_pnl=None, profit_exit_mode=None,
+                 profit_exit_ev_margin=None):
         self.state_path = Path(state_path)
         self.logger = JsonlLogger(Path(log_path))
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +81,22 @@ class StrategyShadowLifecycle:
             if profit_exit_min_pnl is not None
             else os.getenv("SHADOW_PROFIT_EXIT_MIN_PNL", "0.10")
         )
+        # "flat": exit as soon as net profit >= profit_exit_min_pnl (legacy
+        # behavior; clips winners to a fixed small gain while losers settle).
+        # "ev": exit only when exit proceeds beat the expected value of
+        # holding to settlement (estimated_probability * size + margin).
+        self.profit_exit_mode = str(
+            profit_exit_mode
+            if profit_exit_mode is not None
+            else os.getenv("SHADOW_PROFIT_EXIT_MODE", "ev")
+        ).strip().lower()
+        if self.profit_exit_mode not in {"flat", "ev"}:
+            self.profit_exit_mode = "ev"
+        self.profit_exit_ev_margin = float(
+            profit_exit_ev_margin
+            if profit_exit_ev_margin is not None
+            else os.getenv("SHADOW_PROFIT_EXIT_EV_MARGIN", "0")
+        )
         self.probability_calibration_horizons = {
             timeframe: float(os.getenv(
                 f"MODEL_CALIBRATION_HORIZON_{timeframe.upper()}", str(default),
@@ -99,6 +116,8 @@ class StrategyShadowLifecycle:
             "limits": asdict(self.limits),
             "probability_calibration_horizons": self.probability_calibration_horizons,
             "profit_exit_min_pnl": self.profit_exit_min_pnl,
+            "profit_exit_mode": self.profit_exit_mode,
+            "profit_exit_ev_margin": self.profit_exit_ev_margin,
         }
         self.config_hash = hashlib.sha256(
             json.dumps(config_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -127,6 +146,8 @@ class StrategyShadowLifecycle:
         self.data["config_hash"] = self.config_hash
         self.data["probability_calibration_horizons"] = self.probability_calibration_horizons
         self.data["profit_exit_min_pnl"] = self.profit_exit_min_pnl
+        self.data["profit_exit_mode"] = self.profit_exit_mode
+        self.data["profit_exit_ev_margin"] = self.profit_exit_ev_margin
         self._mark_dirty()
         self._backfill_completed_trades()
         self.refresh_risk_status()
@@ -638,6 +659,17 @@ class StrategyShadowLifecycle:
         self._save()
         return True
 
+    _PROFIT_EXIT_MODE_ENV = {
+        "late_window_directional_ev": "DIRECTIONAL_PROFIT_EXIT_MODE",
+        "low_price_lottery_ev": "LOTTERY_PROFIT_EXIT_MODE",
+    }
+
+    def _profit_exit_mode_for(self, strategy):
+        override = os.getenv(self._PROFIT_EXIT_MODE_ENV.get(strategy, ""))
+        if override and override.strip().lower() in {"flat", "ev"}:
+            return override.strip().lower()
+        return self.profit_exit_mode
+
     def _try_profit_exit(self, row):
         if (
             row.get("event_type") not in {
@@ -674,6 +706,24 @@ class StrategyShadowLifecycle:
         pnl = round(exit_net_proceeds - float(position["entry_cost"]), 12)
         if pnl + 1e-12 < self.profit_exit_min_pnl:
             return False
+        mode = self._profit_exit_mode_for(position.get("strategy"))
+        expected_settlement_value = None
+        if mode == "ev":
+            try:
+                probability = float(position.get("estimated_probability"))
+            except (TypeError, ValueError):
+                probability = None
+            if probability is None or not math.isfinite(probability) or probability < 0:
+                # Fail closed toward holding: without probability evidence
+                # there is no justification for clipping the settlement
+                # payoff early.
+                return False
+            expected_settlement_value = round(probability * size, 12)
+            if (
+                exit_net_proceeds + 1e-12
+                < expected_settlement_value + self.profit_exit_ev_margin
+            ):
+                return False
 
         complete_id = f'{position["event_id"]}:profit-exit:{row["event_id"]}'
         complete = {
@@ -687,6 +737,9 @@ class StrategyShadowLifecycle:
             "ts": float(row.get("ts") or time.time()),
             "lifecycle_state": "COMPLETE",
             "completion_reason": "profit_target_book_executable",
+            "profit_exit_mode": mode,
+            "expected_settlement_value": expected_settlement_value,
+            "exit_ev_margin": self.profit_exit_ev_margin if mode == "ev" else None,
             "exit_fill_quantity": fill_quantity,
             "exit_vwap": exit_vwap,
             "exit_total_fee": exit_fee,
