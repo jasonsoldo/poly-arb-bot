@@ -64,6 +64,14 @@ def test_cpp_build_scripts_run_strategy_tests_and_build_production_engines():
     assert "dynamic_position_sizing_test" in BUILD_PS1
 
 
+def test_deploy_environment_enables_directional_and_lottery_strategies():
+    # The C++ engine defaults both flags to 0 and silently skips the whole
+    # evaluation loop when they are unset (no shadow_eval rows at all), so
+    # env.example must enable them explicitly.
+    for name in ("DIRECTIONAL_EV_ENABLE", "LOTTERY_EV_ENABLE"):
+        assert f"{name}=1" in ENV_EXAMPLE
+
+
 def test_deploy_environment_exposes_real_market_dynamic_sizing_controls():
     for name in (
         "SHADOW_SIZING_CAPITAL_USD", "DIRECTIONAL_FRACTIONAL_KELLY",
