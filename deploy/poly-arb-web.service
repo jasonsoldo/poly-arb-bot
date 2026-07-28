@@ -11,6 +11,11 @@ StartLimitBurst=10
 Type=simple
 WorkingDirectory=/opt/poly-arb-bot
 Environment=PYTHONUNBUFFERED=1
+# Must load the same .env as poly-arb-bot: the web computes the canonical
+# strategy config hash to filter the trade ledger to the current config, and
+# without it the hash is built from defaults and every live completion is
+# excluded as a historical-config trade.
+EnvironmentFile=/opt/poly-arb-bot/.env
 ExecStart=/opt/poly-arb-bot/.venv/bin/python -m poly_arb_bot.cli web-monitor --host 0.0.0.0 --port 8787 --log-file /opt/poly-arb-bot/logs/shadow-audit.jsonl --state-file /opt/poly-arb-bot/state/orders.json
 Restart=always
 RestartSec=5

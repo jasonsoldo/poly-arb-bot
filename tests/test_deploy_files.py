@@ -64,6 +64,16 @@ def test_cpp_build_scripts_run_strategy_tests_and_build_production_engines():
     assert "dynamic_position_sizing_test" in BUILD_PS1
 
 
+def test_web_unit_loads_same_env_file_as_bot_unit():
+    # The web monitor filters the completed-trade ledger by the canonical
+    # strategy config hash computed from its own environment. Without the
+    # shared .env it hashes defaults while the C++ engine hashes .env values,
+    # and every live completion is silently excluded as a historical-config
+    # trade (dashboard trade log freezes at the last matching trade).
+    web_unit = Path("deploy/poly-arb-web.service").read_text(encoding="utf-8")
+    assert "EnvironmentFile=/opt/poly-arb-bot/.env" in web_unit
+
+
 def test_deploy_environment_enables_directional_and_lottery_strategies():
     # The C++ engine defaults both flags to 0 and silently skips the whole
     # evaluation loop when they are unset (no shadow_eval rows at all), so
