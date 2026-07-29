@@ -890,6 +890,7 @@ def main() -> int:
             "shadow-acceptance",
             "strategy-calibration",
             "probability-calibration",
+            "profitability-analysis",
             "paired-opportunity-report",
             "maker-shadow",
         ],
@@ -961,6 +962,40 @@ def main() -> int:
     if args.command == "probability-calibration":
         from .strategy_calibration import probability_main
         return probability_main(args.execution_log, args.config_hash)
+    if args.command == "profitability-analysis":
+        from .profitability_analysis import build_profitability_report
+        report = build_profitability_report(
+            Path(args.strategy_audit_file),
+            Path(args.execution_log),
+        )
+        encoded = json.dumps(report, indent=2, sort_keys=True)
+        if args.output:
+            output = Path(args.output)
+            protected_names = {
+                "profitability-gates.json",
+                "probability-calibration-map.json",
+                "probability-calibration-research.json",
+                "probability-calibration-validation.json",
+            }
+            resolved_output = output.resolve()
+            input_paths = {
+                Path(args.strategy_audit_file).resolve(),
+                Path(args.execution_log).resolve(),
+            }
+            if (
+                resolved_output in input_paths
+                or output.name.lower() in protected_names
+                or resolved_output.name.lower() in protected_names
+            ):
+                parser.error(
+                    "profitability-analysis --output must not overwrite "
+                    "an input, gate, or calibration file"
+                )
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(encoded + "\n", encoding="utf-8")
+        else:
+            print(encoded)
+        return 0
     if args.command == "paired-opportunity-report":
         from .paired_opportunity_report import PairedReportConfig, run_report
         return run_report(
