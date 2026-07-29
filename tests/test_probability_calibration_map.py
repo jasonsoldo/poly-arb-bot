@@ -2,7 +2,8 @@ import json
 
 from poly_arb_bot.probability_calibration_map import (
     bucket_index, bucket_name, build_calibration_map, calibrate_probability,
-    load_calibration_map, publish_calibration_map,
+    freeze_calibration_snapshot, load_calibration_map,
+    load_frozen_calibration_snapshot, publish_calibration_map,
 )
 
 
@@ -244,3 +245,27 @@ def test_load_calibration_map_reads_file(tmp_path):
     output.write_text(json.dumps(payload), encoding="utf-8")
     assert load_calibration_map(output) == payload
     assert load_calibration_map(tmp_path / "missing.json") is None
+
+
+def test_freeze_rejects_invalid_rolling_map_without_replacing_destination(
+    tmp_path,
+):
+    source = tmp_path / "research.json"
+    destination = tmp_path / "validation.json"
+    source.write_text('{"version":1}', encoding="utf-8")
+    destination.write_text("sentinel", encoding="utf-8")
+
+    try:
+        freeze_calibration_snapshot(source, destination, now=1000.0)
+    except ValueError as exc:
+        assert "version" in str(exc)
+    else:
+        raise AssertionError("invalid rolling map was frozen")
+
+    assert destination.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_load_frozen_snapshot_rejects_missing_file(tmp_path):
+    assert load_frozen_calibration_snapshot(
+        tmp_path / "missing.json", now=1000.0
+    ) == (None, "calibration_snapshot_unavailable")

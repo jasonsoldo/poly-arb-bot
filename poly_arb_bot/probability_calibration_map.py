@@ -16,6 +16,7 @@ Buckets with fewer than min_bucket_samples fall back to the strategy-level
 (probability_calibration_unavailable).
 """
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -31,6 +32,7 @@ DEFAULT_MIN_BUCKET_SAMPLES = 30
 DEFAULT_PRIOR_WEIGHT = 30.0
 DEFAULT_PUBLISH_SECONDS = 30.0
 MAP_VERSION = 2
+VALIDATION_SECONDS = 72 * 3600
 
 
 def bucket_index(probability):
@@ -173,6 +175,122 @@ def publish_calibration_map(execution_path, output_path, min_bucket_samples=None
         os.fsync(handle.fileno())
     os.replace(temporary, output_path)
     return payload
+
+
+def _validated_rolling_payload(source):
+    try:
+        payload = json.loads(Path(source).read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError("calibration map is missing") from exc
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("calibration map is corrupt") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != MAP_VERSION
+        or not isinstance(payload.get("config"), dict)
+        or not isinstance(payload.get("strategies"), dict)
+    ):
+        raise ValueError("calibration map version or schema is invalid")
+    if any(
+        field in payload
+        for field in (
+            "content_hash",
+            "validation_activated_at",
+            "validation_expires_at",
+        )
+    ):
+        raise ValueError("rolling calibration map contains frozen fields")
+    return payload
+
+
+def _build_frozen_calibration_snapshot(source, now):
+    from .profitability_gate import canonical_payload_hash
+
+    if (
+        isinstance(now, bool)
+        or not isinstance(now, (int, float))
+        or not math.isfinite(float(now))
+    ):
+        raise ValueError("calibration snapshot activation is invalid")
+    payload = _validated_rolling_payload(source)
+    snapshot = json.loads(json.dumps(payload))
+    snapshot["validation_activated_at"] = float(now)
+    snapshot["validation_expires_at"] = float(now) + VALIDATION_SECONDS
+    snapshot["content_hash"] = canonical_payload_hash(snapshot)
+    return snapshot
+
+
+def _publish_frozen_calibration_snapshot(payload, destination):
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, destination)
+
+
+def freeze_calibration_snapshot(source: Path, destination: Path, now: float) -> dict:
+    """Copy a rolling version-2 map into an immutable 72-hour snapshot."""
+    snapshot = _build_frozen_calibration_snapshot(source, now)
+    _publish_frozen_calibration_snapshot(snapshot, destination)
+    return snapshot
+
+
+def load_frozen_calibration_snapshot(
+    path: Path,
+    now: float,
+    expected_content_hash=None,
+):
+    """Load a frozen snapshot, returning ``(payload, reason)`` fail closed."""
+    from .profitability_gate import canonical_payload_hash
+
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "calibration_snapshot_unavailable"
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, "calibration_snapshot_invalid"
+    if (
+        isinstance(now, bool)
+        or not isinstance(now, (int, float))
+        or not math.isfinite(float(now))
+    ):
+        return None, "calibration_snapshot_invalid"
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != MAP_VERSION
+        or not isinstance(payload.get("config"), dict)
+        or not isinstance(payload.get("strategies"), dict)
+    ):
+        return None, "calibration_snapshot_invalid"
+    activated = payload.get("validation_activated_at")
+    expires = payload.get("validation_expires_at")
+    if (
+        isinstance(activated, bool)
+        or isinstance(expires, bool)
+        or not isinstance(activated, (int, float))
+        or not isinstance(expires, (int, float))
+        or not math.isfinite(float(activated))
+        or not math.isfinite(float(expires))
+        or float(expires) != float(activated) + VALIDATION_SECONDS
+        or float(now) < float(activated)
+    ):
+        return None, "calibration_snapshot_invalid"
+    content_hash = payload.get("content_hash")
+    if (
+        not isinstance(content_hash, str)
+        or content_hash != canonical_payload_hash(payload)
+        or (
+            expected_content_hash is not None
+            and content_hash != expected_content_hash
+        )
+    ):
+        return None, "calibration_snapshot_hash_mismatch"
+    if float(now) >= float(expires):
+        return None, "calibration_snapshot_expired"
+    return payload, None
 
 
 # --- Consumer side (Python parity verifier; mirrors the C++ engine byte-for-byte) ---

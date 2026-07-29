@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
@@ -891,6 +892,7 @@ def main() -> int:
             "strategy-calibration",
             "probability-calibration",
             "profitability-analysis",
+            "profitability-freeze",
             "paired-opportunity-report",
             "maker-shadow",
         ],
@@ -921,6 +923,19 @@ def main() -> int:
     parser.add_argument("--require-cpp", action="store_true")
     parser.add_argument("--live-enabled", action="store_true")
     parser.add_argument("--execution-log", default="logs/shadow-execution.jsonl")
+    parser.add_argument(
+        "--profitability-report",
+        default="data/profitability-discovery.json",
+    )
+    parser.add_argument("--gate-file", default="data/profitability-gates.json")
+    parser.add_argument(
+        "--calibration-map",
+        default="data/probability-calibration-research.json",
+    )
+    parser.add_argument(
+        "--validation-calibration",
+        default="data/probability-calibration-validation.json",
+    )
     parser.add_argument("--config-hash", default="latest")
     parser.add_argument("--verify-official", action="store_true")
     parser.add_argument("--audit-file", default="logs/shadow-audit.jsonl")
@@ -1004,6 +1019,96 @@ def main() -> int:
             output.write_text(encoded + "\n", encoding="utf-8")
         else:
             print(encoded)
+        return 0
+    if args.command == "profitability-freeze":
+        from .ev_shadow import canonical_strategy_config_hash
+        from .probability_calibration_map import (
+            PROBABILITY_MODEL_IDS,
+            _build_frozen_calibration_snapshot,
+            _publish_frozen_calibration_snapshot,
+        )
+        from .profitability_gate import (
+            _validated_report,
+            build_profitability_gate,
+            publish_profitability_gate,
+        )
+
+        report_path = Path(args.profitability_report)
+        calibration_path = Path(args.calibration_map)
+        validation_path = Path(args.validation_calibration)
+        gate_path = Path(args.gate_file)
+        resolved = [
+            path.resolve()
+            for path in (
+                report_path,
+                calibration_path,
+                validation_path,
+                gate_path,
+            )
+        ]
+        if len(set(resolved)) != len(resolved):
+            print(
+                "PROFITABILITY_FREEZE_ERROR input and output paths must be distinct",
+                file=sys.stderr,
+            )
+            return 3
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            print(
+                f"PROFITABILITY_FREEZE_INSUFFICIENT missing report: {report_path}",
+                file=sys.stderr,
+            )
+            return 2
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            print(
+                f"PROFITABILITY_FREEZE_INSUFFICIENT corrupt report: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        except OSError as exc:
+            print(f"PROFITABILITY_FREEZE_ERROR {exc}", file=sys.stderr)
+            return 3
+        try:
+            _validated_report(report)
+            now = time.time()
+            snapshot = _build_frozen_calibration_snapshot(
+                calibration_path,
+                now,
+            )
+            target_hashes = {
+                strategy: canonical_strategy_config_hash(strategy)
+                for strategy in PROBABILITY_MODEL_IDS
+            }
+            gate = build_profitability_gate(
+                report,
+                snapshot,
+                target_hashes,
+                now,
+                os.getenv("PROFITABILITY_COHORT_VERSION", "1"),
+            )
+        except ValueError as exc:
+            print(
+                f"PROFITABILITY_FREEZE_INSUFFICIENT {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        except OSError as exc:
+            print(f"PROFITABILITY_FREEZE_ERROR {exc}", file=sys.stderr)
+            return 3
+        try:
+            _publish_frozen_calibration_snapshot(snapshot, validation_path)
+            publish_profitability_gate(gate, gate_path)
+        except OSError as exc:
+            print(f"PROFITABILITY_FREEZE_ERROR {exc}", file=sys.stderr)
+            return 3
+        print(
+            "PROFITABILITY_FREEZE "
+            f"{gate['decision']} eligible={len(gate['eligible_cohorts'])} "
+            f"rejected={len(gate['rejected_cohorts'])} "
+            f"gate_hash={gate['content_hash']} "
+            f"calibration_hash={snapshot['content_hash']}"
+        )
         return 0
     if args.command == "paired-opportunity-report":
         from .paired_opportunity_report import PairedReportConfig, run_report
