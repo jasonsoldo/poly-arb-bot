@@ -651,18 +651,23 @@ def test_calibrated_probability_drives_decision_and_audit_fields(tmp_path, monke
     assert 0.8 <= model_up < 0.9
 
     map_path = tmp_path / "map.json"
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_MAP_PATH", str(map_path))
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")
     map_path.write_text(json.dumps({
-        "version": 1, "generated_at": 999.0,
+        "version": 2, "generated_at": 999.0,
         "config": {"min_bucket_samples": 30, "prior_weight": 30.0},
         "strategies": {"late_window_directional_ev": {
+            "cohort": {
+                "strategy_config_hash": ev_shadow.canonical_strategy_config_hash(
+                    "late_window_directional_ev"
+                ),
+                "probability_model_id": "directional_logistic_projected_v2",
+            },
             "timeframes": {"5m": {"0.8-0.9": {
                 "samples": 100, "expected_up_rate": 0.85, "realized_up_rate": 0.30}}},
             "overall": {},
         }},
     }), encoding="utf-8")
-    monkeypatch.setenv("PROBABILITY_CALIBRATION_MAP_PATH", str(map_path))
-    monkeypatch.setenv("PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")
-
     rows = evaluate_market_event(clean_event, market(), venue(), now=1000.0)
     calibrated = (30 + 30 * 0.85) / 130  # (actual + prior*expected)/(samples+prior)
     up = next(

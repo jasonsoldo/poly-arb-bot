@@ -148,9 +148,16 @@ def run(audit_path, state_path, log_path, poll_seconds=0.5,
     machine = ShadowExecutionStateMachine(state_path, log_path)
     lifecycle = StrategyShadowLifecycle(strategy_state_path, log_path)
     from .probability_calibration_map import (
-        publish_calibration_map, publish_seconds_from_env,
+        PROBABILITY_MODEL_IDS, publish_calibration_map, publish_seconds_from_env,
     )
     calibration_map_path = "data/probability-calibration-map.json"
+    calibration_cohorts = {
+        strategy: {
+            "strategy_config_hash": lifecycle.strategy_config_hashes[strategy],
+            "probability_model_id": model_id,
+        }
+        for strategy, model_id in PROBABILITY_MODEL_IDS.items()
+    }
     last_map_publish = 0.0
     try:
         while True:
@@ -162,7 +169,10 @@ def run(audit_path, state_path, log_path, poll_seconds=0.5,
             now = time.monotonic()
             if now - last_map_publish >= publish_seconds_from_env():
                 try:
-                    publish_calibration_map(log_path, calibration_map_path)
+                    publish_calibration_map(
+                        log_path, calibration_map_path,
+                        strategy_cohorts=calibration_cohorts,
+                    )
                 except OSError:
                     pass  # keep the previous map; C++ treats staleness fail-closed
                 last_map_publish = now

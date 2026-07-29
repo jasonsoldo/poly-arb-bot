@@ -20,7 +20,7 @@ from .ev_strategies import (
     evaluate_lottery,
 )
 from .probability_calibration_map import (
-    calibrate_probability,
+    PROBABILITY_MODEL_IDS, calibrate_probability,
     load_calibration_map,
     require_map_from_env,
 )
@@ -227,6 +227,7 @@ _CANONICAL_STRATEGY_CONFIG_ENV = (
     ("model_volatility_floor_per_sqrt_second", "MODEL_VOLATILITY_FLOOR_PER_SQRT_SECOND", "1e-5"),
     ("momentum_projection_weight", "MODEL_MOMENTUM_PROJECTION_WEIGHT", "1.0"),
     ("probability_calibration_map_max_age_seconds", "PROBABILITY_CALIBRATION_MAP_MAX_AGE_SECONDS", "120"),
+    ("probability_calibration_cohort_version", "PROBABILITY_CALIBRATION_COHORT_VERSION", "2"),
     ("probability_calibration_min_bucket_samples", "PROBABILITY_CALIBRATION_MIN_BUCKET_SAMPLES", "30"),
     ("probability_calibration_prior_weight", "PROBABILITY_CALIBRATION_PRIOR_WEIGHT", "30"),
     ("probability_calibration_require_map", "PROBABILITY_CALIBRATION_REQUIRE_MAP", "1"),
@@ -242,6 +243,7 @@ _CANONICAL_COMMON_KEYS = frozenset({
     "coinbase_reference_max_age_ms", "minimum_liquidity", "maximum_slippage",
     "maximum_reference_age_ms", "maximum_book_age_ms", "maximum_clock_skew_ms",
     "minimum_model_sample_span_seconds", "probability_reference",
+    "probability_calibration_cohort_version",
     "probability_calibration_map_max_age_seconds",
     "probability_calibration_min_bucket_samples",
     "probability_calibration_prior_weight",
@@ -738,6 +740,8 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             calibration = calibrate_probability(
                 calibration_payload, strategy, market.get("interval", ""),
                 model_up_probability, now,
+                expected_config_hash=canonical_strategy_config_hash(strategy),
+                expected_model_id=PROBABILITY_MODEL_IDS[strategy],
             )
             calibrated_up = calibration["probability"]
             # Uncalibrated rows keep the raw probability so prediction
@@ -787,9 +791,7 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
                 int(event.get("ws_session_id", event.get("session", 0))),
                 int(event.get("evaluation_sequence", 0)), float(event.get("ts", now)),
             )
-            audit["probability_model_id"] = (
-                "lottery_logistic_projected_blend_v2" if is_lottery else "directional_logistic_projected_v2"
-            )
+            audit["probability_model_id"] = PROBABILITY_MODEL_IDS[strategy]
             audit["raw_estimated_probability"] = raw_probability
             audit["calibration_input_probability"] = calibration["input_probability"]
             audit["calibrated_probability"] = calibration["probability"]

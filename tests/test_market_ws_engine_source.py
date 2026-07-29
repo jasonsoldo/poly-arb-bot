@@ -330,6 +330,17 @@ def test_probability_profit_exit_is_captured_on_each_book_evaluation_before_audi
     )
 
 
+def test_probability_calibration_map_is_bound_to_current_config_and_model_cohort():
+    load_body = SOURCE.split("void load_calibration_map()", 1)[1].split(
+        "double calibration_map_age_seconds", 1
+    )[0]
+    assert 'root.get<int>("version", 0) != 2' in load_body
+    assert '"cohort.strategy_config_hash"' in load_body
+    assert '"cohort.probability_model_id"' in load_body
+    assert "strategy_hash_for(strategy_node.first)" in load_body
+    assert "probability_model_id_for(strategy_node.first)" in load_body
+
+
 def test_disconnect_and_market_reload_invalidate_pending_arbitrage_attempts():
     reload_body = SOURCE.split("void reload_markets()", 1)[1].split(
         "void queue_write", 1

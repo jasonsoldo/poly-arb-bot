@@ -7,11 +7,15 @@ from poly_arb_bot.probability_calibration_map import (
 
 
 def _row(strategy="late_window_directional_ev", timeframe="5m",
-         probability=0.95, actual_up=1, event_id="e1"):
+         probability=0.95, actual_up=1, event_id="e1",
+         config_hash="directional-current",
+         model_id="directional_logistic_projected_v2"):
     return {
         "event_type": "shadow_prediction_complete", "event_id": event_id,
         "strategy": strategy, "timeframe": timeframe,
         "estimated_up_probability": probability, "actual_up": actual_up,
+        "strategy_config_hash": config_hash,
+        "probability_model_id": model_id,
     }
 
 
@@ -27,7 +31,7 @@ def _payload(bucket_stats, generated_at=1000.0, timeframe="5m"):
         target = buckets if scope_tf else overall
         target[name] = stats
     return {
-        "version": 1, "generated_at": generated_at,
+        "version": 2, "generated_at": generated_at,
         "config": {"min_bucket_samples": 30, "prior_weight": 30.0},
         "strategies": {
             "late_window_directional_ev": {
@@ -80,6 +84,33 @@ def test_build_reads_rotated_history(tmp_path):
     bucket = payload["strategies"]["late_window_directional_ev"]["overall"]["0.9-1.0"]
     assert bucket["samples"] == 2
     assert bucket["realized_up_rate"] == 0.5
+
+
+def test_build_excludes_predictions_from_other_config_or_model_cohorts(tmp_path):
+    log = tmp_path / "exec.jsonl"
+    _write(log, [
+        _row(event_id="current", actual_up=1),
+        _row(event_id="old-config", actual_up=0, config_hash="directional-old"),
+        _row(event_id="old-model", actual_up=0, model_id="directional-v1"),
+    ])
+    cohorts = {
+        "late_window_directional_ev": {
+            "strategy_config_hash": "directional-current",
+            "probability_model_id": "directional_logistic_projected_v2",
+        },
+    }
+
+    payload = build_calibration_map(log, strategy_cohorts=cohorts)
+
+    directional = payload["strategies"]["late_window_directional_ev"]
+    assert payload["version"] == 2
+    assert directional["cohort"] == cohorts["late_window_directional_ev"]
+    assert directional["overall"]["0.9-1.0"]["samples"] == 1
+    assert directional["overall"]["0.9-1.0"]["realized_up_rate"] == 1.0
+    assert payload["excluded_other_cohort"] == {
+        "late_window_directional_ev": 2,
+        "low_price_lottery_ev": 0,
+    }
 
 
 def test_publish_is_atomic_and_loadable(tmp_path):
@@ -166,6 +197,42 @@ def test_calibrate_missing_map_fail_closed():
     result = calibrate_probability(None, "late_window_directional_ev", "5m", 0.86, now=1010.0)
     assert result["probability"] is None
     assert result["bucket"] == "0.8-0.9"
+    assert result["scope"] == "none"
+
+
+def test_calibrate_incompatible_map_version_fails_closed():
+    payload = _payload({
+        ("5m", "0.8-0.9"): {
+            "samples": 100, "expected_up_rate": 0.85, "realized_up_rate": 0.70,
+        },
+    })
+    payload["version"] = 1
+
+    result = calibrate_probability(
+        payload, "late_window_directional_ev", "5m", 0.86, now=1010.0)
+
+    assert result["probability"] is None
+    assert result["scope"] == "none"
+
+
+def test_calibrate_rejects_map_from_another_config_or_model_cohort():
+    payload = _payload({
+        ("5m", "0.8-0.9"): {
+            "samples": 100, "expected_up_rate": 0.85, "realized_up_rate": 0.70,
+        },
+    })
+    payload["strategies"]["late_window_directional_ev"]["cohort"] = {
+        "strategy_config_hash": "directional-old",
+        "probability_model_id": "directional-v1",
+    }
+
+    result = calibrate_probability(
+        payload, "late_window_directional_ev", "5m", 0.86, now=1010.0,
+        expected_config_hash="directional-current",
+        expected_model_id="directional_logistic_projected_v2",
+    )
+
+    assert result["probability"] is None
     assert result["scope"] == "none"
 
 

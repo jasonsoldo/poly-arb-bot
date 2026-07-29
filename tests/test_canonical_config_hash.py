@@ -20,9 +20,9 @@ SOURCE = Path("cpp/market_ws_engine/market_ws_engine.cpp").read_text(encoding="u
 # Digests computed with every canonical env var unset (all defaults). Verified
 # byte-identical to the live C++ producer: the VPS market_ws_engine emits the
 # same directional/lottery hashes under the deployed .env.
-DEFAULT_HASH = "5b657a2d145bd64e3a2cb9401e524e20a7633e7b51f1032716d73360428accd1"
-DIRECTIONAL_HASH = "ae4aafb8865760ed0bf46dc40296fe57ade2a9d9318414a04e5472a59ce4e303"
-LOTTERY_HASH = "ec935510f270a9590c2266e6701d20f190363892980517b869360060276d1419"
+DEFAULT_HASH = "3b7f7e0350e9253a91670dbd000c26e1e6fcb89899d916309bbf5a69a55b731d"
+DIRECTIONAL_HASH = "65b0a6f449095cd0b8b9e10ee2e0193c937f8798201347972cad29909e05fd36"
+LOTTERY_HASH = "1f2e19c58fe4f216bea5066fef7ea8c94274c1911369f692924100d168bd3a21"
 
 
 @pytest.fixture
@@ -55,6 +55,21 @@ def test_common_key_changes_both_strategy_hashes(clean_env):
     clean_env.setenv("CLOB_MAX_BOOK_AGE_MS", "1000")
     assert canonical_strategy_config_hash("late_window_directional_ev") != DIRECTIONAL_HASH
     assert canonical_strategy_config_hash("low_price_lottery_ev") != LOTTERY_HASH
+
+
+def test_calibration_cohort_version_rotates_both_probability_strategy_hashes(clean_env):
+    assert (
+        "probability_calibration_cohort_version",
+        "PROBABILITY_CALIBRATION_COHORT_VERSION",
+        "2",
+    ) in _CANONICAL_STRATEGY_CONFIG_ENV
+    before_directional = canonical_strategy_config_hash("late_window_directional_ev")
+    before_lottery = canonical_strategy_config_hash("low_price_lottery_ev")
+
+    clean_env.setenv("PROBABILITY_CALIBRATION_COHORT_VERSION", "next")
+
+    assert canonical_strategy_config_hash("late_window_directional_ev") != before_directional
+    assert canonical_strategy_config_hash("low_price_lottery_ev") != before_lottery
 
 
 def test_every_canonical_triple_exists_in_cpp_source():

@@ -325,6 +325,8 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"probability_reference", "settlement_reference"},
         {"probability_calibration_map_max_age_seconds", environment_value(
             "PROBABILITY_CALIBRATION_MAP_MAX_AGE_SECONDS", "120")},
+        {"probability_calibration_cohort_version", environment_value(
+            "PROBABILITY_CALIBRATION_COHORT_VERSION", "2")},
         {"probability_calibration_min_bucket_samples", environment_value(
             "PROBABILITY_CALIBRATION_MIN_BUCKET_SAMPLES", "30")},
         {"probability_calibration_prior_weight", environment_value(
@@ -816,6 +818,12 @@ private:
     const std::string& strategy_hash_for(const std::string& strategy_name) const {
         return strategy_name == "low_price_lottery_ev"
             ? lottery_strategy_config_hash_ : directional_strategy_config_hash_;
+    }
+
+    static std::string probability_model_id_for(const std::string& strategy_name) {
+        return strategy_name == "low_price_lottery_ev"
+            ? "lottery_logistic_projected_blend_v2"
+            : "directional_logistic_projected_v2";
     }
 
     double probability_input_quality(
@@ -3061,9 +3069,27 @@ private:
             if (!file) return;  // keep the previous map; staleness is fail-closed
             ptree root;
             boost::property_tree::read_json(file, root);
+            if (root.get<int>("version", 0) != 2) {
+                calibration_map_.clear();
+                calibration_map_generated_at_ = 0;
+                std::cerr << "CALIBRATION_MAP_ERROR message=incompatible_version\n";
+                return;
+            }
             std::map<std::string, CalibrationStrategyMap> next;
             const ptree empty;
             for (const auto& strategy_node : root.get_child("strategies", empty)) {
+                if (strategy_node.first != "late_window_directional_ev" &&
+                    strategy_node.first != "low_price_lottery_ev") continue;
+                const std::string config_hash = strategy_node.second.get<std::string>(
+                    "cohort.strategy_config_hash", "");
+                const std::string model_id = strategy_node.second.get<std::string>(
+                    "cohort.probability_model_id", "");
+                if (config_hash != strategy_hash_for(strategy_node.first) ||
+                    model_id != probability_model_id_for(strategy_node.first)) {
+                    std::cerr << "CALIBRATION_MAP_COHORT_REJECT strategy="
+                              << strategy_node.first << "\n";
+                    continue;
+                }
                 CalibrationStrategyMap entry;
                 for (const auto& timeframe : strategy_node.second.get_child("timeframes", empty))
                     entry.timeframes[timeframe.first] =

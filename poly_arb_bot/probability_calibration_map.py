@@ -23,10 +23,14 @@ from pathlib import Path
 from .jsonl_history import history_paths, open_history
 
 STRATEGIES = ("late_window_directional_ev", "low_price_lottery_ev")
+PROBABILITY_MODEL_IDS = {
+    "late_window_directional_ev": "directional_logistic_projected_v2",
+    "low_price_lottery_ev": "lottery_logistic_projected_blend_v2",
+}
 DEFAULT_MIN_BUCKET_SAMPLES = 30
 DEFAULT_PRIOR_WEIGHT = 30.0
 DEFAULT_PUBLISH_SECONDS = 30.0
-MAP_VERSION = 1
+MAP_VERSION = 2
 
 
 def bucket_index(probability):
@@ -82,7 +86,7 @@ def _bucket_view(entry):
 
 
 def build_calibration_map(execution_path, min_bucket_samples=None,
-                          prior_weight=None, now=None):
+                          prior_weight=None, now=None, strategy_cohorts=None):
     """Aggregate shadow_prediction_complete history into the map payload.
 
     Layout: strategies -> {timeframes -> {tf -> {bucket: stats}},
@@ -96,6 +100,7 @@ def build_calibration_map(execution_path, min_bucket_samples=None,
         strategy: {"timeframes": {}, "overall": {}}
         for strategy in STRATEGIES
     }
+    excluded_other_cohort = {strategy: 0 for strategy in STRATEGIES}
 
     def _entry(scope, bucket):
         return scope.setdefault(bucket, {
@@ -104,6 +109,13 @@ def build_calibration_map(execution_path, min_bucket_samples=None,
 
     for row in _prediction_rows(execution_path):
         strategy = row["strategy"]
+        expected_cohort = (strategy_cohorts or {}).get(strategy)
+        if expected_cohort and any(
+            row.get(field) != expected_cohort.get(field)
+            for field in ("strategy_config_hash", "probability_model_id")
+        ):
+            excluded_other_cohort[strategy] += 1
+            continue
         timeframe = row["timeframe"]
         probability = float(row["estimated_up_probability"])
         if not 0 <= probability <= 1:
@@ -120,6 +132,7 @@ def build_calibration_map(execution_path, min_bucket_samples=None,
     strategies = {}
     for strategy, scopes in aggregate.items():
         strategies[strategy] = {
+            "cohort": dict((strategy_cohorts or {}).get(strategy, {})),
             "timeframes": {
                 timeframe: {
                     name: view for name, view in (
@@ -141,15 +154,16 @@ def build_calibration_map(execution_path, min_bucket_samples=None,
             "min_bucket_samples": min_bucket_samples,
             "prior_weight": prior_weight,
         },
+        "excluded_other_cohort": excluded_other_cohort,
         "strategies": strategies,
     }
 
 
 def publish_calibration_map(execution_path, output_path, min_bucket_samples=None,
-                            prior_weight=None, now=None):
+                            prior_weight=None, now=None, strategy_cohorts=None):
     """Build the map and atomically publish it (tmp file + os.replace)."""
     payload = build_calibration_map(
-        execution_path, min_bucket_samples, prior_weight, now)
+        execution_path, min_bucket_samples, prior_weight, now, strategy_cohorts)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
@@ -199,7 +213,8 @@ def load_calibration_map(path=None):
 
 def calibrate_probability(payload, strategy, timeframe, up_probability, now,
                           min_bucket_samples=None, prior_weight=None,
-                          require_map=None, max_age_seconds=None):
+                          require_map=None, max_age_seconds=None,
+                          expected_config_hash=None, expected_model_id=None):
     """Mirror of the C++ CalibrationResult / calibrate_probability.
 
     Returns dict(input_probability, probability, bucket, samples, scope) where
@@ -226,6 +241,9 @@ def calibrate_probability(payload, strategy, timeframe, up_probability, now,
             result["probability"] = up_probability
             result["scope"] = "raw"
 
+    if int((payload or {}).get("version", 0) or 0) != MAP_VERSION:
+        raw_fallback()
+        return result
     generated_at = float((payload or {}).get("generated_at", 0) or 0)
     map_age = now - generated_at if generated_at > 0 else float("inf")
     if not map_age <= max_age_seconds:
@@ -234,6 +252,16 @@ def calibrate_probability(payload, strategy, timeframe, up_probability, now,
     strategies = (payload or {}).get("strategies", {})
     entry = strategies.get(strategy)
     if entry is None:
+        raw_fallback()
+        return result
+    cohort = entry.get("cohort", {})
+    if (
+        expected_config_hash is not None
+        and cohort.get("strategy_config_hash") != expected_config_hash
+    ) or (
+        expected_model_id is not None
+        and cohort.get("probability_model_id") != expected_model_id
+    ):
         raw_fallback()
         return result
     selected = None
