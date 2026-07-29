@@ -103,7 +103,7 @@ class StrategyShadowLifecycle:
             ))
             for timeframe, default in DEFAULT_CALIBRATION_HORIZONS.items()
         }
-        self.config_version = "shadow-portfolio-v7"
+        self.config_version = "shadow-portfolio-v8"
         # Compare against C++-emitted row hashes with the canonical mirror —
         # strategy_config()[1] uses a different key set and would never match.
         self.strategy_config_hash = canonical_strategy_config_hash()
@@ -316,7 +316,10 @@ class StrategyShadowLifecycle:
                 return "directional_open_position_limit"
             if len(same_close) >= self.limits.directional_max_per_close_window:
                 return "directional_close_window_limit"
-            if sum(position["entry_cost"] for position in strategy_positions) + entry_cost > self.limits.directional_max_open_notional:
+            if sum(
+                position.get("risk_adjusted_entry_cost", position["entry_cost"])
+                for position in strategy_positions
+            ) + entry_cost > self.limits.directional_max_open_notional:
                 return "directional_open_notional_limit"
             return self._loss_block_reason(
                 strategy, self.limits.directional_max_daily_loss,
@@ -328,7 +331,10 @@ class StrategyShadowLifecycle:
             return "lottery_open_position_limit"
         if len(same_close) >= self.limits.lottery_max_per_close_window:
             return "lottery_close_window_limit"
-        if sum(position["entry_cost"] for position in strategy_positions) + entry_cost > self.limits.lottery_max_open_notional:
+        if sum(
+            position.get("risk_adjusted_entry_cost", position["entry_cost"])
+            for position in strategy_positions
+        ) + entry_cost > self.limits.lottery_max_open_notional:
             return "lottery_open_notional_limit"
         return self._loss_block_reason(
             strategy, self.limits.lottery_max_daily_loss,
@@ -527,7 +533,7 @@ class StrategyShadowLifecycle:
         probability_strategy = strategy in {
             "late_window_directional_ev", "low_price_lottery_ev",
         }
-        if not hedged and probability_strategy and row.get("config_version") != "shadow-buy-rules-v9":
+        if not hedged and probability_strategy and row.get("config_version") != "shadow-buy-rules-v10":
             return False
         if strategy == "paired_lock" and row.get("config_version") != "paired-lock-shadow-v3":
             return False
@@ -541,10 +547,14 @@ class StrategyShadowLifecycle:
             return False
         dynamic = not hedged and (probability_strategy or strategy == "paired_lock")
         if dynamic:
-            required = (
+            required = [
                 "dynamic_target_size", "market_minimum_size",
-                "dynamic_all_in_cost", "dynamic_maximum_loss",
+                "dynamic_maximum_loss",
                 "capital_budget_usd", "size_binding_constraint",
+            ]
+            required.extend(
+                ("dynamic_cash_cost", "dynamic_risk_adjusted_cost")
+                if probability_strategy else ("dynamic_all_in_cost",)
             )
             if row.get("sizing_mode") != "real_market_dynamic_v1" or any(
                 row.get(field) is None for field in required
@@ -553,13 +563,20 @@ class StrategyShadowLifecycle:
             try:
                 size = float(row["dynamic_target_size"])
                 minimum_size = float(row["market_minimum_size"])
-                entry_cost = float(row["dynamic_all_in_cost"])
+                if probability_strategy:
+                    entry_cost = float(row["dynamic_cash_cost"])
+                    risk_adjusted_entry_cost = float(
+                        row["dynamic_risk_adjusted_cost"])
+                else:
+                    entry_cost = float(row["dynamic_all_in_cost"])
+                    risk_adjusted_entry_cost = entry_cost
                 maximum_loss = float(row["dynamic_maximum_loss"])
                 capital_budget = float(row["capital_budget_usd"])
             except (TypeError, ValueError):
                 return False
             if not all(math.isfinite(value) for value in (
-                size, minimum_size, entry_cost, maximum_loss, capital_budget,
+                size, minimum_size, entry_cost, risk_adjusted_entry_cost,
+                maximum_loss, capital_budget,
             )) or size <= 0 or minimum_size <= 0 or size + 1e-9 < minimum_size or entry_cost <= 0:
                 return False
         else:
@@ -577,7 +594,9 @@ class StrategyShadowLifecycle:
         ))
         if not dynamic:
             entry_cost = float(row["total_cost"]) if hedged else size * (fill + fees)
-        block_reason = self._portfolio_block_reason(row, market, entry_cost)
+            risk_adjusted_entry_cost = entry_cost
+        block_reason = self._portfolio_block_reason(
+            row, market, risk_adjusted_entry_cost)
         if block_reason and not self.calibration_mode:
             return self._reject(row, block_reason)
         if block_reason:
@@ -607,6 +626,7 @@ class StrategyShadowLifecycle:
             "hedge_strategy": row.get("hedge_strategy"),
             "terminal_hedged": hedged,
             "entry_cost": round(entry_cost, 12),
+            "risk_adjusted_entry_cost": round(risk_adjusted_entry_cost, 12),
             "sizing_mode": row.get("sizing_mode"),
             "market_minimum_size": row.get("market_minimum_size"),
             "dynamic_target_size": row.get("dynamic_target_size"),
@@ -702,9 +722,14 @@ class StrategyShadowLifecycle:
             return False
         exit_fee = float(row.get("exit_total_fee") or 0)
         exit_buffer = float(row.get("exit_execution_buffer") or 0)
-        exit_net_proceeds = round(size * exit_vwap - exit_fee - exit_buffer, 12)
-        pnl = round(exit_net_proceeds - float(position["entry_cost"]), 12)
-        if pnl + 1e-12 < self.profit_exit_min_pnl:
+        exit_cash_proceeds = round(size * exit_vwap - exit_fee, 12)
+        exit_risk_adjusted_proceeds = round(
+            exit_cash_proceeds - exit_buffer, 12)
+        risk_adjusted_profit = round(
+            exit_risk_adjusted_proceeds - float(position.get(
+                "risk_adjusted_entry_cost", position["entry_cost"])), 12)
+        pnl = round(exit_cash_proceeds - float(position["entry_cost"]), 12)
+        if risk_adjusted_profit + 1e-12 < self.profit_exit_min_pnl:
             return False
         mode = self._profit_exit_mode_for(position.get("strategy"))
         expected_settlement_value = None
@@ -720,7 +745,7 @@ class StrategyShadowLifecycle:
                 return False
             expected_settlement_value = round(probability * size, 12)
             if (
-                exit_net_proceeds + 1e-12
+                exit_risk_adjusted_proceeds + 1e-12
                 < expected_settlement_value + self.profit_exit_ev_margin
             ):
                 return False
@@ -744,8 +769,10 @@ class StrategyShadowLifecycle:
             "exit_vwap": exit_vwap,
             "exit_total_fee": exit_fee,
             "exit_execution_buffer": exit_buffer,
-            "exit_net_proceeds": exit_net_proceeds,
-            "payout": exit_net_proceeds,
+            "exit_cash_proceeds": exit_cash_proceeds,
+            "exit_risk_adjusted_proceeds": exit_risk_adjusted_proceeds,
+            "exit_net_proceeds": exit_risk_adjusted_proceeds,
+            "payout": exit_cash_proceeds,
             "realized_simulated_pnl": pnl,
             "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
             "simulated_fill": False,

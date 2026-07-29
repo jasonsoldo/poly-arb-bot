@@ -64,10 +64,18 @@ void test_probability_size_accounts_for_vwap_fee_and_slippage() {
     assert(result.dynamic_target_size <= 2.23);
     assert(result.size_binding_constraint == "slippage_limit");
     assert(result.dynamic_fee > 0);
+    assert(std::abs(
+        result.dynamic_cash_cost -
+        (result.dynamic_buy_notional + result.dynamic_fee)
+    ) < 1e-12);
+    assert(std::abs(
+        result.dynamic_all_in_cost -
+        (result.dynamic_cash_cost + result.dynamic_buffer)
+    ) < 1e-12);
     assert(result.dynamic_all_in_cost > result.dynamic_vwap * result.dynamic_target_size);
     assert(result.dynamic_all_in_price > result.dynamic_vwap);
     assert(result.dynamic_expected_profit > 0);
-    assert(result.dynamic_maximum_loss == result.dynamic_all_in_cost);
+    assert(result.dynamic_maximum_loss == result.dynamic_cash_cost);
 }
 
 void test_probability_size_fails_closed() {

@@ -306,12 +306,13 @@ def test_probability_audit_exposes_real_bid_exit_evidence_and_calibration_window
     assert "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE" in SOURCE
     for field in (
         "exit_fill_quantity", "exit_vwap", "exit_total_fee",
-        "exit_execution_buffer", "exit_depth_ok", "exit_book_fresh",
+        "exit_execution_buffer", "exit_cash_proceeds",
+        "exit_risk_adjusted_proceeds", "exit_depth_ok", "exit_book_fresh",
         "exit_observation_semantics",
     ):
         assert f'\\"{field}\\":' in SOURCE
     assert 'BOOK_EXECUTABLE_NOT_FILL' in SOURCE
-    assert 'shadow-buy-rules-v9' in SOURCE
+    assert 'shadow-buy-rules-v10' in SOURCE
 
 
 def test_probability_profit_exit_is_captured_on_each_book_evaluation_before_audit_throttling():
@@ -478,7 +479,8 @@ def test_real_market_dynamic_sizing_is_used_by_live_shadow_strategies():
         "shadow_capital_usd", "capital_budget_usd", "input_quality_score",
         "conservative_probability", "probability_haircut",
         "full_kelly_fraction", "applied_kelly_fraction", "dynamic_vwap",
-        "dynamic_fee", "dynamic_buffer", "dynamic_all_in_cost",
+        "dynamic_fee", "dynamic_buffer", "dynamic_cash_cost",
+        "dynamic_risk_adjusted_cost", "dynamic_all_in_cost",
         "dynamic_all_in_price", "dynamic_expected_profit",
         "dynamic_maximum_loss", "size_binding_constraint",
     ):

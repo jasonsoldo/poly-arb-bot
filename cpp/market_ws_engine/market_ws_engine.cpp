@@ -334,6 +334,7 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
         {"probability_calibration_require_map", environment_value(
             "PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")},
         {"shadow_buffer_per_share", environment_value("SHADOW_BUFFER_PER_SHARE", "0.002")},
+        {"shadow_cash_ledger_version", environment_value("SHADOW_CASH_LEDGER_VERSION", "2")},
         {"shadow_min_profit", environment_value("SHADOW_MIN_PROFIT", "0.01")},
         {"shadow_sizing_capital_usd", environment_value("SHADOW_SIZING_CAPITAL_USD", "1000")},
         {"shadow_profit_exit_buffer_per_share", environment_value(
@@ -351,6 +352,7 @@ std::string strategy_config_hash(const std::string& strategy_name = "") {
                 key == "probability_reference" ||
                 key.rfind("probability_calibration_", 0) == 0 ||
                 key == "shadow_sizing_capital_usd" ||
+                key == "shadow_cash_ledger_version" ||
                 key == "shadow_profit_exit_buffer_per_share";
             if (strategy_name == "late_window_directional_ev") return common ||
                 key == "directional_min_net_ev" || key == "directional_latency_buffer" ||
@@ -498,7 +500,8 @@ struct MakerQuoteObservation {
 
 struct ProbabilityShadowPosition {
     std::string strategy, market_id, outcome, entry_event_id;
-    double quantity = 0, entry_cost = 0, entry_ts = 0;
+    double quantity = 0, entry_cash_cost = 0;
+    double risk_adjusted_entry_cost = 0, entry_ts = 0;
     // Calibrated probability of the held outcome at entry; -1 = unknown.
     double estimated_probability = -1;
 };
@@ -895,6 +898,7 @@ private:
         active_probability_shadow_positions_[key] = {
             decision.strategy, market_id, outcome, event_id,
             sizing_result.dynamic_target_size,
+            sizing_result.dynamic_cash_cost,
             sizing_result.dynamic_all_in_cost, timestamp,
             estimated_probability ? *estimated_probability : -1,
         };
@@ -920,17 +924,20 @@ private:
             exit_fill.first * fee_rate * exit_fill.second *
             (1 - exit_fill.second) * 100000) / 100000;
         const double exit_buffer = position.quantity * profit_exit_buffer_per_share_;
-        const double net_proceeds =
-            position.quantity * exit_fill.second - exit_fee - exit_buffer;
-        const double profit = net_proceeds - position.entry_cost;
-        if (profit + 1e-12 < profit_exit_min_pnl_) return false;
+        const double exit_cash_proceeds =
+            position.quantity * exit_fill.second - exit_fee;
+        const double exit_risk_adjusted_proceeds =
+            exit_cash_proceeds - exit_buffer;
+        const double risk_adjusted_profit =
+            exit_risk_adjusted_proceeds - position.risk_adjusted_entry_cost;
+        if (risk_adjusted_profit + 1e-12 < profit_exit_min_pnl_) return false;
         if (profit_exit_mode_ev_) {
             // Fail closed toward holding: without probability evidence there
             // is no justification for clipping the settlement payoff early.
             if (position.estimated_probability < 0) return false;
             const double expected_settlement =
                 position.estimated_probability * position.quantity;
-            if (net_proceeds + 1e-12 <
+            if (exit_risk_adjusted_proceeds + 1e-12 <
                     expected_settlement + profit_exit_ev_margin_) return false;
         }
 
@@ -958,13 +965,18 @@ private:
             << ",\"session\":" << ws_session_id_
             << ",\"evaluation_sequence\":" << sequence
             << ",\"target_size\":" << position.quantity
-            << ",\"entry_cost\":" << position.entry_cost
+            << ",\"entry_cost\":" << position.entry_cash_cost
+            << ",\"risk_adjusted_entry_cost\":"
+            << position.risk_adjusted_entry_cost
             << ",\"exit_fill_quantity\":" << exit_fill.first
             << ",\"exit_vwap\":" << exit_fill.second
             << ",\"exit_total_fee\":" << exit_fee
             << ",\"exit_execution_buffer\":" << exit_buffer
-            << ",\"exit_net_proceeds\":" << net_proceeds
-            << ",\"expected_profit\":" << profit
+            << ",\"exit_cash_proceeds\":" << exit_cash_proceeds
+            << ",\"exit_risk_adjusted_proceeds\":"
+            << exit_risk_adjusted_proceeds
+            << ",\"exit_net_proceeds\":" << exit_risk_adjusted_proceeds
+            << ",\"expected_profit\":" << risk_adjusted_profit
             << ",\"minimum_profit\":" << profit_exit_min_pnl_
             << ",\"profit_exit_mode\":\""
             << (profit_exit_mode_ev_ ? "ev" : "flat") << "\""
@@ -982,7 +994,7 @@ private:
             << ",\"exit_observation_semantics\":\"BOOK_EXECUTABLE_NOT_FILL\""
             << ",\"simulated_fill\":false,\"decision\":\"OBSERVED\""
             << ",\"reason\":\"profit_target_book_executable\""
-            << ",\"config_version\":\"shadow-buy-rules-v9\""
+            << ",\"config_version\":\"shadow-buy-rules-v10\""
             << ",\"config_hash\":\"" << strategy_hash_for(strategy_name) << "\""
             << ",\"real_order_submissions\":0,\"real_orders\":0,\"real_fills\":0}\n";
         if (!strategy_audit_.enqueue(out.str())) {
@@ -1428,6 +1440,10 @@ private:
             (1 - exit_fill.second) * 100000
         ) / 100000;
         const double exit_buffer = target_size * profit_exit_buffer_per_share_;
+        const double exit_cash_proceeds =
+            target_size * exit_fill.second - exit_fee;
+        const double exit_risk_adjusted_proceeds =
+            exit_cash_proceeds - exit_buffer;
         const bool exit_book_fresh = input.book_age_ms <= input.maximum_book_age_ms;
         out << "{\"ts\":" << timestamp << ",\"timestamp\":" << timestamp
             << ",\"event_id\":\"" << reference_ipc::escaped(event_id)
@@ -1585,6 +1601,10 @@ private:
         if (sizing_result.accepted) out << sizing_result.dynamic_fee; else out << "null";
         out << ",\"dynamic_buffer\":";
         if (sizing_result.accepted) out << sizing_result.dynamic_buffer; else out << "null";
+        out << ",\"dynamic_buy_notional\":" << sizing_result.dynamic_buy_notional
+            << ",\"dynamic_cash_cost\":" << sizing_result.dynamic_cash_cost
+            << ",\"dynamic_risk_adjusted_cost\":"
+            << sizing_result.dynamic_all_in_cost;
         out << ",\"dynamic_all_in_cost\":";
         if (sizing_result.accepted) out << sizing_result.dynamic_all_in_cost; else out << "null";
         out << ",\"dynamic_all_in_price\":";
@@ -1601,6 +1621,9 @@ private:
             << ",\"exit_vwap\":" << exit_fill.second
             << ",\"exit_total_fee\":" << exit_fee
             << ",\"exit_execution_buffer\":" << exit_buffer
+            << ",\"exit_cash_proceeds\":" << exit_cash_proceeds
+            << ",\"exit_risk_adjusted_proceeds\":"
+            << exit_risk_adjusted_proceeds
             << ",\"exit_depth_ok\":"
             << (target_size > 0 && exit_fill.first >= target_size ? "true" : "false")
             << ",\"exit_book_fresh\":"
@@ -1611,7 +1634,7 @@ private:
                 << ",\"observation_semantics\":\"PROBABILITY_CALIBRATION_NOT_ORDER\""
                 << ",\"calibration_horizon_seconds\":" << calibration_horizon_seconds;
         }
-        out << ",\"config_version\":\"shadow-buy-rules-v9\""
+        out << ",\"config_version\":\"shadow-buy-rules-v10\""
             << ",\"config_hash\":\"" << strategy_hash_for(decision.strategy) << "\""
             << ",\"reference_sequence\":" << reference_snapshot_.sequence
             << ",\"reference_producer_session\":\"" << reference_ipc::escaped(reference_snapshot_.producer_session) << "\""

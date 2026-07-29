@@ -33,7 +33,7 @@ BINANCE_SYMBOLS = {
 }
 PRICE_TO_BEAT_CAPTURE_MAX_DELAY_MS = 10_000
 INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14_400}
-STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v9"
+STRATEGY_CONFIG_VERSION = "shadow-buy-rules-v10"
 
 
 def strategy_env_enabled(name, default="0"):
@@ -232,6 +232,7 @@ _CANONICAL_STRATEGY_CONFIG_ENV = (
     ("probability_calibration_prior_weight", "PROBABILITY_CALIBRATION_PRIOR_WEIGHT", "30"),
     ("probability_calibration_require_map", "PROBABILITY_CALIBRATION_REQUIRE_MAP", "1"),
     ("shadow_buffer_per_share", "SHADOW_BUFFER_PER_SHARE", "0.002"),
+    ("shadow_cash_ledger_version", "SHADOW_CASH_LEDGER_VERSION", "2"),
     ("shadow_min_profit", "SHADOW_MIN_PROFIT", "0.01"),
     ("shadow_profit_exit_buffer_per_share", "SHADOW_PROFIT_EXIT_BUFFER_PER_SHARE", "0.001"),
     ("shadow_size", "SHADOW_SIZE", "10"),
@@ -249,6 +250,7 @@ _CANONICAL_COMMON_KEYS = frozenset({
     "probability_calibration_prior_weight",
     "probability_calibration_require_map",
     "shadow_sizing_capital_usd", "shadow_profit_exit_buffer_per_share",
+    "shadow_cash_ledger_version",
 })
 _CANONICAL_DIRECTIONAL_KEYS = frozenset({
     "directional_min_net_ev", "directional_latency_buffer",

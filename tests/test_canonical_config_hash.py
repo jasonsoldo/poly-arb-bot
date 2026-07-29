@@ -20,9 +20,9 @@ SOURCE = Path("cpp/market_ws_engine/market_ws_engine.cpp").read_text(encoding="u
 # Digests computed with every canonical env var unset (all defaults). Verified
 # byte-identical to the live C++ producer: the VPS market_ws_engine emits the
 # same directional/lottery hashes under the deployed .env.
-DEFAULT_HASH = "3b7f7e0350e9253a91670dbd000c26e1e6fcb89899d916309bbf5a69a55b731d"
-DIRECTIONAL_HASH = "65b0a6f449095cd0b8b9e10ee2e0193c937f8798201347972cad29909e05fd36"
-LOTTERY_HASH = "1f2e19c58fe4f216bea5066fef7ea8c94274c1911369f692924100d168bd3a21"
+DEFAULT_HASH = "2766fcce6afc639e156bcf90b2532e7e8d4d2bcd018e8d36d72688b6186353e1"
+DIRECTIONAL_HASH = "7b808614087fd326b804d5aa928678c17fd7e02bb32c7057b91bb670b90a4f74"
+LOTTERY_HASH = "927adb85e22c496176430af3362d73c84cb16708e40f9cb756809be405b51412"
 
 
 @pytest.fixture
@@ -72,6 +72,21 @@ def test_calibration_cohort_version_rotates_both_probability_strategy_hashes(cle
     assert canonical_strategy_config_hash("low_price_lottery_ev") != before_lottery
 
 
+def test_cash_ledger_version_rotates_both_probability_strategy_hashes(clean_env):
+    assert (
+        "shadow_cash_ledger_version",
+        "SHADOW_CASH_LEDGER_VERSION",
+        "2",
+    ) in _CANONICAL_STRATEGY_CONFIG_ENV
+    before_directional = canonical_strategy_config_hash("late_window_directional_ev")
+    before_lottery = canonical_strategy_config_hash("low_price_lottery_ev")
+
+    clean_env.setenv("SHADOW_CASH_LEDGER_VERSION", "next")
+
+    assert canonical_strategy_config_hash("late_window_directional_ev") != before_directional
+    assert canonical_strategy_config_hash("low_price_lottery_ev") != before_lottery
+
+
 def test_every_canonical_triple_exists_in_cpp_source():
     for key, env, default in _CANONICAL_STRATEGY_CONFIG_ENV:
         assert f'{{"{key}", environment_value(' in SOURCE, key
@@ -81,5 +96,6 @@ def test_every_canonical_triple_exists_in_cpp_source():
 
 def test_cpp_per_strategy_filter_keeps_common_keys():
     for key in ("coinbase_reference_max_age_ms", "shadow_sizing_capital_usd",
-                "shadow_profit_exit_buffer_per_share"):
+                "shadow_profit_exit_buffer_per_share",
+                "shadow_cash_ledger_version"):
         assert f'key == "{key}"' in SOURCE, key

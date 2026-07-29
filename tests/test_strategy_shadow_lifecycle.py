@@ -38,11 +38,16 @@ def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up")
         "decision": "ACCEPT", "expected_fill_price": 0.4, "fees": 0.01,
         "target_size": 10, "ts": 1000, "config_hash": canonical_strategy_config_hash(),
         "estimated_probability": 0.7,
-        "config_version": "shadow-buy-rules-v9",
+        "config_version": "shadow-buy-rules-v10",
         "sizing_mode": "real_market_dynamic_v1",
         "dynamic_target_size": 10,
         "market_minimum_size": 1,
-        "dynamic_all_in_cost": 4.1,
+        "dynamic_buy_notional": 4.0,
+        "dynamic_fee": 0.1,
+        "dynamic_buffer": 0.2,
+        "dynamic_cash_cost": 4.1,
+        "dynamic_risk_adjusted_cost": 4.3,
+        "dynamic_all_in_cost": 4.3,
         "dynamic_maximum_loss": 4.1,
         "capital_budget_usd": 20,
         "size_binding_constraint": "capital_budget",
@@ -119,8 +124,9 @@ def test_repeated_accepts_open_one_position(tmp_path):
     assert len(lifecycle.data["positions"]) == 1
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["entry_cost"] == 4.1
+    assert position["risk_adjusted_entry_cost"] == 4.3
     assert position["real_order_submissions"] == 0
-    assert position["config_version"] == "shadow-portfolio-v7"
+    assert position["config_version"] == "shadow-portfolio-v8"
     assert len(position["config_hash"]) == 64
 
 
@@ -141,34 +147,62 @@ def test_v8_directional_accept_does_not_open_dynamic_shadow_position(tmp_path):
     assert lifecycle.data["positions"] == {}
 
 
-def test_v9_directional_accept_requires_dynamic_sizing_evidence(tmp_path):
+def test_v9_directional_accept_does_not_open_dynamic_shadow_position(tmp_path):
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
     row = accepted()
-    row.pop("dynamic_all_in_cost")
+    row["config_version"] = "shadow-buy-rules-v9"
 
     assert lifecycle.consume(row, {"m1": market()}) is False
     assert lifecycle.data["positions"] == {}
 
 
-def test_v9_directional_accept_uses_exact_dynamic_cost_and_preserves_sizing(tmp_path):
+def test_v10_directional_accept_requires_dynamic_sizing_evidence(tmp_path):
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
+    row = accepted()
+    row.pop("dynamic_cash_cost")
+
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["positions"] == {}
+
+
+def test_v10_directional_accept_separates_cash_and_risk_adjusted_cost(tmp_path):
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "events.jsonl")
     row = accepted()
     row.update({
         "target_size": 7.25,
         "dynamic_target_size": 7.25,
-        "dynamic_all_in_cost": 2.987654321,
-        "dynamic_maximum_loss": 2.987654321,
-        "capital_budget_usd": 3.0,
+        "dynamic_buy_notional": 4.0,
+        "dynamic_fee": 0.1,
+        "dynamic_buffer": 0.2,
+        "dynamic_cash_cost": 4.1,
+        "dynamic_risk_adjusted_cost": 4.3,
+        "dynamic_all_in_cost": 4.3,
+        "dynamic_maximum_loss": 4.1,
+        "capital_budget_usd": 4.3,
         "size_binding_constraint": "capital_budget",
     })
 
     assert lifecycle.consume(row, {"m1": market()}) is True
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["target_size"] == 7.25
-    assert position["entry_cost"] == 2.987654321
-    assert position["dynamic_maximum_loss"] == 2.987654321
+    assert position["entry_cost"] == 4.1
+    assert position["risk_adjusted_entry_cost"] == 4.3
+    assert position["dynamic_maximum_loss"] == 4.1
     assert position["sizing_mode"] == "real_market_dynamic_v1"
     assert position["size_binding_constraint"] == "capital_budget"
+
+
+def test_probability_portfolio_limit_uses_risk_adjusted_entry_cost(tmp_path):
+    limits = replace(PortfolioLimits(), directional_max_open_notional=4.2)
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl", limits=limits,
+    )
+
+    assert lifecycle.consume(accepted(), {"m1": market()}) is False
+    assert lifecycle.data["positions"] == {}
+    assert lifecycle.data["portfolio_rejections"] == {
+        "late_window_directional_ev:m1:Up": "directional_open_notional_limit",
+    }
 
 
 def test_paired_v3_requires_dynamic_sizing_evidence(tmp_path):
@@ -183,11 +217,11 @@ def test_paired_v3_requires_dynamic_sizing_evidence(tmp_path):
 def test_probability_position_exits_on_future_full_bid_depth_after_all_costs(tmp_path):
     log = tmp_path / "events.jsonl"
     lifecycle = StrategyShadowLifecycle(
-        tmp_path / "state.json", log, profit_exit_min_pnl=.25,
+        tmp_path / "state.json", log, profit_exit_min_pnl=.10,
         profit_exit_mode="flat",
     )
     entry = accepted()
-    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["config_version"] = "shadow-buy-rules-v10"
     entry["generation"] = 2
     entry["session"] = 3
     assert lifecycle.consume(entry, {"m1": market()}) is True
@@ -216,8 +250,9 @@ def test_probability_position_exits_on_future_full_bid_depth_after_all_costs(tmp
     assert complete["event_type"] == "shadow_complete"
     assert complete["completion_reason"] == "profit_target_book_executable"
     assert complete["exit_vwap"] == .45
-    assert complete["exit_net_proceeds"] == 4.47
-    assert complete["realized_simulated_pnl"] == .37
+    assert complete["exit_cash_proceeds"] == 4.48
+    assert complete["exit_risk_adjusted_proceeds"] == 4.47
+    assert complete["realized_simulated_pnl"] == .38
     assert complete["real_orders"] == 0
     assert complete["real_fills"] == 0
 
@@ -228,7 +263,7 @@ def test_probability_position_does_not_fake_exit_without_full_bid_depth(tmp_path
         tmp_path / "state.json", log, profit_exit_min_pnl=.25,
     )
     entry = accepted()
-    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["config_version"] = "shadow-buy-rules-v10"
     assert lifecycle.consume(entry, {"m1": market()}) is True
 
     quote = {
@@ -252,11 +287,11 @@ def test_probability_position_does_not_fake_exit_without_full_bid_depth(tmp_path
 
 def test_probability_position_keeps_holding_when_net_profit_is_below_target(tmp_path):
     lifecycle = StrategyShadowLifecycle(
-        tmp_path / "state.json", tmp_path / "events.jsonl", profit_exit_min_pnl=.50,
+        tmp_path / "state.json", tmp_path / "events.jsonl", profit_exit_min_pnl=.25,
         profit_exit_mode="flat",
     )
     entry = accepted()
-    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["config_version"] = "shadow-buy-rules-v10"
     assert lifecycle.consume(entry, {"m1": market()}) is True
     quote = {
         **entry,
@@ -299,10 +334,10 @@ def test_ev_mode_holds_when_exit_proceeds_below_expected_settlement(tmp_path):
         profit_exit_min_pnl=.10,
     )
     entry = accepted()  # estimated_probability 0.7, size 10 -> settlement EV 7.0
-    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["config_version"] = "shadow-buy-rules-v10"
     assert lifecycle.consume(entry, {"m1": market()}) is True
 
-    # Proceeds 4.47 are a real profit (pnl .37 >= min .10) but holding to
+    # Risk-adjusted proceeds 4.47 clear the minimum while holding to
     # settlement is worth 7.0 in expectation: EV mode must keep holding.
     assert lifecycle.consume(_exit_quote(entry), {"m1": market()}) is False
     assert len(lifecycle.data["positions"]) == 1
@@ -314,7 +349,7 @@ def test_ev_mode_exits_when_proceeds_beat_expected_settlement(tmp_path):
         tmp_path / "state.json", log, profit_exit_min_pnl=.10,
     )
     entry = accepted()
-    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["config_version"] = "shadow-buy-rules-v10"
     entry["estimated_probability"] = 0.3  # settlement EV 3.0 < proceeds 4.47
     assert lifecycle.consume(entry, {"m1": market()}) is True
 
@@ -325,7 +360,7 @@ def test_ev_mode_exits_when_proceeds_beat_expected_settlement(tmp_path):
     assert complete["profit_exit_mode"] == "ev"
     assert complete["expected_settlement_value"] == 3.0
     assert complete["exit_ev_margin"] == 0.0
-    assert complete["realized_simulated_pnl"] == .37
+    assert complete["realized_simulated_pnl"] == .38
 
 
 def test_ev_mode_respects_configured_margin(tmp_path):
@@ -334,7 +369,7 @@ def test_ev_mode_respects_configured_margin(tmp_path):
         profit_exit_min_pnl=.10, profit_exit_ev_margin=2.0,
     )
     entry = accepted()
-    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["config_version"] = "shadow-buy-rules-v10"
     entry["estimated_probability"] = 0.3  # settlement EV 3.0 + margin 2.0 > 4.47
     assert lifecycle.consume(entry, {"m1": market()}) is True
 
@@ -348,7 +383,7 @@ def test_ev_mode_holds_without_probability_evidence(tmp_path):
         profit_exit_min_pnl=.10,
     )
     entry = accepted()
-    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["config_version"] = "shadow-buy-rules-v10"
     entry["estimated_probability"] = None
     assert lifecycle.consume(entry, {"m1": market()}) is True
 
@@ -363,7 +398,7 @@ def test_per_strategy_env_override_restores_flat_mode(tmp_path, monkeypatch):
         tmp_path / "state.json", log, profit_exit_min_pnl=.10,
     )
     entry = accepted(strategy="low_price_lottery_ev")
-    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["config_version"] = "shadow-buy-rules-v10"
     assert lifecycle.consume(entry, {"m1": market()}) is True
 
     # Global default is EV mode (which would hold at proceeds 4.47 < 7.0),
@@ -380,7 +415,7 @@ def test_stale_dedicated_profit_exit_cannot_close_a_newer_position(tmp_path):
         profit_exit_min_pnl=.10,
     )
     entry = accepted("new-entry")
-    entry["config_version"] = "shadow-buy-rules-v9"
+    entry["config_version"] = "shadow-buy-rules-v10"
     assert lifecycle.consume(entry, {"m1": market()}) is True
 
     stale_exit = {
@@ -410,7 +445,7 @@ def test_current_generation_profit_exit_reprices_position_after_entry_id_rebind(
     )
     entry = accepted("current-entry", outcome="Down")
     entry.update({
-        "config_version": "shadow-buy-rules-v9",
+        "config_version": "shadow-buy-rules-v10",
         "generation": 4,
         "session": 7,
     })
@@ -436,7 +471,7 @@ def test_current_generation_profit_exit_reprices_position_after_entry_id_rebind(
     complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
     assert complete["entry_event_id"] == "current-entry"
     assert complete["exit_event_id"] == "current-exit"
-    assert complete["realized_simulated_pnl"] == .37
+    assert complete["realized_simulated_pnl"] == .38
 
 
 def test_new_session_profit_exit_reprices_position_kept_across_restart(tmp_path):
@@ -447,7 +482,7 @@ def test_new_session_profit_exit_reprices_position_kept_across_restart(tmp_path)
     )
     entry = accepted("old-session-entry", outcome="Down")
     entry.update({
-        "config_version": "shadow-buy-rules-v9",
+        "config_version": "shadow-buy-rules-v10",
         "generation": 4,
         "session": 7,
     })
@@ -474,7 +509,7 @@ def test_new_session_profit_exit_reprices_position_kept_across_restart(tmp_path)
     complete = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
     assert complete["entry_event_id"] == "old-session-entry"
     assert complete["exit_source_entry_event_id"] == "new-session-cpp-entry"
-    assert complete["realized_simulated_pnl"] == .37
+    assert complete["realized_simulated_pnl"] == .38
 
 
 def test_terminal_hedge_opens_one_combined_position(tmp_path):

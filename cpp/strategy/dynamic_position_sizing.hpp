@@ -30,6 +30,7 @@ struct Result {
     double dynamic_buy_notional = 0;
     double dynamic_fee = 0;
     double dynamic_buffer = 0;
+    double dynamic_cash_cost = 0;
     double dynamic_all_in_cost = 0;
     double dynamic_all_in_price = 0;
     double dynamic_expected_profit = 0;
@@ -152,9 +153,10 @@ inline void copy_cost(Result& result, const Cost& cost) {
     result.dynamic_buy_notional = cost.notional;
     result.dynamic_fee = cost.fee;
     result.dynamic_buffer = cost.buffer;
-    result.dynamic_all_in_cost = cost.total;
+    result.dynamic_cash_cost = cost.notional + cost.fee;
+    result.dynamic_all_in_cost = result.dynamic_cash_cost + cost.buffer;
     result.dynamic_all_in_price = cost.unit;
-    result.dynamic_maximum_loss = cost.total;
+    result.dynamic_maximum_loss = result.dynamic_cash_cost;
 }
 
 }  // namespace detail
