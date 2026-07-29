@@ -244,6 +244,24 @@ def test_completion_entry_timestamp_must_match_canonical_entry(tmp_path):
     assert report["blocking_exclusions"]["entry_timestamp_mismatch"] == 1
 
 
+@pytest.mark.parametrize("invalid_entry_ts", [None, "not-a-timestamp"])
+def test_invalid_canonical_entry_timestamp_is_blocking_not_an_exception(
+    tmp_path, invalid_entry_ts,
+):
+    audit = tmp_path / "strategy-audit.jsonl"
+    execution = tmp_path / "shadow-execution.jsonl"
+    entry = _entry("entry-1", "m1", 100)
+    complete = _settlement(entry, "complete-1", 180)
+    entry["ts"] = invalid_entry_ts
+    _write_jsonl(audit, [entry])
+    _write_jsonl(execution, [complete])
+
+    report = build_profitability_report(audit, execution)
+
+    assert report["independent_markets"] == 0
+    assert report["blocking_exclusions"]["entry_timestamp_mismatch"] == 1
+
+
 @pytest.mark.parametrize("outcome", ["Both", "up", "", None])
 def test_reconciliation_rejects_noncanonical_probability_outcomes(
     tmp_path, outcome,

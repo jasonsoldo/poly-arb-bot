@@ -468,8 +468,10 @@ def _reconcile_candidate(entry, complete):
         complete.get("completion_reason") == "profit_target_book_executable"
         or complete.get("exit_vwap") is not None
     )
-    if completion_entry_ts is None or not _close(
-        completion_entry_ts, entry_ts
+    if (
+        entry_ts is None
+        or completion_entry_ts is None
+        or not _close(completion_entry_ts, entry_ts)
     ):
         return None, "entry_timestamp_mismatch"
     if not exit_completion:
@@ -479,7 +481,6 @@ def _reconcile_candidate(entry, complete):
     if (
         complete_size is None
         or not _close(complete_size, entry_values["target_size"])
-        or entry_ts is None
         or close_ts is None
         or completion_ts is None
         or probability is None
