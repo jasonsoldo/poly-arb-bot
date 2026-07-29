@@ -553,7 +553,10 @@ class StrategyShadowLifecycle:
                 "capital_budget_usd", "size_binding_constraint",
             ]
             required.extend(
-                ("dynamic_cash_cost", "dynamic_risk_adjusted_cost")
+                (
+                    "dynamic_cash_cost", "dynamic_risk_adjusted_cost",
+                    "dynamic_buffer",
+                )
                 if probability_strategy else ("dynamic_all_in_cost",)
             )
             if row.get("sizing_mode") != "real_market_dynamic_v1" or any(
@@ -567,17 +570,31 @@ class StrategyShadowLifecycle:
                     entry_cost = float(row["dynamic_cash_cost"])
                     risk_adjusted_entry_cost = float(
                         row["dynamic_risk_adjusted_cost"])
+                    entry_buffer = float(row["dynamic_buffer"])
                 else:
                     entry_cost = float(row["dynamic_all_in_cost"])
                     risk_adjusted_entry_cost = entry_cost
+                    entry_buffer = 0.0
                 maximum_loss = float(row["dynamic_maximum_loss"])
                 capital_budget = float(row["capital_budget_usd"])
             except (TypeError, ValueError):
                 return False
             if not all(math.isfinite(value) for value in (
                 size, minimum_size, entry_cost, risk_adjusted_entry_cost,
-                maximum_loss, capital_budget,
+                entry_buffer, maximum_loss, capital_budget,
             )) or size <= 0 or minimum_size <= 0 or size + 1e-9 < minimum_size or entry_cost <= 0:
+                return False
+            if probability_strategy and (
+                entry_buffer < 0
+                or risk_adjusted_entry_cost <= 0
+                or risk_adjusted_entry_cost + 1e-9 < entry_cost
+                or not math.isclose(
+                    risk_adjusted_entry_cost,
+                    entry_cost + entry_buffer,
+                    rel_tol=0,
+                    abs_tol=1e-9,
+                )
+            ):
                 return False
         else:
             size = float(row.get("main_size", row.get("target_size", 0)))
@@ -627,6 +644,10 @@ class StrategyShadowLifecycle:
             "terminal_hedged": hedged,
             "entry_cost": round(entry_cost, 12),
             "risk_adjusted_entry_cost": round(risk_adjusted_entry_cost, 12),
+            **({
+                "cash_ledger_version": 2,
+                "deployable_pnl": not self.calibration_mode,
+            } if probability_strategy and not hedged else {}),
             "sizing_mode": row.get("sizing_mode"),
             "market_minimum_size": row.get("market_minimum_size"),
             "dynamic_target_size": row.get("dynamic_target_size"),

@@ -125,6 +125,8 @@ def test_repeated_accepts_open_one_position(tmp_path):
     position = next(iter(lifecycle.data["positions"].values()))
     assert position["entry_cost"] == 4.1
     assert position["risk_adjusted_entry_cost"] == 4.3
+    assert position["cash_ledger_version"] == 2
+    assert position["deployable_pnl"] is True
     assert position["real_order_submissions"] == 0
     assert position["config_version"] == "shadow-portfolio-v8"
     assert len(position["config_hash"]) == 64
@@ -192,6 +194,19 @@ def test_v10_directional_accept_separates_cash_and_risk_adjusted_cost(tmp_path):
     assert position["size_binding_constraint"] == "capital_budget"
 
 
+@pytest.mark.parametrize("risk_adjusted_cost", (-1.0, 4.0, 4.2))
+def test_v10_probability_rejects_invalid_risk_adjusted_cost(
+        tmp_path, risk_adjusted_cost):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+    )
+    row = accepted()
+    row["dynamic_risk_adjusted_cost"] = risk_adjusted_cost
+
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["positions"] == {}
+
+
 def test_probability_portfolio_limit_uses_risk_adjusted_entry_cost(tmp_path):
     limits = replace(PortfolioLimits(), directional_max_open_notional=4.2)
     lifecycle = StrategyShadowLifecycle(
@@ -253,6 +268,8 @@ def test_probability_position_exits_on_future_full_bid_depth_after_all_costs(tmp
     assert complete["exit_cash_proceeds"] == 4.48
     assert complete["exit_risk_adjusted_proceeds"] == 4.47
     assert complete["realized_simulated_pnl"] == .38
+    assert complete["cash_ledger_version"] == 2
+    assert complete["deployable_pnl"] is True
     assert complete["real_orders"] == 0
     assert complete["real_fills"] == 0
 
@@ -743,6 +760,8 @@ def test_chainlink_settlement_completes_winning_up_position(tmp_path):
     assert row["event_type"] == "shadow_complete"
     assert row["winning_outcome"] == "Up"
     assert row["realized_simulated_pnl"] == 5.9
+    assert row["cash_ledger_version"] == 2
+    assert row["deployable_pnl"] is True
     assert row["real_orders"] == 0
 
 
