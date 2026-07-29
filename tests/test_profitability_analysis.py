@@ -48,6 +48,8 @@ def _entry(event_id, market_id, ts, outcome="Up"):
         "calibration_input_probability": 0.7001,
         "expected_fill_price": 0.4,
         "price_to_beat": 100.0,
+        "settlement_source": "chainlink",
+        "settlement_source_verified": True,
         "seconds_to_close": 75,
         "ts": ts,
         "target_depth_ok": True,
@@ -90,6 +92,8 @@ def _settlement(entry, event_id, ts, winning_outcome="Up"):
         "winning_outcome": winning_outcome,
         "settlement_price": 101.0 if winning_outcome == "Up" else 99.0,
         "settlement_timestamp_ms": close_ts * 1000,
+        "settlement_source": entry["settlement_source"],
+        "settlement_source_verified": True,
         "payout": payout,
         "realized_simulated_pnl": payout - 4.1,
         "real_order_submissions": 0,
@@ -113,6 +117,17 @@ def _profit_exit(entry, event_id, ts):
         "payout": 4.47,
         "realized_simulated_pnl": 0.37,
     }
+
+
+def _v10_entry(event_id, market_id, ts):
+    entry = _entry(event_id, market_id, ts)
+    entry.update({
+        "config_version": "shadow-buy-rules-v10",
+        "dynamic_cash_cost": 4.1,
+        "dynamic_risk_adjusted_cost": 4.3,
+        "dynamic_maximum_loss": 4.1,
+    })
+    return entry
 
 
 def test_reconciliation_uses_first_market_entry_and_recomputes_cash_pnl(tmp_path):
@@ -169,6 +184,27 @@ def test_reconciliation_fails_closed_on_real_order_evidence(tmp_path):
     assert result["excluded"]["real_order_invariant"] == 1
 
 
+@pytest.mark.parametrize("deployable_pnl", [False, None])
+def test_v10_completion_requires_explicit_deployable_pnl_true(
+    tmp_path, deployable_pnl,
+):
+    audit = tmp_path / "strategy-audit.jsonl"
+    execution = tmp_path / "shadow-execution.jsonl"
+    entry = _v10_entry("entry-1", "m1", 100)
+    complete = _settlement(entry, "complete-1", 180)
+    complete["cash_ledger_version"] = 2
+    if deployable_pnl is not None:
+        complete["deployable_pnl"] = deployable_pnl
+    _write_jsonl(audit, [entry])
+    _write_jsonl(execution, [complete])
+
+    report = build_profitability_report(audit, execution)
+
+    assert report["independent_markets"] == 0
+    assert report["excluded"]["deployable_pnl_not_true"] == 1
+    assert report["blocking_exclusions"]["deployable_pnl_not_true"] == 1
+
+
 def test_v10_cash_maximum_loss_must_match_recomputed_entry_cash(tmp_path):
     audit = tmp_path / "strategy-audit.jsonl"
     execution = tmp_path / "shadow-execution.jsonl"
@@ -191,6 +227,67 @@ def test_v10_cash_maximum_loss_must_match_recomputed_entry_cash(tmp_path):
 
     assert result["trades"] == []
     assert result["excluded"]["pnl_recalculation_mismatch"] == 1
+
+
+def test_completion_entry_timestamp_must_match_canonical_entry(tmp_path):
+    audit = tmp_path / "strategy-audit.jsonl"
+    execution = tmp_path / "shadow-execution.jsonl"
+    entry = _entry("entry-1", "m1", 100)
+    complete = _settlement(entry, "complete-1", 180)
+    complete["entry_ts"] = 99
+    _write_jsonl(audit, [entry])
+    _write_jsonl(execution, [complete])
+
+    report = build_profitability_report(audit, execution)
+
+    assert report["independent_markets"] == 0
+    assert report["blocking_exclusions"]["entry_timestamp_mismatch"] == 1
+
+
+@pytest.mark.parametrize("outcome", ["Both", "up", "", None])
+def test_reconciliation_rejects_noncanonical_probability_outcomes(
+    tmp_path, outcome,
+):
+    audit = tmp_path / "strategy-audit.jsonl"
+    execution = tmp_path / "shadow-execution.jsonl"
+    entry = _entry("entry-1", "m1", 100, outcome=outcome)
+    complete = _settlement(entry, "complete-1", 180)
+    _write_jsonl(audit, [entry])
+    _write_jsonl(execution, [complete])
+
+    report = build_profitability_report(audit, execution)
+
+    assert report["independent_markets"] == 0
+    assert report["blocking_exclusions"]["invalid_outcome"] == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("settlement_source_verified", False, "settlement_provenance_unverified"),
+        ("settlement_source_verified", None, "settlement_provenance_unverified"),
+        ("settlement_source", "unverified", "settlement_provenance_unverified"),
+        ("settlement_source", "binance", "settlement_provenance_mismatch"),
+    ],
+)
+def test_settlement_completion_requires_matching_verified_provenance(
+    tmp_path, field, value, reason,
+):
+    audit = tmp_path / "strategy-audit.jsonl"
+    execution = tmp_path / "shadow-execution.jsonl"
+    entry = _entry("entry-1", "m1", 100)
+    complete = _settlement(entry, "complete-1", 180)
+    if value is None:
+        complete.pop(field)
+    else:
+        complete[field] = value
+    _write_jsonl(audit, [entry])
+    _write_jsonl(execution, [complete])
+
+    report = build_profitability_report(audit, execution)
+
+    assert report["independent_markets"] == 0
+    assert report["blocking_exclusions"][reason] == 1
 
 
 def test_settlement_winner_is_recomputed_from_price_evidence(tmp_path):
@@ -325,6 +422,72 @@ def test_aggregate_metrics_only_seed_bootstrap_sampling():
     }
 
 
+def test_missing_input_histories_are_blocking_but_report_is_generated(tmp_path):
+    report = build_profitability_report(
+        tmp_path / "missing-audit.jsonl",
+        tmp_path / "missing-execution.jsonl",
+    )
+
+    assert report["independent_markets"] == 0
+    assert report["excluded"]["source_file_missing"] == 2
+    assert report["blocking_exclusions"]["source_file_missing"] == 2
+
+
+def test_cross_log_event_id_reuse_is_blocking_and_excluded(tmp_path):
+    audit = tmp_path / "strategy-audit.jsonl"
+    execution = tmp_path / "shadow-execution.jsonl"
+    entry = _entry("reused-id", "m1", 100)
+    complete = _settlement(entry, "reused-id", 180)
+    _write_jsonl(audit, [entry])
+    _write_jsonl(execution, [complete])
+
+    report = build_profitability_report(audit, execution)
+
+    assert report["independent_markets"] == 0
+    assert report["excluded"]["duplicate_event"] == 1
+    assert report["blocking_exclusions"]["duplicate_event"] == 1
+
+
+def test_string_real_order_fields_are_invalid_and_not_reported_as_zero(tmp_path):
+    audit = tmp_path / "strategy-audit.jsonl"
+    execution = tmp_path / "shadow-execution.jsonl"
+    entry = _entry("entry-1", "m1", 100)
+    entry["real_orders"] = "0"
+    _write_jsonl(audit, [entry])
+    _write_jsonl(execution, [_settlement(entry, "complete-1", 180)])
+
+    report = build_profitability_report(audit, execution)
+
+    assert report["independent_markets"] == 0
+    assert report["blocking_exclusions"]["real_order_invariant"] == 1
+    assert report["real_orders"] is None
+    assert report["real_order_evidence"]["invalid_rows"] == 1
+    assert report["real_order_evidence"]["fields"]["real_orders"]["invalid"] == 1
+
+
+def test_unrelated_strategy_real_orders_block_and_are_reported(tmp_path):
+    audit = tmp_path / "strategy-audit.jsonl"
+    execution = tmp_path / "shadow-execution.jsonl"
+    unrelated = {
+        "event_id": "paired-1",
+        "event_type": "shadow_eval",
+        "strategy": "paired_lock",
+        "real_order_submissions": 2,
+        "real_orders": 1,
+        "real_fills": 1,
+    }
+    _write_jsonl(audit, [unrelated])
+    _write_jsonl(execution, [])
+
+    report = build_profitability_report(audit, execution)
+
+    assert report["blocking_exclusions"]["real_order_invariant"] == 1
+    assert report["real_order_submissions"] == 2
+    assert report["real_orders"] == 1
+    assert report["real_fills"] == 1
+    assert report["real_order_evidence"]["nonzero_rows"] == 1
+
+
 def test_report_reads_rotated_history_and_reports_blocking_exclusions(tmp_path):
     audit = tmp_path / "strategy-audit.jsonl"
     execution = tmp_path / "shadow-execution.jsonl"
@@ -413,7 +576,24 @@ def test_cli_rejects_output_that_would_overwrite_gate_or_input(tmp_path):
     environment = os.environ.copy()
     environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
 
-    for protected in (gate, audit):
+    live_markets = tmp_path / "live_markets.json"
+    venue_status = tmp_path / "venue-status.json"
+    rotated_audit = Path(str(audit) + ".1")
+    rotated_execution = Path(str(execution) + ".1.gz")
+    live_markets.write_text("sentinel", encoding="utf-8")
+    venue_status.write_text("sentinel", encoding="utf-8")
+    _write_jsonl(rotated_audit, [])
+    with gzip.open(rotated_execution, "wt", encoding="utf-8") as handle:
+        handle.write("")
+
+    for protected in (
+        gate,
+        audit,
+        rotated_audit,
+        rotated_execution,
+        live_markets,
+        venue_status,
+    ):
         completed = subprocess.run(
             [
                 sys.executable,
@@ -436,3 +616,8 @@ def test_cli_rejects_output_that_would_overwrite_gate_or_input(tmp_path):
 
     assert gate.read_text(encoding="utf-8") == "sentinel"
     assert audit.read_text(encoding="utf-8") == ""
+    assert rotated_audit.read_text(encoding="utf-8") == ""
+    with gzip.open(rotated_execution, "rt", encoding="utf-8") as handle:
+        assert handle.read() == ""
+    assert live_markets.read_text(encoding="utf-8") == "sentinel"
+    assert venue_status.read_text(encoding="utf-8") == "sentinel"

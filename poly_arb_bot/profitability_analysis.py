@@ -16,11 +16,18 @@ PROBABILITY_STRATEGIES = frozenset({
 })
 BLOCKING_EXCLUSIONS = frozenset({
     "invalid_json",
+    "source_file_missing",
     "missing_event_id",
     "missing_entry_event",
+    "duplicate_event",
     "strategy_config_mismatch",
     "probability_model_mismatch",
+    "invalid_outcome",
     "outcome_mismatch",
+    "entry_timestamp_mismatch",
+    "settlement_provenance_unverified",
+    "settlement_provenance_mismatch",
+    "deployable_pnl_not_true",
     "fee_schedule_unavailable",
     "pnl_recalculation_mismatch",
     "real_order_invariant",
@@ -32,6 +39,14 @@ _REAL_ORDER_FIELDS = (
     "real_orders",
     "real_fills",
 )
+_UNKNOWN_SETTLEMENT_SOURCES = frozenset({
+    "",
+    "n/a",
+    "none",
+    "unknown",
+    "unsupported",
+    "unverified",
+})
 
 
 def _finite(value):
@@ -53,11 +68,63 @@ def _row_timestamp(row):
     return value if value is not None else float("-inf")
 
 
+def _new_real_order_evidence():
+    return {
+        "rows_checked": 0,
+        "invalid_rows": 0,
+        "nonzero_rows": 0,
+        "fields": {
+            field: {
+                "zero": 0,
+                "nonzero": 0,
+                "invalid": 0,
+                "observed_total": 0,
+            }
+            for field in _REAL_ORDER_FIELDS
+        },
+    }
+
+
+def _record_real_order_evidence(row, evidence):
+    evidence["rows_checked"] += 1
+    invalid_row = False
+    nonzero_row = False
+    for field in _REAL_ORDER_FIELDS:
+        value = row.get(field)
+        field_evidence = evidence["fields"][field]
+        if type(value) is not int:
+            field_evidence["invalid"] += 1
+            invalid_row = True
+        elif value != 0:
+            field_evidence["nonzero"] += 1
+            field_evidence["observed_total"] += value
+            nonzero_row = True
+        else:
+            field_evidence["zero"] += 1
+    if invalid_row:
+        evidence["invalid_rows"] += 1
+    if nonzero_row:
+        evidence["nonzero_rows"] += 1
+    return not invalid_row and not nonzero_row
+
+
+def _combine_real_order_evidence(*items):
+    combined = _new_real_order_evidence()
+    for item in items:
+        for key in ("rows_checked", "invalid_rows", "nonzero_rows"):
+            combined[key] += item[key]
+        for field in _REAL_ORDER_FIELDS:
+            for key in ("zero", "nonzero", "invalid", "observed_total"):
+                combined["fields"][field][key] += item["fields"][field][key]
+    return combined
+
+
 def _source_rows(path):
     path = Path(path)
     rows = []
     excluded = Counter()
     files = []
+    real_order_evidence = _new_real_order_evidence()
     for candidate in history_paths(path):
         candidate = Path(candidate)
         if not candidate.exists():
@@ -81,6 +148,11 @@ def _source_rows(path):
                     if not isinstance(row, dict):
                         excluded["invalid_json"] += 1
                         continue
+                    if not _record_real_order_evidence(
+                        row, real_order_evidence
+                    ):
+                        excluded["real_order_invariant"] += 1
+                        continue
                     rows.append(row)
         except UnicodeError:
             excluded["invalid_json"] += 1
@@ -92,14 +164,14 @@ def _source_rows(path):
     return rows, excluded, {
         "path": str(path),
         "files": files,
-    }
+    }, real_order_evidence
 
 
 def _has_zero_real_orders(row):
     return all(
         field in row
-        and not isinstance(row[field], bool)
-        and _finite(row[field]) == 0
+        and type(row[field]) is int
+        and row[field] == 0
         for field in _REAL_ORDER_FIELDS
     )
 
@@ -189,13 +261,45 @@ def _identity_reason(entry, complete):
         != complete.get("probability_model_id")
     ):
         return "probability_model_mismatch"
-    if not entry.get("outcome") or entry.get("outcome") != complete.get("outcome"):
+    if (
+        entry.get("outcome") not in {"Up", "Down"}
+        or complete.get("outcome") not in {"Up", "Down"}
+    ):
+        return "invalid_outcome"
+    if entry.get("outcome") != complete.get("outcome"):
         return "outcome_mismatch"
     for field in ("asset", "timeframe"):
         if not entry.get(field) or entry.get(field) != complete.get(field):
             return "strategy_config_mismatch"
     if not _has_zero_real_orders(entry) or not _has_zero_real_orders(complete):
         return "real_order_invariant"
+    if (
+        entry.get("config_version") == "shadow-buy-rules-v10"
+        and complete.get("deployable_pnl") is not True
+    ):
+        return "deployable_pnl_not_true"
+    return None
+
+
+def _valid_settlement_source(value):
+    return (
+        isinstance(value, str)
+        and value.strip().lower() not in _UNKNOWN_SETTLEMENT_SOURCES
+    )
+
+
+def _settlement_provenance_reason(entry, complete):
+    entry_source = entry.get("settlement_source")
+    completion_source = complete.get("settlement_source")
+    if (
+        not _valid_settlement_source(entry_source)
+        or not _valid_settlement_source(completion_source)
+        or entry.get("settlement_source_verified") is not True
+        or complete.get("settlement_source_verified") is not True
+    ):
+        return "settlement_provenance_unverified"
+    if entry_source != completion_source:
+        return "settlement_provenance_mismatch"
     return None
 
 
@@ -353,6 +457,7 @@ def _reconcile_candidate(entry, complete):
 
     complete_size = _finite(complete.get("target_size"))
     entry_ts = _finite(entry.get("ts", entry.get("timestamp")))
+    completion_entry_ts = _finite(complete.get("entry_ts"))
     close_ts = _finite(complete.get("close_ts"))
     completion_ts = _finite(complete.get("ts", complete.get("timestamp")))
     probability = _finite(entry.get("calibration_input_probability"))
@@ -363,6 +468,14 @@ def _reconcile_candidate(entry, complete):
         complete.get("completion_reason") == "profit_target_book_executable"
         or complete.get("exit_vwap") is not None
     )
+    if completion_entry_ts is None or not _close(
+        completion_entry_ts, entry_ts
+    ):
+        return None, "entry_timestamp_mismatch"
+    if not exit_completion:
+        reason = _settlement_provenance_reason(entry, complete)
+        if reason:
+            return None, reason
     if (
         complete_size is None
         or not _close(complete_size, entry_values["target_size"])
@@ -435,11 +548,40 @@ def reconcile_probability_trades(
     execution_path: Path,
     config_hashes: Optional[Dict[str, str]] = None,
 ) -> dict:
-    audit_rows, audit_excluded, audit_source = _source_rows(strategy_audit_path)
-    execution_rows, execution_excluded, execution_source = _source_rows(
-        execution_path
-    )
+    (
+        audit_rows,
+        audit_excluded,
+        audit_source,
+        audit_real_order_evidence,
+    ) = _source_rows(strategy_audit_path)
+    (
+        execution_rows,
+        execution_excluded,
+        execution_source,
+        execution_real_order_evidence,
+    ) = _source_rows(execution_path)
     excluded = audit_excluded + execution_excluded
+    audit_event_ids = {
+        row.get("event_id")
+        for row in audit_rows
+        if isinstance(row.get("event_id"), str) and row.get("event_id")
+    }
+    execution_event_ids = {
+        row.get("event_id")
+        for row in execution_rows
+        if isinstance(row.get("event_id"), str) and row.get("event_id")
+    }
+    duplicate_event_ids = audit_event_ids & execution_event_ids
+    if duplicate_event_ids:
+        excluded["duplicate_event"] += len(duplicate_event_ids)
+        audit_rows = [
+            row for row in audit_rows
+            if row.get("event_id") not in duplicate_event_ids
+        ]
+        execution_rows = [
+            row for row in execution_rows
+            if row.get("event_id") not in duplicate_event_ids
+        ]
     entries = _entry_index(audit_rows, excluded)
     completions = _completion_rows(execution_rows, excluded)
     selected_hashes = _selected_hashes(completions, config_hashes)
@@ -491,6 +633,10 @@ def reconcile_probability_trades(
             "strategy_audit": audit_source,
             "execution_log": execution_source,
         },
+        "real_order_evidence": _combine_real_order_evidence(
+            audit_real_order_evidence,
+            execution_real_order_evidence,
+        ),
     }
 
 
@@ -674,6 +820,7 @@ def build_profitability_report(
             ),
         }
     excluded = reconciled["excluded"]
+    real_order_evidence = reconciled["real_order_evidence"]
     generated_at = max(
         (row["completion_ts"] for row in trades),
         default=0.0,
@@ -700,7 +847,13 @@ def build_profitability_report(
         },
         "overall": overall,
         "cohorts": cohorts,
-        "real_order_submissions": 0,
-        "real_orders": 0,
-        "real_fills": 0,
+        "real_order_evidence": real_order_evidence,
+        **{
+            field: (
+                None
+                if real_order_evidence["fields"][field]["invalid"] > 0
+                else real_order_evidence["fields"][field]["observed_total"]
+            )
+            for field in _REAL_ORDER_FIELDS
+        },
     }

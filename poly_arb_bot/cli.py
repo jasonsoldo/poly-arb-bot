@@ -963,6 +963,7 @@ def main() -> int:
         from .strategy_calibration import probability_main
         return probability_main(args.execution_log, args.config_hash)
     if args.command == "profitability-analysis":
+        from .jsonl_history import history_paths
         from .profitability_analysis import build_profitability_report
         report = build_profitability_report(
             Path(args.strategy_audit_file),
@@ -976,11 +977,19 @@ def main() -> int:
                 "probability-calibration-map.json",
                 "probability-calibration-research.json",
                 "probability-calibration-validation.json",
+                "live_markets.json",
+                "venue-status.json",
+                ".env",
+                "env.example",
             }
             resolved_output = output.resolve()
             input_paths = {
-                Path(args.strategy_audit_file).resolve(),
-                Path(args.execution_log).resolve(),
+                Path(candidate).resolve()
+                for input_path in (
+                    Path(args.strategy_audit_file),
+                    Path(args.execution_log),
+                )
+                for candidate in history_paths(input_path)
             }
             if (
                 resolved_output in input_paths
