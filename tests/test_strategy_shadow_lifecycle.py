@@ -37,17 +37,21 @@ def test_lifecycle_persists_real_order_invariants_on_initialization(tmp_path):
 def test_legacy_probability_state_migrates_without_touching_paired_lock(
         tmp_path):
     state = tmp_path / "state.json"
+    research_hash = "c" * 64
+    deployable_hash = "d" * 64
     state.write_text(json.dumps({
         "positions": {
             "late_window_directional_ev:m1:Up": {
-                "strategy": "late_window_directional_ev",
-                "market_id": "m1",
-                "deployable_pnl": False,
+                    "strategy": "late_window_directional_ev",
+                    "market_id": "m1",
+                    "deployable_pnl": False,
+                    "config_hash": research_hash,
             },
             "low_price_lottery_ev:m2:Down": {
-                "strategy": "low_price_lottery_ev",
-                "market_id": "m2",
-                "deployable_pnl": True,
+                    "strategy": "low_price_lottery_ev",
+                    "market_id": "m2",
+                    "deployable_pnl": True,
+                    "config_hash": deployable_hash,
             },
             "paired_lock:m3:Both": {
                 "strategy": "paired_lock",
@@ -77,6 +81,9 @@ def test_legacy_probability_state_migrates_without_touching_paired_lock(
         claim.rsplit("|", 1)[-1]
         for claim in lifecycle.data["research_claimed_markets"]
     } == {"m1", "m2"}
+    assert lifecycle.data["research_claimed_markets"] == [
+        f"{research_hash}|m1", f"{deployable_hash}|m2",
+    ]
     assert {
         claim.rsplit("|", 1)[-1]
         for claim in lifecycle.data["deployable_claimed_markets"]
@@ -90,6 +97,7 @@ def test_legacy_probability_state_migrates_without_touching_paired_lock(
 def test_legacy_completion_log_is_claimed_before_new_entries_are_consumed(
         tmp_path):
     log = tmp_path / "events.jsonl"
+    old_hash = "c" * 64
     log.write_text(json.dumps({
         "event_id": "legacy:complete",
         "event_type": "shadow_complete",
@@ -98,6 +106,7 @@ def test_legacy_completion_log_is_claimed_before_new_entries_are_consumed(
         "ts": 1101,
         "realized_simulated_pnl": 1.0,
         "strategy_config_hash": canonical_strategy_config_hash(),
+        "config_hash": old_hash,
     }) + "\n", encoding="utf-8")
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
     row = accepted("new-after-upgrade")
@@ -112,6 +121,7 @@ def test_legacy_completion_log_is_claimed_before_new_entries_are_consumed(
 
 def test_legacy_research_completion_rebuilds_missing_claim_on_restart(tmp_path):
     state = tmp_path / "state.json"
+    old_hash = "c" * 64
     state.write_text(json.dumps({
         "positions": {},
         "research_positions": {},
@@ -119,6 +129,8 @@ def test_legacy_research_completion_rebuilds_missing_claim_on_restart(tmp_path):
             "event_id": "research:m1:complete",
             "strategy": "late_window_directional_ev",
             "market_id": "m1",
+            "research_lifecycle_config_hash": old_hash,
+            "research_claim_key": f"{old_hash}|m1",
         }],
         "research_claimed_markets": [],
         "deployable_claimed_markets": [],
@@ -139,16 +151,21 @@ def test_legacy_research_completion_rebuilds_missing_claim_on_restart(tmp_path):
         claim.rsplit("|", 1)[-1]
         for claim in lifecycle.data["research_claimed_markets"]
     } == {"m1"}
+    assert lifecycle.data["research_claimed_markets"] == [f"{old_hash}|m1"]
     assert lifecycle.data["deployable_claimed_markets"] == []
 
 
 def test_research_completion_log_backfill_rebuilds_missing_claim(tmp_path):
     log = tmp_path / "events.jsonl"
+    old_hash = "c" * 64
     log.write_text(json.dumps({
         "event_id": "research:m1:complete",
         "event_type": "shadow_research_complete",
         "strategy": "late_window_directional_ev",
         "market_id": "m1",
+        "config_hash": old_hash,
+        "research_lifecycle_config_hash": old_hash,
+        "research_claim_key": f"{old_hash}|m1",
     }) + "\n", encoding="utf-8")
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
 
@@ -160,9 +177,188 @@ def test_research_completion_log_backfill_rebuilds_missing_claim(tmp_path):
         "event_id": "research:m1:complete",
         "strategy": "late_window_directional_ev",
         "market_id": "m1",
+        "research_lifecycle_config_hash": old_hash,
+        "research_claim_key": f"{old_hash}|m1",
     }]
     assert len(lifecycle.data["research_claimed_markets"]) == 1
     assert lifecycle.data["deployable_claimed_markets"] == []
+
+
+def _research_completion(
+        event_id="research:m1:complete", market_id="m1",
+        lifecycle_config_hash=None, strategy="late_window_directional_ev"):
+    lifecycle_config_hash = lifecycle_config_hash or ("c" * 64)
+    return {
+        "event_id": event_id,
+        "event_type": "shadow_research_complete",
+        "strategy": strategy,
+        "market_id": market_id,
+        "config_hash": lifecycle_config_hash,
+        "research_lifecycle_config_hash": lifecycle_config_hash,
+        "research_claim_key": f"{lifecycle_config_hash}|{market_id}",
+    }
+
+
+def test_research_claim_identity_survives_config_change_restart(tmp_path):
+    state = tmp_path / "state.json"
+    log = tmp_path / "events.jsonl"
+    first = StrategyShadowLifecycle(state, log, profit_exit_min_pnl=.10)
+    row = accepted()
+    assert first.capture_research_candidate(row, {"m1": market()}) is True
+    original_claim = first.data["research_claimed_markets"][0]
+    position = next(iter(first.data["research_positions"].values()))
+    assert position["research_claim_key"] == original_claim
+    assert position["research_lifecycle_config_hash"] == first.config_hash
+
+    stored = json.loads(state.read_text(encoding="utf-8"))
+    stored["research_claimed_markets"] = []
+    state.write_text(json.dumps(stored), encoding="utf-8")
+    restarted = StrategyShadowLifecycle(
+        state, log, profit_exit_min_pnl=.25,
+    )
+
+    assert restarted.config_hash != first.config_hash
+    assert restarted.data["research_claimed_markets"] == [original_claim]
+    assert (
+        next(iter(restarted.data["research_positions"].values()))[
+            "research_claim_key"
+        ] == original_claim
+    )
+    assert restarted._claim_key("m1") != original_claim
+
+
+def test_research_completion_preserves_original_claim_across_config_change(
+        tmp_path):
+    state = tmp_path / "state.json"
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(state, log, profit_exit_min_pnl=.10)
+    row = accepted()
+    assert lifecycle.capture_research_candidate(row, {"m1": market()}) is True
+    original_claim = lifecycle.data["research_claimed_markets"][0]
+    lifecycle.settle(
+        {"m1": market()},
+        {"assets": {"BTC": {"chainlink_settlement_samples": [{
+            "source_timestamp_ms": 1_100_000, "price": 101,
+        }]}}},
+        now=1101,
+    )
+    completion = lifecycle.data["research_completed"][0]
+    assert completion["research_claim_key"] == original_claim
+    assert completion["research_lifecycle_config_hash"] == lifecycle.config_hash
+
+    stored = json.loads(state.read_text(encoding="utf-8"))
+    stored["research_claimed_markets"] = []
+    state.write_text(json.dumps(stored), encoding="utf-8")
+    restarted = StrategyShadowLifecycle(
+        state, log, profit_exit_min_pnl=.25,
+    )
+    assert restarted.data["research_claimed_markets"] == [original_claim]
+    assert restarted._claim_key("m1") != original_claim
+
+
+def test_legacy_research_string_resolves_from_defensive_rotated_history(
+        tmp_path):
+    state = tmp_path / "state.json"
+    log = tmp_path / "events.jsonl"
+    event_id = "legacy-research:complete"
+    old_hash = "d" * 64
+    state.write_text(json.dumps({
+        "positions": {},
+        "research_positions": {},
+        "research_completed": [event_id],
+        "research_claimed_markets": [],
+        "deployable_claimed_markets": [],
+        "completed": [],
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+    incomplete = {
+        "event_id": event_id,
+        "event_type": "shadow_research_complete",
+        "strategy": "late_window_directional_ev",
+        "market_id": "m1",
+    }
+    wrong_strategy = _research_completion(
+        "wrong-strategy:complete", "paired-market", old_hash, "paired_lock",
+    )
+    valid = _research_completion(event_id, "m1", old_hash)
+    (tmp_path / "events.jsonl.1").write_text(
+        "\n".join((
+            json.dumps(7),
+            json.dumps(incomplete),
+            json.dumps(wrong_strategy),
+            json.dumps(valid),
+        )) + "\n",
+        encoding="utf-8",
+    )
+
+    lifecycle = StrategyShadowLifecycle(state, log)
+
+    assert lifecycle.data["research_completed"] == [{
+        "event_id": event_id,
+        "strategy": "late_window_directional_ev",
+        "market_id": "m1",
+        "research_lifecycle_config_hash": old_hash,
+        "research_claim_key": f"{old_hash}|m1",
+    }]
+    assert lifecycle.data["research_claimed_markets"] == [f"{old_hash}|m1"]
+    assert lifecycle.data["research_claim_migration_incomplete"] == []
+    assert all(
+        "paired-market" not in claim
+        for claim in lifecycle.data["research_claimed_markets"]
+    )
+
+
+def test_unresolved_legacy_research_string_persists_fail_closed_guard(
+        tmp_path):
+    state = tmp_path / "state.json"
+    log = tmp_path / "events.jsonl"
+    event_id = "rotated-away:complete"
+    state.write_text(json.dumps({
+        "positions": {},
+        "research_positions": {},
+        "research_completed": [event_id],
+        "research_claimed_markets": [],
+        "deployable_claimed_markets": [],
+        "completed": [],
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+
+    lifecycle = StrategyShadowLifecycle(state, log)
+
+    assert lifecycle.data["research_claim_migration_incomplete"] == [event_id]
+    assert lifecycle.capture_research_candidate(
+        accepted("blocked-by-migration"), {"m1": market()},
+    ) is False
+    persisted = json.loads(state.read_text(encoding="utf-8"))
+    assert persisted["research_claim_migration_incomplete"] == [event_id]
+
+    restarted = StrategyShadowLifecycle(state, log)
+    assert restarted.data["research_claim_migration_incomplete"] == [event_id]
+    assert restarted.capture_research_candidate(
+        accepted("still-blocked"), {"m1": market()},
+    ) is False
+
+    old_hash = "e" * 64
+    log.write_text(
+        json.dumps(_research_completion(event_id, "m1", old_hash)) + "\n",
+        encoding="utf-8",
+    )
+    recovered = StrategyShadowLifecycle(state, log)
+    assert recovered.data["research_claim_migration_incomplete"] == []
+    assert recovered.data["research_completed"][0]["research_claim_key"] == (
+        f"{old_hash}|m1"
+    )
+    unrelated = accepted("unblocked-after-recovery")
+    unrelated["market_id"] = "m2"
+    assert recovered.capture_research_candidate(
+        unrelated, {"m2": dict(market(), market_id="m2")},
+    ) is True
 
 
 def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up"):

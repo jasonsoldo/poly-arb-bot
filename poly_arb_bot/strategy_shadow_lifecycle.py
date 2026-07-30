@@ -139,6 +139,7 @@ class StrategyShadowLifecycle:
         self.data.setdefault("research_claimed_markets", [])
         self.data.setdefault("deployable_claimed_markets", [])
         self.data.setdefault("research_completed", [])
+        self.data.setdefault("research_claim_migration_incomplete", [])
         self.data.setdefault("complete_set_inventory", {})
         self.data.setdefault("maker_quotes", {})
         self.data.setdefault("processed_complete_set_events", [])
@@ -177,12 +178,67 @@ class StrategyShadowLifecycle:
     def _claim_key(self, market_id):
         return f"{self.config_hash}|{market_id}"
 
+    def _research_claim_identity(self, row):
+        if not isinstance(row, dict):
+            return None
+        market_id = row.get("market_id")
+        if (
+            not isinstance(market_id, str)
+            or not market_id
+            or not market_id.strip()
+        ):
+            return None
+        config_hash = row.get("research_lifecycle_config_hash")
+        if config_hash is None:
+            config_hash = row.get("config_hash")
+        claim_key = row.get("research_claim_key")
+        if self._valid_hash(config_hash):
+            expected = f"{config_hash}|{market_id}"
+            if claim_key is not None and claim_key != expected:
+                return None
+            return config_hash, expected
+        if isinstance(claim_key, str) and claim_key.endswith(f"|{market_id}"):
+            recovered_hash = claim_key[:-(len(market_id) + 1)]
+            if self._valid_hash(recovered_hash):
+                return recovered_hash, claim_key
+        return None
+
+    def _research_completion_record(self, row, require_event_type=False):
+        if not isinstance(row, dict):
+            return None
+        if (
+            require_event_type
+            and row.get("event_type") != "shadow_research_complete"
+        ):
+            return None
+        event_id = row.get("event_id")
+        strategy = row.get("strategy")
+        if (
+            not isinstance(event_id, str)
+            or not event_id
+            or not event_id.strip()
+            or strategy not in PROBABILITY_MODEL_IDS
+        ):
+            return None
+        identity = self._research_claim_identity(row)
+        if identity is None:
+            return None
+        config_hash, claim_key = identity
+        return {
+            "event_id": event_id,
+            "strategy": strategy,
+            "market_id": row["market_id"],
+            "research_lifecycle_config_hash": config_hash,
+            "research_claim_key": claim_key,
+        }
+
     def _migrate_lifecycle_state(self):
         probability_strategies = {
             "late_window_directional_ev", "low_price_lottery_ev",
         }
         research_claims = set(self.data["research_claimed_markets"])
         deployable_claims = set(self.data["deployable_claimed_markets"])
+        migration_incomplete = set()
         changed = False
 
         for key, position in list(self.data["positions"].items()):
@@ -198,37 +254,66 @@ class StrategyShadowLifecycle:
                 del self.data["positions"][key]
                 changed = True
 
-        for position in self.data["research_positions"].values():
+        for position_key, position in self.data["research_positions"].items():
             if (
                 position.get("strategy") in probability_strategies
                 and position.get("market_id")
             ):
-                research_claims.add(self._claim_key(position.get("market_id")))
+                identity = self._research_claim_identity(position)
+                if identity is None:
+                    migration_incomplete.add(
+                        str(position.get("event_id") or position_key))
+                    continue
+                config_hash, claim_key = identity
+                if (
+                    position.get("research_lifecycle_config_hash")
+                    != config_hash
+                    or position.get("research_claim_key") != claim_key
+                ):
+                    position["research_lifecycle_config_hash"] = config_hash
+                    position["research_claim_key"] = claim_key
+                    changed = True
+                research_claims.add(claim_key)
         for completion in self.data["research_completed"]:
-            if (
-                isinstance(completion, dict)
-                and completion.get("strategy") in probability_strategies
-                and completion.get("market_id")
-            ):
-                research_claims.add(
-                    self._claim_key(completion.get("market_id")))
+            record = self._research_completion_record(completion)
+            if record is not None:
+                research_claims.add(record["research_claim_key"])
+            elif isinstance(completion, str) and completion:
+                migration_incomplete.add(completion)
+            else:
+                migration_incomplete.add(
+                    str(
+                        completion.get("event_id")
+                        if isinstance(completion, dict)
+                        else "invalid_research_completion_record"
+                    )
+                )
         for position in self.data["positions"].values():
             if (
                 position.get("strategy") in probability_strategies
                 and not position.get("terminal_hedged")
                 and position.get("market_id")
             ):
-                claim = self._claim_key(position.get("market_id"))
-                research_claims.add(claim)
-                deployable_claims.add(claim)
+                identity = self._research_claim_identity(position)
+                if identity is not None:
+                    research_claims.add(identity[1])
+                deployable_claims.add(
+                    f"{position.get('config_hash', self.config_hash)}|"
+                    f"{position['market_id']}"
+                )
         for trade in self.data["completed_trades"]:
             if (
-                trade.get("strategy") in probability_strategies
+                isinstance(trade, dict)
+                and trade.get("strategy") in probability_strategies
                 and trade.get("market_id")
             ):
-                claim = self._claim_key(trade.get("market_id"))
-                research_claims.add(claim)
-                deployable_claims.add(claim)
+                identity = self._research_claim_identity(trade)
+                if identity is not None:
+                    research_claims.add(identity[1])
+                    deployable_claims.add(identity[1])
+                else:
+                    deployable_claims.add(
+                        self._claim_key(trade.get("market_id")))
 
         migrated_research = sorted(research_claims)
         migrated_deployable = sorted(deployable_claims)
@@ -237,6 +322,15 @@ class StrategyShadowLifecycle:
             changed = True
         if self.data["deployable_claimed_markets"] != migrated_deployable:
             self.data["deployable_claimed_markets"] = migrated_deployable
+            changed = True
+        migrated_incomplete = sorted(migration_incomplete)
+        if (
+            self.data["research_claim_migration_incomplete"]
+            != migrated_incomplete
+        ):
+            self.data["research_claim_migration_incomplete"] = (
+                migrated_incomplete
+            )
             changed = True
         if changed:
             self._mark_dirty()
@@ -255,9 +349,11 @@ class StrategyShadowLifecycle:
         return self._save(force=True)
 
     def _backfill_completed_trades(self):
-        if not self.logger.path.exists():
-            return False
-        known = {row.get("event_id"): row for row in self.data["completed_trades"]}
+        known = {
+            row.get("event_id"): row
+            for row in self.data["completed_trades"]
+            if isinstance(row, dict) and row.get("event_id")
+        }
         changed = False
         for log_path in [self.logger.path]:
             if not log_path.exists():
@@ -268,6 +364,8 @@ class StrategyShadowLifecycle:
                         row = json.loads(line)
                     except ValueError:
                         continue
+                    if not isinstance(row, dict):
+                        continue
                     event_id = row.get("event_id")
                     if row.get("event_type") != "shadow_complete" or not event_id:
                         continue
@@ -277,19 +375,37 @@ class StrategyShadowLifecycle:
                             trade["strategy_config_hash"] = row["strategy_config_hash"]
                             changed = True
                         continue
+                    try:
+                        completion_ts = float(row.get("ts", 0))
+                        pnl = float(row.get("realized_simulated_pnl", 0))
+                    except (TypeError, ValueError):
+                        continue
                     self.data["completed_trades"].append({
                         "event_id": event_id, "strategy": row.get("strategy"),
-                        "market_id": row.get("market_id"), "ts": float(row.get("ts", 0)),
-                        "pnl": float(row.get("realized_simulated_pnl", 0)),
+                        "market_id": row.get("market_id"),
+                        "ts": completion_ts, "pnl": pnl,
                         "strategy_config_hash": row.get("strategy_config_hash"),
+                        "config_hash": row.get("config_hash"),
                     })
                     known[event_id] = self.data["completed_trades"][-1]
                     changed = True
-        known_research = {
-            row.get("event_id")
-            for row in self.data["research_completed"]
-            if isinstance(row, dict) and row.get("event_id")
-        }
+        original_research = list(self.data["research_completed"])
+        valid_research = {}
+        unresolved_research = {}
+        original_order = []
+        for item in original_research:
+            event_id = (
+                item if isinstance(item, str)
+                else item.get("event_id") if isinstance(item, dict)
+                else None
+            )
+            if isinstance(event_id, str) and event_id:
+                original_order.append(event_id)
+            record = self._research_completion_record(item)
+            if record is not None:
+                valid_research.setdefault(record["event_id"], record)
+            elif isinstance(event_id, str) and event_id:
+                unresolved_research.setdefault(event_id, item)
         for log_path in history_paths(self.logger.path):
             if not log_path.exists():
                 continue
@@ -299,20 +415,30 @@ class StrategyShadowLifecycle:
                         row = json.loads(line)
                     except ValueError:
                         continue
-                    event_id = row.get("event_id")
-                    if (
-                        row.get("event_type") != "shadow_research_complete"
-                        or not event_id
-                        or event_id in known_research
-                    ):
+                    if not isinstance(row, dict):
                         continue
-                    self.data["research_completed"].append({
-                        "event_id": event_id,
-                        "strategy": row.get("strategy"),
-                        "market_id": row.get("market_id"),
-                    })
-                    known_research.add(event_id)
-                    changed = True
+                    record = self._research_completion_record(
+                        row, require_event_type=True,
+                    )
+                    if record is None:
+                        continue
+                    valid_research.setdefault(record["event_id"], record)
+        rebuilt_research = []
+        emitted_research = set()
+        for event_id in original_order:
+            if event_id in emitted_research:
+                continue
+            if event_id in valid_research:
+                rebuilt_research.append(valid_research[event_id])
+            else:
+                rebuilt_research.append(unresolved_research[event_id])
+            emitted_research.add(event_id)
+        for event_id, record in valid_research.items():
+            if event_id not in emitted_research:
+                rebuilt_research.append(record)
+        if rebuilt_research != original_research:
+            self.data["research_completed"] = rebuilt_research
+            changed = True
         missing_hashes = {event_id for event_id, trade in known.items()
                           if event_id and not trade.get("strategy_config_hash")}
         for log_path in history_paths(self.logger.path)[:-1]:
@@ -323,6 +449,8 @@ class StrategyShadowLifecycle:
                     try:
                         row = json.loads(line)
                     except ValueError:
+                        continue
+                    if not isinstance(row, dict):
                         continue
                     event_id = row.get("event_id")
                     if event_id not in missing_hashes or row.get("event_type") != "shadow_complete":
@@ -705,8 +833,21 @@ class StrategyShadowLifecycle:
             or market_id not in markets
         ):
             return False
+        if self.data["research_claim_migration_incomplete"]:
+            return False
         claim = self._claim_key(market_id)
-        if claim in self.data["research_claimed_markets"]:
+        if (
+            claim in self.data["research_claimed_markets"]
+            or any(
+                isinstance(existing, str)
+                and existing.endswith(f"|{market_id}")
+                for existing in self.data["research_claimed_markets"]
+            )
+            or any(
+                position.get("market_id") == market_id
+                for position in self.data["research_positions"].values()
+            )
+        ):
             return False
         market = markets[market_id]
         if not self._valid_probability_entry(row, market):
@@ -720,6 +861,8 @@ class StrategyShadowLifecycle:
             research_row, market,
             risk_mode="CALIBRATION_RESEARCH", deployable_pnl=False,
         )
+        position["research_lifecycle_config_hash"] = self.config_hash
+        position["research_claim_key"] = claim
         key = self._key(row)
         self.data["research_positions"][key] = position
         self.data["research_claimed_markets"] = sorted({
@@ -918,7 +1061,14 @@ class StrategyShadowLifecycle:
         if block_reason:
             return self._reject(row, block_reason)
         claim = self._claim_key(row["market_id"])
-        if claim in self.data["deployable_claimed_markets"]:
+        if (
+            claim in self.data["deployable_claimed_markets"]
+            or any(
+                isinstance(existing, str)
+                and existing.endswith(f'|{row["market_id"]}')
+                for existing in self.data["deployable_claimed_markets"]
+            )
+        ):
             return False
         key = self._key(row)
         self.data["portfolio_rejections"].pop(key, None)
@@ -1250,6 +1400,11 @@ class StrategyShadowLifecycle:
                         "event_id": complete_id,
                         "strategy": position["strategy"],
                         "market_id": position["market_id"],
+                        "research_lifecycle_config_hash": position.get(
+                            "research_lifecycle_config_hash"),
+                        "research_claim_key": position.get(
+                            "research_claim_key"),
+                        "config_hash": position.get("config_hash"),
                         "ts": complete["ts"],
                         "pnl": pnl,
                         "strategy_config_hash": position.get(
@@ -1262,6 +1417,10 @@ class StrategyShadowLifecycle:
                         "event_id": complete_id,
                         "strategy": position["strategy"],
                         "market_id": position["market_id"],
+                        "research_lifecycle_config_hash": position.get(
+                            "research_lifecycle_config_hash"),
+                        "research_claim_key": position.get(
+                            "research_claim_key"),
                     }]
                 )[-20000:]
             del self.data[collection_name][key]
@@ -1557,6 +1716,11 @@ class StrategyShadowLifecycle:
                         "event_id": complete_id,
                         "strategy": position["strategy"],
                         "market_id": position["market_id"],
+                        "research_lifecycle_config_hash": position.get(
+                            "research_lifecycle_config_hash"),
+                        "research_claim_key": position.get(
+                            "research_claim_key"),
+                        "config_hash": position.get("config_hash"),
                         "ts": now,
                         "pnl": pnl,
                         "strategy_config_hash": position.get(
@@ -1569,6 +1733,10 @@ class StrategyShadowLifecycle:
                         "event_id": complete_id,
                         "strategy": position["strategy"],
                         "market_id": position["market_id"],
+                        "research_lifecycle_config_hash": position.get(
+                            "research_lifecycle_config_hash"),
+                        "research_claim_key": position.get(
+                            "research_claim_key"),
                     }]
                 )[-20000:]
 
