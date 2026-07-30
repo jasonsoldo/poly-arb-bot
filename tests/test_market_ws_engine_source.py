@@ -351,6 +351,8 @@ def test_probability_profitability_gate_is_content_bound_and_audit_only():
         "PROBABILITY_VALIDATION_CALIBRATION_PATH",
         "load_profitability_artifacts",
         "canonical_payload_hash",
+        "profitability_gate::canonical_payload",
+        "profitability_gate::validate_artifacts",
         "strategy_base_config_hash",
         "profitability_gate::evaluate",
     ):
@@ -376,6 +378,11 @@ def test_probability_profitability_gate_is_content_bound_and_audit_only():
     gate_segment = evaluation[gate_start:gate_end]
     assert "decision.decision =" not in gate_segment
     assert "apply_sizing_rejection" not in gate_segment
+    matching = SOURCE.split(
+        "ProfitabilityGateResult evaluate_profitability_gate", 1
+    )[1].split("void load_calibration_map", 1)[0]
+    assert "profitability_gate::evaluate" in matching
+    assert "now_seconds()" in matching
 
 
 def test_disconnect_and_market_reload_invalidate_pending_arbitrage_attempts():

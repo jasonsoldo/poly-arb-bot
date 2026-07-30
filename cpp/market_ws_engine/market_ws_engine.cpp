@@ -263,43 +263,6 @@ std::string sha256_hex(const std::string& payload) {
     return output.str();
 }
 
-std::string compact_json_without_content_hash(const std::string& input) {
-    std::string compact;
-    compact.reserve(input.size());
-    bool in_string = false, escaped = false;
-    for (char character : input) {
-        if (in_string) {
-            compact += character;
-            if (escaped) escaped = false;
-            else if (character == '\\') escaped = true;
-            else if (character == '"') in_string = false;
-        } else if (character == '"') {
-            in_string = true;
-            compact += character;
-        } else if (!std::isspace(static_cast<unsigned char>(character))) {
-            compact += character;
-        }
-    }
-    const std::string marker = "\"content_hash\":";
-    const auto marker_at = compact.find(marker);
-    if (marker_at == std::string::npos) return "";
-    std::size_t value_end = marker_at + marker.size();
-    if (value_end >= compact.size() || compact[value_end] != '"') return "";
-    ++value_end;
-    bool value_escaped = false;
-    while (value_end < compact.size()) {
-        const char character = compact[value_end++];
-        if (value_escaped) value_escaped = false;
-        else if (character == '\\') value_escaped = true;
-        else if (character == '"') break;
-    }
-    std::size_t erase_start = marker_at, erase_end = value_end;
-    if (erase_start > 0 && compact[erase_start - 1] == ',') --erase_start;
-    else if (erase_end < compact.size() && compact[erase_end] == ',') ++erase_end;
-    compact.erase(erase_start, erase_end - erase_start);
-    return compact;
-}
-
 std::string canonical_payload_hash(
         const std::string& path, ptree* parsed = nullptr) {
     try {
@@ -309,8 +272,7 @@ std::string canonical_payload_hash(
             (std::istreambuf_iterator<char>(input)),
             std::istreambuf_iterator<char>());
         const std::string canonical =
-            compact_json_without_content_hash(encoded);
-        if (canonical.empty()) return "";
+            profitability_gate::canonical_payload(encoded);
         ptree root;
         std::istringstream stream(encoded);
         boost::property_tree::read_json(stream, root);
@@ -3257,6 +3219,7 @@ private:
 
     void load_profitability_artifacts() {
         profitability_gate_ready_ = false;
+        profitability_artifacts_ = profitability_gate::Artifacts{};
         profitability_gate_hash_.clear();
         profitability_gate_snapshot_hash_.clear();
         profitability_eligible_cohorts_.clear();
@@ -3268,20 +3231,43 @@ private:
         bool snapshot_ready = false;
         try {
             const double timestamp = now_seconds();
+            const auto read_artifact = [](const std::string& path) {
+                std::ifstream input(path, std::ios::binary);
+                if (!input)
+                    throw std::runtime_error(
+                        "profitability_artifact_unavailable");
+                return std::string(
+                    std::istreambuf_iterator<char>(input),
+                    std::istreambuf_iterator<char>());
+            };
+            const std::string snapshot_encoded =
+                read_artifact(validation_calibration_path());
+            const std::string gate_encoded =
+                read_artifact(profitability_gate_path());
+            profitability_gate::ArtifactExpectations expected;
+            expected.profitability_cohort_version =
+                profitability_cohort_version_;
+            for (const std::string strategy_name : {
+                     "late_window_directional_ev",
+                     "low_price_lottery_ev",
+                 }) {
+                expected.strategy_base_hashes[strategy_name] =
+                    strategy_base_hash_for(strategy_name);
+                expected.probability_model_ids[strategy_name] =
+                    probability_model_id_for(strategy_name);
+            }
+            profitability_artifacts_ =
+                profitability_gate::validate_artifacts(
+                    snapshot_encoded, gate_encoded, timestamp, expected);
+            if (!profitability_artifacts_.ready)
+                throw std::runtime_error(
+                    "profitability_artifact_schema_invalid");
+
             ptree snapshot;
-            calibration_snapshot_hash_ = canonical_payload_hash(
-                validation_calibration_path(), &snapshot);
-            if (calibration_snapshot_hash_.empty() ||
-                    snapshot.get<int>("version", 0) != 2)
-                throw std::runtime_error("calibration_snapshot_invalid");
-            const double snapshot_activated =
-                snapshot.get<double>("validation_activated_at", 0);
-            const double snapshot_expires =
-                snapshot.get<double>("validation_expires_at", 0);
-            if (!(snapshot_activated <= timestamp &&
-                    timestamp < snapshot_expires &&
-                    snapshot_expires == snapshot_activated + 72 * 3600))
-                throw std::runtime_error("calibration_snapshot_expired");
+            std::istringstream snapshot_stream(snapshot_encoded);
+            boost::property_tree::read_json(snapshot_stream, snapshot);
+            calibration_snapshot_hash_ =
+                profitability_artifacts_.calibration_snapshot_hash;
             std::map<std::string, CalibrationStrategyMap> next_calibration;
             const ptree empty;
             for (const std::string strategy_name : {
@@ -3290,18 +3276,9 @@ private:
                  }) {
                 const auto entry = snapshot.get_child_optional(
                     "strategies." + strategy_name);
-                if (!entry ||
-                        entry->get<std::string>(
-                            "cohort.strategy_config_hash", "").empty() ||
-                        entry->get<std::string>(
-                            "cohort.probability_model_id", "") !=
-                            probability_model_id_for(strategy_name))
+                if (!entry)
                     throw std::runtime_error(
                         "calibration_snapshot_schema_invalid");
-                if (entry->get<std::string>(
-                        "cohort.strategy_config_hash", "") !=
-                        strategy_base_hash_for(strategy_name))
-                    continue;
                 CalibrationStrategyMap parsed;
                 for (const auto& timeframe :
                         entry->get_child("timeframes", empty))
@@ -3317,120 +3294,23 @@ private:
             snapshot_ready = true;
 
             ptree gate;
-            profitability_gate_hash_ = canonical_payload_hash(
-                profitability_gate_path(), &gate);
-            if (profitability_gate_hash_.empty() ||
-                    gate.get<int>("version", 0) != 1)
-                throw std::runtime_error("profitability_gate_invalid");
-            const double gate_activated =
-                gate.get<double>("validation_activated_at", 0);
-            const double gate_expires =
-                gate.get<double>("validation_expires_at", 0);
-            profitability_gate_snapshot_hash_ = gate.get<std::string>(
-                "calibration_snapshot_hash", "");
-            if (!(gate_activated <= timestamp && timestamp < gate_expires &&
-                    gate_expires <= gate_activated + 72 * 3600) ||
-                    profitability_gate_snapshot_hash_ !=
-                        calibration_snapshot_hash_ ||
-                    gate.get<std::string>(
-                        "profitability_cohort_version", "") !=
-                        profitability_cohort_version_)
-                throw std::runtime_error("profitability_gate_identity_mismatch");
-            const auto& thresholds = gate.get_child("thresholds");
-            if (thresholds.get<int>("minimum_independent_markets", 0) != 50 ||
-                    thresholds.get<double>(
-                        "minimum_mean_net_return_exclusive", -1) != 0 ||
-                    thresholds.get<double>(
-                        "minimum_lower_bound_95_exclusive", -1) != 0 ||
-                    thresholds.get<double>(
-                        "maximum_positive_market_share", -1) != 0.25)
-                throw std::runtime_error("profitability_gate_threshold_mismatch");
-            for (const auto& item :
-                    gate.get_child("target_base_config_hashes", empty))
-                profitability_gate_target_hashes_[item.first] =
-                    item.second.get_value<std::string>();
-            for (const auto& item :
-                    gate.get_child("probability_model_ids", empty))
-                profitability_gate_model_ids_[item.first] =
-                    item.second.get_value<std::string>();
-            if (profitability_gate_model_ids_.size() !=
-                    profitability_gate_target_hashes_.size())
-                throw std::runtime_error(
-                    "profitability_gate_model_schema_invalid");
-            for (const auto& target : profitability_gate_target_hashes_) {
-                if ((target.first != "late_window_directional_ev" &&
-                        target.first != "low_price_lottery_ev") ||
-                        target.second.empty() ||
-                        !profitability_gate_model_ids_.count(target.first) ||
-                        profitability_gate_model_ids_.at(target.first) !=
-                            probability_model_id_for(target.first))
-                    throw std::runtime_error(
-                        "profitability_gate_target_identity_mismatch");
-            }
-            for (const auto& item :
-                    gate.get_child("source_discovery_config_hashes", empty)) {
-                const auto target =
-                    profitability_gate_target_hashes_.find(item.first);
-                if (target == profitability_gate_target_hashes_.end() ||
-                        target->second != item.second.get_value<std::string>())
-                    throw std::runtime_error(
-                        "profitability_gate_discovery_hash_mismatch");
-            }
-            for (const auto& item :
-                    gate.get_child("eligible_cohorts", empty)) {
-                const auto& row = item.second;
-                profitability_gate::Candidate candidate{
-                    row.get<std::string>("dimensions.strategy", ""),
-                    row.get<std::string>("dimensions.asset", ""),
-                    row.get<std::string>("dimensions.timeframe", ""),
-                    row.get<std::string>("dimensions.outcome", ""),
-                    0, 0, 0,
-                };
-                if (candidate.strategy != "late_window_directional_ev" &&
-                        candidate.strategy != "low_price_lottery_ev")
-                    throw std::runtime_error(
-                        "profitability_gate_strategy_invalid");
-                const std::string probability =
-                    row.get<std::string>("dimensions.probability", "");
-                const std::string fill =
-                    row.get<std::string>("dimensions.fill", "");
-                const std::string seconds =
-                    row.get<std::string>("dimensions.seconds", "");
-                const std::string dimensions_key =
-                    "strategy=" + candidate.strategy +
-                    "|asset=" + candidate.asset +
-                    "|timeframe=" + candidate.timeframe +
-                    "|outcome=" + candidate.outcome +
-                    "|probability=" + probability +
-                    "|fill=" + fill +
-                    "|seconds=" + seconds;
-                if (dimensions_key != item.first ||
-                        row.get<std::string>("decision", "") != "ALLOW" ||
-                        row.get<std::string>("reason", "") !=
-                            "profitability_cohort_eligible" ||
-                        row.get<int>("independent_markets", 0) < 50 ||
-                        row.get<double>("mean_net_return", 0) <= 0 ||
-                        row.get<double>("lower_bound_95", 0) <= 0 ||
-                        row.get<double>(
-                            "largest_positive_market_share", 1) > 0.25 ||
-                        row.get<std::string>(
-                            "strategy_base_config_hash", "") !=
-                            profitability_gate_target_hashes_[
-                                candidate.strategy] ||
-                        row.get<std::string>(
-                            "source_discovery_config_hash", "") !=
-                            profitability_gate_target_hashes_[
-                                candidate.strategy] ||
-                        row.get<std::string>(
-                            "probability_model_id", "") !=
-                            probability_model_id_for(candidate.strategy))
-                    throw std::runtime_error(
-                        "profitability_gate_cohort_invalid");
-                profitability_eligible_cohorts_.insert(item.first);
-            }
+            std::istringstream gate_stream(gate_encoded);
+            boost::property_tree::read_json(gate_stream, gate);
+            profitability_gate_hash_ =
+                profitability_artifacts_.gate_hash;
+            profitability_gate_snapshot_hash_ =
+                profitability_artifacts_.calibration_snapshot_hash;
+            profitability_eligible_cohorts_ =
+                profitability_artifacts_.eligible_cohorts;
+            profitability_gate_target_hashes_ =
+                profitability_artifacts_.target_base_hashes;
+            profitability_gate_model_ids_ =
+                profitability_artifacts_.probability_model_ids;
             profitability_gate_ready_ = true;
         } catch (const std::exception& error) {
             profitability_gate_ready_ = false;
+            profitability_artifacts_ =
+                profitability_gate::Artifacts{};
             profitability_gate_hash_.clear();
             profitability_gate_snapshot_hash_.clear();
             profitability_eligible_cohorts_.clear();
@@ -3471,8 +3351,11 @@ private:
             profitability_gate_model_ids_.at(strategy_name) ==
                 probability_model_id_for(strategy_name) &&
             profitability_gate_snapshot_hash_ == calibration_snapshot_hash_;
+        profitability_gate::Artifacts effective =
+            profitability_artifacts_;
+        effective.ready = effective.ready && identities_match;
         const auto evaluated = profitability_gate::evaluate(
-            candidate, identities_match, profitability_eligible_cohorts_);
+            candidate, effective, now_seconds());
         result.allowed = evaluated.decision == "ALLOW";
         result.reason = evaluated.reason;
         result.cohort_key = evaluated.cohort_key;
@@ -3830,6 +3713,7 @@ private:
     std::map<std::string, CalibrationStrategyMap> calibration_map_;
     double calibration_map_generated_at_ = 0;
     bool profitability_gate_ready_ = false;
+    profitability_gate::Artifacts profitability_artifacts_;
     std::string profitability_gate_hash_;
     std::string profitability_gate_snapshot_hash_;
     std::string calibration_snapshot_hash_;
