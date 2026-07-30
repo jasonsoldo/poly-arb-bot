@@ -9,6 +9,8 @@ from pathlib import Path
 from .ev_shadow import canonical_strategy_config_hash
 from .jsonl_history import history_paths, open_history
 from .logger import JsonlLogger
+from .probability_calibration_map import PROBABILITY_MODEL_IDS
+from .profitability_analysis import cohort_key
 
 
 SETTLEMENT_MAX_DELAY_MS = 10_000
@@ -202,6 +204,14 @@ class StrategyShadowLifecycle:
                 and position.get("market_id")
             ):
                 research_claims.add(self._claim_key(position.get("market_id")))
+        for completion in self.data["research_completed"]:
+            if (
+                isinstance(completion, dict)
+                and completion.get("strategy") in probability_strategies
+                and completion.get("market_id")
+            ):
+                research_claims.add(
+                    self._claim_key(completion.get("market_id")))
         for position in self.data["positions"].values():
             if (
                 position.get("strategy") in probability_strategies
@@ -274,6 +284,34 @@ class StrategyShadowLifecycle:
                         "strategy_config_hash": row.get("strategy_config_hash"),
                     })
                     known[event_id] = self.data["completed_trades"][-1]
+                    changed = True
+        known_research = {
+            row.get("event_id")
+            for row in self.data["research_completed"]
+            if isinstance(row, dict) and row.get("event_id")
+        }
+        for log_path in history_paths(self.logger.path):
+            if not log_path.exists():
+                continue
+            with open_history(log_path) as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    event_id = row.get("event_id")
+                    if (
+                        row.get("event_type") != "shadow_research_complete"
+                        or not event_id
+                        or event_id in known_research
+                    ):
+                        continue
+                    self.data["research_completed"].append({
+                        "event_id": event_id,
+                        "strategy": row.get("strategy"),
+                        "market_id": row.get("market_id"),
+                    })
+                    known_research.add(event_id)
                     changed = True
         missing_hashes = {event_id for event_id, trade in known.items()
                           if event_id and not trade.get("strategy_config_hash")}
@@ -411,58 +449,140 @@ class StrategyShadowLifecycle:
         return ":".join((row["strategy"], row["market_id"], outcome))
 
     @staticmethod
-    def _valid_probability_entry(row, market):
-        required = (
-            "event_id", "strategy", "market_id", "outcome", "ts",
-            "dynamic_target_size", "dynamic_cash_cost",
-            "dynamic_risk_adjusted_cost", "dynamic_vwap", "dynamic_fee",
-            "dynamic_buffer", "estimated_probability",
-            "calibration_input_probability", "asset", "condition_id",
-            "config_hash", "probability_model_id", "price_to_beat",
+    def _valid_hash(value):
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
         )
-        if (
-            row.get("config_version") != "shadow-buy-rules-v10"
-            or row.get("sizing_mode") != "real_market_dynamic_v1"
-            or any(row.get(field) is None for field in required)
-            or row.get("settlement_source_verified") is not True
-            or row.get("settlement_source") not in {"binance", "chainlink"}
-            or market.get("settlement_source") != row.get("settlement_source")
-            or market.get("close_ts") is None
-            or any(
-                type(row.get(field)) is not int or row.get(field) != 0
-                for field in (
-                    "real_order_submissions", "real_orders", "real_fills",
-                )
+
+    def _probability_entry_reject_reason(self, row, market):
+        if row.get("config_version") != "shadow-buy-rules-v10":
+            return "unsupported_probability_config_version"
+        if any(
+            type(row.get(field)) is not int or row.get(field) != 0
+            for field in (
+                "real_order_submissions", "real_orders", "real_fills",
             )
         ):
-            return False
+            return "real_order_invariant"
+        if (
+            row.get("settlement_source_verified") is not True
+            or row.get("settlement_source") not in {"binance", "chainlink"}
+        ):
+            return "settlement_provenance_unverified"
+        if market.get("settlement_source") != row.get("settlement_source"):
+            return "settlement_provenance_mismatch"
+
+        strategy = row.get("strategy")
+        identity_fields = (
+            "event_id", "market_id", "outcome", "asset", "timeframe",
+            "condition_id", "config_hash", "probability_model_id",
+            "price_to_beat",
+        )
+        if (
+            strategy not in PROBABILITY_MODEL_IDS
+            or any(row.get(field) is None for field in identity_fields)
+            or row.get("outcome") not in {"Up", "Down"}
+            or not self._valid_hash(row.get("config_hash"))
+            or row.get("probability_model_id")
+            != PROBABILITY_MODEL_IDS.get(strategy)
+        ):
+            return "probability_identity_mismatch"
+
+        try:
+            entry_ts = float(row["ts"])
+            close_ts = float(market["close_ts"])
+        except (KeyError, TypeError, ValueError):
+            return "invalid_probability_entry_timestamp"
+        if (
+            not math.isfinite(entry_ts)
+            or not math.isfinite(close_ts)
+            or entry_ts >= close_ts
+        ):
+            return "invalid_probability_entry_timestamp"
+
+        required_cash = (
+            "dynamic_target_size", "market_minimum_size",
+            "dynamic_cash_cost", "dynamic_risk_adjusted_cost",
+            "dynamic_vwap", "dynamic_fee", "dynamic_buffer",
+            "dynamic_maximum_loss", "capital_budget_usd",
+            "size_binding_constraint", "estimated_probability",
+            "calibration_input_probability",
+        )
+        if (
+            row.get("sizing_mode") != "real_market_dynamic_v1"
+            or any(row.get(field) is None for field in required_cash)
+        ):
+            return "invalid_dynamic_cash_evidence"
         try:
             size = float(row["dynamic_target_size"])
+            minimum_size = float(row["market_minimum_size"])
             cash_cost = float(row["dynamic_cash_cost"])
             risk_cost = float(row["dynamic_risk_adjusted_cost"])
             vwap = float(row["dynamic_vwap"])
             fee = float(row["dynamic_fee"])
             buffer = float(row["dynamic_buffer"])
+            maximum_loss = float(row["dynamic_maximum_loss"])
+            capital_budget = float(row["capital_budget_usd"])
             probability = float(row["estimated_probability"])
             calibration_input = float(row["calibration_input_probability"])
-            entry_ts = float(row["ts"])
-            close_ts = float(market["close_ts"])
         except (TypeError, ValueError):
-            return False
+            return "invalid_dynamic_cash_evidence"
         values = (
-            size, cash_cost, risk_cost, vwap, fee, buffer, probability,
-            calibration_input, entry_ts, close_ts,
+            size, minimum_size, cash_cost, risk_cost, vwap, fee, buffer,
+            maximum_loss, capital_budget, probability, calibration_input,
         )
-        return (
+        if not (
             all(math.isfinite(value) for value in values)
-            and size > 0 and cash_cost > 0 and risk_cost > 0 and vwap > 0
+            and size > 0 and minimum_size > 0
+            and size + 1e-9 >= minimum_size
+            and cash_cost > 0 and risk_cost > 0 and vwap > 0
             and fee >= 0 and buffer >= 0
+            and maximum_loss >= 0 and capital_budget >= 0
             and 0 <= probability <= 1 and 0 <= calibration_input <= 1
             and risk_cost + 1e-9 >= cash_cost
             and math.isclose(
                 risk_cost, cash_cost + buffer, rel_tol=0, abs_tol=1e-9,
             )
-        )
+        ):
+            return "invalid_dynamic_cash_evidence"
+        return None
+
+    def _deployable_classification_reject_reason(self, row):
+        if row.get("profitability_gate_decision") != "ALLOW":
+            return (
+                row.get("profitability_gate_reason")
+                or "profitability_gate_unavailable"
+            )
+        if row.get("deployable_candidate") is not True:
+            return "deployable_candidate_not_true"
+        if (
+            row.get("profitability_gate_reason")
+            != "profitability_cohort_eligible"
+            or not isinstance(row.get("profitability_cohort_key"), str)
+            or not row["profitability_cohort_key"]
+            or not self._valid_hash(row.get("profitability_gate_hash"))
+            or not self._valid_hash(row.get("calibration_snapshot_hash"))
+        ):
+            return "profitability_gate_classification_invalid"
+        try:
+            expected_cohort = cohort_key(row)
+        except (KeyError, TypeError, ValueError):
+            return "profitability_gate_classification_invalid"
+        if row["profitability_cohort_key"] != expected_cohort:
+            return "profitability_gate_classification_invalid"
+        strategy = row.get("strategy")
+        if (
+            row.get("config_hash") != self.strategy_config_hashes.get(strategy)
+            or row.get("probability_model_id")
+            != PROBABILITY_MODEL_IDS.get(strategy)
+        ):
+            return "probability_identity_mismatch"
+        return None
+
+    def _valid_probability_entry(self, row, market):
+        return self._probability_entry_reject_reason(row, market) is None
 
     def _probability_position_from_row(
             self, row, market, *, risk_mode, deployable_pnl):
@@ -783,14 +903,14 @@ class StrategyShadowLifecycle:
     def _consume_probability_candidate(self, row, market):
         if self.calibration_mode:
             return self._reject(row, "calibration_research_only")
-        if row.get("profitability_gate_decision") != "ALLOW":
-            return self._reject(
-                row,
-                row.get("profitability_gate_reason")
-                or "profitability_gate_unavailable",
-            )
-        if not self._valid_probability_entry(row, market):
-            return self._reject(row, "settlement_provenance_unverified")
+        entry_reason = self._probability_entry_reject_reason(row, market)
+        if entry_reason:
+            return self._reject(row, entry_reason)
+        classification_reason = (
+            self._deployable_classification_reject_reason(row)
+        )
+        if classification_reason:
+            return self._reject(row, classification_reason)
         risk_adjusted_entry_cost = float(row["dynamic_risk_adjusted_cost"])
         block_reason = self._portfolio_block_reason(
             row, market, risk_adjusted_entry_cost,
@@ -829,8 +949,6 @@ class StrategyShadowLifecycle:
         probability_strategy = strategy in {
             "late_window_directional_ev", "low_price_lottery_ev",
         }
-        if not hedged and probability_strategy and row.get("config_version") != "shadow-buy-rules-v10":
-            return False
         if strategy == "paired_lock" and row.get("config_version") != "paired-lock-shadow-v3":
             return False
         accepted = row.get("decision") == "ACCEPT" or (
@@ -1140,7 +1258,11 @@ class StrategyShadowLifecycle:
                 )[-20000:]
             else:
                 self.data["research_completed"] = (
-                    self.data["research_completed"] + [complete_id]
+                    self.data["research_completed"] + [{
+                        "event_id": complete_id,
+                        "strategy": position["strategy"],
+                        "market_id": position["market_id"],
+                    }]
                 )[-20000:]
             del self.data[collection_name][key]
             completed_any = True
@@ -1443,7 +1565,11 @@ class StrategyShadowLifecycle:
                 )[-20000:]
             else:
                 self.data["research_completed"] = (
-                    self.data["research_completed"] + [complete_id]
+                    self.data["research_completed"] + [{
+                        "event_id": complete_id,
+                        "strategy": position["strategy"],
+                        "market_id": position["market_id"],
+                    }]
                 )[-20000:]
 
             del positions[key]
