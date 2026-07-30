@@ -16,6 +16,8 @@ from .profitability_analysis import cohort_key
 SETTLEMENT_MAX_DELAY_MS = 10_000
 DEFAULT_SETTLEMENT_ORPHAN_AFTER_SECONDS = 900
 DEFAULT_CALIBRATION_HORIZONS = {"5m": 90, "15m": 180, "1h": 300, "4h": 600}
+RESEARCH_COMPLETION_LIMIT = 20_000
+RESEARCH_OPAQUE_EVIDENCE_LIMIT = 100
 
 
 @dataclass(frozen=True)
@@ -515,6 +517,9 @@ class StrategyShadowLifecycle:
                     rebuilt_research.append(event_id)
                     unresolved_event_ids.add(event_id)
                 emitted_research.add(event_id)
+        rebuilt_research = self._bounded_research_completions(
+            rebuilt_research
+        )
         if rebuilt_research != original_research:
             self.data["research_completed"] = rebuilt_research
             changed = True
@@ -557,15 +562,22 @@ class StrategyShadowLifecycle:
             self._mark_dirty()
         return changed
 
-    def _append_research_completion(self, completion):
+    def _bounded_research_completions(self, completions):
         unresolved = []
         valid = []
-        for item in self.data["research_completed"] + [completion]:
+        for item in completions:
             if self._research_completion_record(item) is None:
                 unresolved.append(item)
             else:
                 valid.append(item)
-        self.data["research_completed"] = unresolved + valid[-20000:]
+        unresolved = unresolved[-RESEARCH_OPAQUE_EVIDENCE_LIMIT:]
+        valid_limit = RESEARCH_COMPLETION_LIMIT - len(unresolved)
+        return unresolved + valid[-valid_limit:]
+
+    def _append_research_completion(self, completion):
+        self.data["research_completed"] = self._bounded_research_completions(
+            self.data["research_completed"] + [completion]
+        )
 
     def _loss_block_reason(self, strategy, daily_limit, consecutive_limit, prefix):
         today = int(time.time() // 86400)

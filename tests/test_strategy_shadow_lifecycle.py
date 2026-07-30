@@ -481,15 +481,22 @@ def test_malformed_research_completion_without_event_id_is_retained_and_guarded(
     ) is False
 
 
-def test_opaque_research_guard_survives_completion_history_truncation(
+def test_research_completion_state_is_bounded_and_opaque_guard_survives_restart(
         tmp_path):
     state = tmp_path / "state.json"
     log = tmp_path / "events.jsonl"
-    malformed = {"strategy": "late_window_directional_ev"}
+    malformed = [
+        {"strategy": "late_window_directional_ev", "opaque_index": index}
+        for index in range(250)
+    ]
+    valid = [
+        _research_completion(f"valid-{index}:complete", f"m{index}", "f" * 64)
+        for index in range(20000)
+    ]
     state.write_text(json.dumps({
         "positions": {},
         "research_positions": {},
-        "research_completed": [malformed],
+        "research_completed": malformed + valid,
         "research_claimed_markets": [],
         "deployable_claimed_markets": [],
         "completed": [],
@@ -498,29 +505,44 @@ def test_opaque_research_guard_survives_completion_history_truncation(
         "real_fills": 0,
     }), encoding="utf-8")
     lifecycle = StrategyShadowLifecycle(state, log)
-    marker = lifecycle.data["research_claim_migration_incomplete"][0]
-    valid = _research_completion("retained-valid:complete", "m1", "f" * 64)
-    lifecycle.data["research_completed"] = [malformed] + [valid] * 20000
-    lifecycle._append_research_completion(
-        _research_completion("new-valid:complete", "m2", "e" * 64)
-    )
-    assert malformed in lifecycle.data["research_completed"]
-    assert len(lifecycle.data["research_completed"]) == 20001
-    assert marker in lifecycle.data["research_claim_migration_incomplete"]
 
-    lifecycle.data["research_completed"] = (
-        lifecycle.data["research_completed"][-20000:]
-    )
+    assert len(lifecycle.data["research_completed"]) == 20000
+    opaque_raw = [
+        item for item in lifecycle.data["research_completed"]
+        if lifecycle._research_completion_record(item) is None
+    ]
+    assert 0 < len(opaque_raw) <= 100
+    opaque_markers = set(lifecycle.data["research_claim_migration_incomplete"])
+    assert len(opaque_markers) == 250
+    assert all(marker.startswith("opaque:") for marker in opaque_markers)
+
+    for index in range(25):
+        lifecycle._append_research_completion(
+            _research_completion(
+                f"new-valid-{index}:complete", f"new-m{index}", "e" * 64,
+            )
+        )
+        assert len(lifecycle.data["research_completed"]) == 20000
+    valid_records = [
+        item for item in lifecycle.data["research_completed"]
+        if lifecycle._research_completion_record(item) is not None
+    ]
+    assert len(valid_records) >= 19000
+    assert valid_records[-1]["event_id"] == "new-valid-24:complete"
+
     lifecycle._mark_dirty()
     lifecycle.flush()
 
     restarted = StrategyShadowLifecycle(state, log)
 
-    assert malformed not in restarted.data["research_completed"]
-    assert restarted.data["research_claim_migration_incomplete"] == [marker]
+    assert len(restarted.data["research_completed"]) == 20000
+    assert set(restarted.data["research_claim_migration_incomplete"]) == (
+        opaque_markers
+    )
     assert restarted.capture_research_candidate(
-        accepted("blocked-after-truncation"), {"m2": dict(market(), market_id="m2")},
+        accepted("blocked-after-truncation"), {"m1": market()},
     ) is False
+    assert restarted.data["research_positions"] == {}
 
 
 def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up"):
