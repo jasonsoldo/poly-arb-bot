@@ -33,6 +33,10 @@ DEFAULT_PRIOR_WEIGHT = 30.0
 DEFAULT_PUBLISH_SECONDS = 30.0
 MAP_VERSION = 2
 VALIDATION_SECONDS = 72 * 3600
+_BUCKET_NAMES = frozenset(
+    f"{index / 10:.1f}-{(index + 1) / 10:.1f}"
+    for index in range(10)
+)
 
 
 def bucket_index(probability):
@@ -177,6 +181,128 @@ def publish_calibration_map(execution_path, output_path, min_bucket_samples=None
     return payload
 
 
+def _finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _bucket_map_error(buckets, minimum_samples):
+    if not isinstance(buckets, dict) or not buckets:
+        return "calibration map bucket schema is invalid"
+    usable = False
+    for name, stats in buckets.items():
+        if (
+            name not in _BUCKET_NAMES
+            or not isinstance(stats, dict)
+            or set(stats) != {
+                "samples",
+                "expected_up_rate",
+                "realized_up_rate",
+            }
+        ):
+            return "calibration map bucket schema is invalid"
+        samples = stats.get("samples")
+        expected = _finite_number(stats.get("expected_up_rate"))
+        realized = _finite_number(stats.get("realized_up_rate"))
+        if (
+            type(samples) is not int
+            or samples <= 0
+            or expected is None
+            or realized is None
+            or not 0 <= expected <= 1
+            or not 0 <= realized <= 1
+        ):
+            return "calibration map bucket values are invalid"
+        usable = usable or samples >= minimum_samples
+    return None if usable else "calibration map bucket samples are insufficient"
+
+
+def _calibration_payload_error(payload, reference_time=None):
+    if not isinstance(payload, dict) or payload.get("version") != MAP_VERSION:
+        return "calibration map version or schema is invalid"
+    generated_at = _finite_number(payload.get("generated_at"))
+    if (
+        generated_at is None
+        or generated_at <= 0
+        or (
+            reference_time is not None
+            and generated_at > float(reference_time)
+        )
+    ):
+        return "calibration map generated_at is invalid"
+    config = payload.get("config")
+    if not isinstance(config, dict) or set(config) != {
+        "min_bucket_samples",
+        "prior_weight",
+    }:
+        return "calibration map config is invalid"
+    minimum_samples = config.get("min_bucket_samples")
+    prior_weight = _finite_number(config.get("prior_weight"))
+    if (
+        type(minimum_samples) is not int
+        or minimum_samples <= 0
+        or prior_weight is None
+        or prior_weight < 0
+    ):
+        return "calibration map config is invalid"
+    excluded = payload.get("excluded_other_cohort")
+    if (
+        not isinstance(excluded, dict)
+        or set(excluded) != set(STRATEGIES)
+        or any(
+            type(excluded[strategy]) is not int
+            or excluded[strategy] < 0
+            for strategy in STRATEGIES
+        )
+    ):
+        return "calibration map exclusion counts are invalid"
+    strategies = payload.get("strategies")
+    if not isinstance(strategies, dict) or set(strategies) != set(STRATEGIES):
+        return "calibration map strategy schema is invalid"
+    for strategy in STRATEGIES:
+        entry = strategies[strategy]
+        if not isinstance(entry, dict) or set(entry) != {
+            "cohort",
+            "timeframes",
+            "overall",
+        }:
+            return "calibration map strategy schema is invalid"
+        cohort = entry["cohort"]
+        if (
+            not isinstance(cohort, dict)
+            or set(cohort) != {
+                "strategy_config_hash",
+                "probability_model_id",
+            }
+            or not isinstance(cohort.get("strategy_config_hash"), str)
+            or not cohort["strategy_config_hash"]
+            or cohort.get("probability_model_id")
+            != PROBABILITY_MODEL_IDS[strategy]
+        ):
+            return "calibration map cohort identity is invalid"
+        timeframes = entry["timeframes"]
+        if (
+            not isinstance(timeframes, dict)
+            or not timeframes
+            or any(
+                not isinstance(timeframe, str)
+                or not timeframe
+                for timeframe in timeframes
+            )
+        ):
+            return "calibration map strategy schema is invalid"
+        for buckets in timeframes.values():
+            error = _bucket_map_error(buckets, minimum_samples)
+            if error and error != "calibration map bucket samples are insufficient":
+                return error
+        overall_error = _bucket_map_error(entry["overall"], minimum_samples)
+        if overall_error:
+            return overall_error
+    return None
+
+
 def _validated_rolling_payload(source):
     try:
         payload = json.loads(Path(source).read_text(encoding="utf-8"))
@@ -184,13 +310,6 @@ def _validated_rolling_payload(source):
         raise ValueError("calibration map is missing") from exc
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("calibration map is corrupt") from exc
-    if (
-        not isinstance(payload, dict)
-        or payload.get("version") != MAP_VERSION
-        or not isinstance(payload.get("config"), dict)
-        or not isinstance(payload.get("strategies"), dict)
-    ):
-        raise ValueError("calibration map version or schema is invalid")
     if any(
         field in payload
         for field in (
@@ -200,6 +319,9 @@ def _validated_rolling_payload(source):
         )
     ):
         raise ValueError("rolling calibration map contains frozen fields")
+    error = _calibration_payload_error(payload)
+    if error:
+        raise ValueError(error)
     return payload
 
 
@@ -213,6 +335,9 @@ def _build_frozen_calibration_snapshot(source, now):
     ):
         raise ValueError("calibration snapshot activation is invalid")
     payload = _validated_rolling_payload(source)
+    generated_at = float(payload["generated_at"])
+    if generated_at > float(now):
+        raise ValueError("calibration map generated_at is invalid")
     snapshot = json.loads(json.dumps(payload))
     snapshot["validation_activated_at"] = float(now)
     snapshot["validation_expires_at"] = float(now) + VALIDATION_SECONDS
@@ -233,38 +358,24 @@ def _publish_frozen_calibration_snapshot(payload, destination):
 
 def freeze_calibration_snapshot(source: Path, destination: Path, now: float) -> dict:
     """Copy a rolling version-2 map into an immutable 72-hour snapshot."""
+    if Path(source).resolve() == Path(destination).resolve():
+        raise ValueError("calibration source and destination must be distinct")
     snapshot = _build_frozen_calibration_snapshot(source, now)
     _publish_frozen_calibration_snapshot(snapshot, destination)
     return snapshot
 
 
-def load_frozen_calibration_snapshot(
-    path: Path,
-    now: float,
-    expected_content_hash=None,
-):
-    """Load a frozen snapshot, returning ``(payload, reason)`` fail closed."""
+def _frozen_calibration_reason(payload, now, expected_content_hash=None):
     from .profitability_gate import canonical_payload_hash
 
-    try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None, "calibration_snapshot_unavailable"
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None, "calibration_snapshot_invalid"
     if (
         isinstance(now, bool)
         or not isinstance(now, (int, float))
         or not math.isfinite(float(now))
     ):
-        return None, "calibration_snapshot_invalid"
-    if (
-        not isinstance(payload, dict)
-        or payload.get("version") != MAP_VERSION
-        or not isinstance(payload.get("config"), dict)
-        or not isinstance(payload.get("strategies"), dict)
-    ):
-        return None, "calibration_snapshot_invalid"
+        return "calibration_snapshot_invalid"
+    if not isinstance(payload, dict) or payload.get("version") != MAP_VERSION:
+        return "calibration_snapshot_invalid"
     activated = payload.get("validation_activated_at")
     expires = payload.get("validation_expires_at")
     if (
@@ -277,7 +388,7 @@ def load_frozen_calibration_snapshot(
         or float(expires) != float(activated) + VALIDATION_SECONDS
         or float(now) < float(activated)
     ):
-        return None, "calibration_snapshot_invalid"
+        return "calibration_snapshot_invalid"
     content_hash = payload.get("content_hash")
     if (
         not isinstance(content_hash, str)
@@ -287,9 +398,33 @@ def load_frozen_calibration_snapshot(
             and content_hash != expected_content_hash
         )
     ):
-        return None, "calibration_snapshot_hash_mismatch"
+        return "calibration_snapshot_hash_mismatch"
+    if _calibration_payload_error(payload, activated):
+        return "calibration_snapshot_invalid"
     if float(now) >= float(expires):
-        return None, "calibration_snapshot_expired"
+        return "calibration_snapshot_expired"
+    return None
+
+
+def load_frozen_calibration_snapshot(
+    path: Path,
+    now: float,
+    expected_content_hash=None,
+):
+    """Load a frozen snapshot, returning ``(payload, reason)`` fail closed."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "calibration_snapshot_unavailable"
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, "calibration_snapshot_invalid"
+    reason = _frozen_calibration_reason(
+        payload,
+        now,
+        expected_content_hash,
+    )
+    if reason:
+        return None, reason
     return payload, None
 
 

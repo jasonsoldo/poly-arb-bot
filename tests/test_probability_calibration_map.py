@@ -1,4 +1,7 @@
 import json
+import math
+
+import pytest
 
 from poly_arb_bot.probability_calibration_map import (
     bucket_index, bucket_name, build_calibration_map, calibrate_probability,
@@ -39,6 +42,55 @@ def _payload(bucket_stats, generated_at=1000.0, timeframe="5m"):
                 "timeframes": {timeframe: buckets} if buckets else {},
                 "overall": overall,
             },
+        },
+    }
+
+
+def _valid_freeze_payload():
+    def entry(strategy, bucket, expected):
+        return {
+            "cohort": {
+                "strategy_config_hash": f"{strategy}-base",
+                "probability_model_id": {
+                    "late_window_directional_ev":
+                        "directional_logistic_projected_v2",
+                    "low_price_lottery_ev":
+                        "lottery_logistic_projected_blend_v2",
+                }[strategy],
+            },
+            "timeframes": {
+                "5m": {
+                    bucket: {
+                        "samples": 60,
+                        "expected_up_rate": expected,
+                        "realized_up_rate": expected,
+                    },
+                },
+            },
+            "overall": {
+                bucket: {
+                    "samples": 60,
+                    "expected_up_rate": expected,
+                    "realized_up_rate": expected,
+                },
+            },
+        }
+
+    return {
+        "version": 2,
+        "generated_at": 900.0,
+        "config": {"min_bucket_samples": 30, "prior_weight": 30.0},
+        "excluded_other_cohort": {
+            "late_window_directional_ev": 0,
+            "low_price_lottery_ev": 0,
+        },
+        "strategies": {
+            "late_window_directional_ev": entry(
+                "late_window_directional_ev", "0.7-0.8", 0.75,
+            ),
+            "low_price_lottery_ev": entry(
+                "low_price_lottery_ev", "0.0-0.1", 0.05,
+            ),
         },
     }
 
@@ -269,3 +321,84 @@ def test_load_frozen_snapshot_rejects_missing_file(tmp_path):
     assert load_frozen_calibration_snapshot(
         tmp_path / "missing.json", now=1000.0
     ) == (None, "calibration_snapshot_unavailable")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "empty_config",
+        "missing_generated_at",
+        "nonfinite_generated_at",
+        "string_generated_at",
+        "malformed_strategy",
+        "malformed_bucket",
+        "string_rate",
+        "missing_cohort_identity",
+        "unusable_bucket",
+    ),
+)
+def test_freeze_rejects_deeply_invalid_version_two_payloads_without_replace(
+    tmp_path,
+    mutation,
+):
+    payload = _valid_freeze_payload()
+    directional = payload["strategies"]["late_window_directional_ev"]
+    if mutation == "empty_config":
+        payload["config"] = {}
+    elif mutation == "missing_generated_at":
+        del payload["generated_at"]
+    elif mutation == "nonfinite_generated_at":
+        payload["generated_at"] = math.nan
+    elif mutation == "string_generated_at":
+        payload["generated_at"] = "900"
+    elif mutation == "malformed_strategy":
+        directional["timeframes"] = []
+    elif mutation == "malformed_bucket":
+        directional["overall"]["0.7-0.8"]["realized_up_rate"] = 2.0
+    elif mutation == "string_rate":
+        directional["overall"]["0.7-0.8"]["realized_up_rate"] = "0.5"
+    elif mutation == "missing_cohort_identity":
+        del directional["cohort"]["probability_model_id"]
+    else:
+        directional["timeframes"]["5m"]["0.7-0.8"]["samples"] = 1
+        directional["overall"]["0.7-0.8"]["samples"] = 1
+    source = tmp_path / "research.json"
+    destination = tmp_path / "validation.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    destination.write_text("sentinel", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema|generated|config|bucket|cohort"):
+        freeze_calibration_snapshot(source, destination, now=1000.0)
+
+    assert destination.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_frozen_loader_rejects_rehashed_malformed_bucket(tmp_path):
+    from poly_arb_bot.profitability_gate import canonical_payload_hash
+
+    source = tmp_path / "research.json"
+    destination = tmp_path / "validation.json"
+    source.write_text(json.dumps(_valid_freeze_payload()), encoding="utf-8")
+    snapshot = freeze_calibration_snapshot(source, destination, now=1000.0)
+    snapshot["strategies"]["late_window_directional_ev"]["overall"][
+        "0.7-0.8"
+    ]["samples"] = 0
+    snapshot["content_hash"] = canonical_payload_hash(snapshot)
+    destination.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    assert load_frozen_calibration_snapshot(
+        destination, now=1001.0
+    ) == (None, "calibration_snapshot_invalid")
+
+
+def test_freeze_rejects_same_source_and_destination_without_mutating_source(
+    tmp_path,
+):
+    path = tmp_path / "calibration.json"
+    source_text = json.dumps(_valid_freeze_payload())
+    path.write_text(source_text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="distinct"):
+        freeze_calibration_snapshot(path, path, now=1000.0)
+
+    assert path.read_text(encoding="utf-8") == source_text

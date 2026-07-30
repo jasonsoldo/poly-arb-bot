@@ -8,9 +8,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .probability_calibration_map import (
-    MAP_VERSION,
     PROBABILITY_MODEL_IDS,
-    freeze_calibration_snapshot,
+    _frozen_calibration_reason,
 )
 from .profitability_analysis import PROBABILITY_STRATEGIES, cohort_key
 
@@ -76,34 +75,6 @@ def _atomic_publish(payload, path):
     os.replace(temporary, path)
 
 
-def _snapshot_reason(payload, now):
-    current = _finite(now)
-    if current is None:
-        return "calibration_snapshot_invalid"
-    if not isinstance(payload, dict) or payload.get("version") != MAP_VERSION:
-        return "calibration_snapshot_invalid"
-    if not isinstance(payload.get("strategies"), dict):
-        return "calibration_snapshot_invalid"
-    activated = _finite(payload.get("validation_activated_at"))
-    expires = _finite(payload.get("validation_expires_at"))
-    if (
-        activated is None
-        or expires is None
-        or expires != activated + VALIDATION_SECONDS
-        or current < activated
-    ):
-        return "calibration_snapshot_invalid"
-    content_hash = payload.get("content_hash")
-    if (
-        not isinstance(content_hash, str)
-        or content_hash != canonical_payload_hash(payload)
-    ):
-        return "calibration_snapshot_hash_mismatch"
-    if current >= expires:
-        return "calibration_snapshot_expired"
-    return None
-
-
 def _validated_report(report):
     if not isinstance(report, dict) or report.get("version") != 1:
         raise ValueError("profitability report schema is invalid")
@@ -117,6 +88,13 @@ def _validated_report(report):
     source_hashes = report.get("selected_config_hashes")
     if not isinstance(cohorts, dict) or not isinstance(source_hashes, dict):
         raise ValueError("profitability report cohorts or config hashes are invalid")
+    if any(
+        strategy not in PROBABILITY_STRATEGIES
+        or not isinstance(value, str)
+        or not value
+        for strategy, value in source_hashes.items()
+    ):
+        raise ValueError("profitability report config hashes are invalid")
     for field in ("real_order_submissions", "real_orders", "real_fills"):
         if type(report.get(field)) is not int or report[field] != 0:
             raise ValueError(f"profitability report {field} must equal zero")
@@ -159,7 +137,7 @@ def build_profitability_gate(
 ) -> dict:
     """Build a content-bound gate, retaining exact rejection diagnostics."""
     cohorts, source_hashes = _validated_report(report)
-    snapshot_reason = _snapshot_reason(calibration_snapshot, now)
+    snapshot_reason = _frozen_calibration_reason(calibration_snapshot, now)
     if snapshot_reason:
         raise ValueError(snapshot_reason)
     if not isinstance(target_base_config_hashes, dict):
@@ -171,11 +149,16 @@ def build_profitability_gate(
         and isinstance(value, str)
         and value
     }
-    if not isinstance(cohort_version, str) or not cohort_version:
+    if not isinstance(cohort_version, str) or not cohort_version.strip():
         raise ValueError("profitability cohort version is invalid")
     activated = _finite(now)
     if activated is None:
         raise ValueError("profitability gate activation is invalid")
+    if any(
+        normalized_targets.get(strategy) != value
+        for strategy, value in source_hashes.items()
+    ):
+        raise ValueError("source discovery config hashes do not match targets")
 
     eligible = {}
     rejected = {}
@@ -189,8 +172,6 @@ def build_profitability_gate(
             reason = "unknown_strategy"
         if reason is None and strategy not in normalized_targets:
             reason = "target_base_config_hash_unavailable"
-        if reason is None and source_hashes.get(strategy) != normalized_targets[strategy]:
-            reason = "source_discovery_config_mismatch"
         calibration_entry = calibration_snapshot["strategies"].get(strategy, {})
         calibration_cohort = (
             calibration_entry.get("cohort", {})
@@ -209,6 +190,7 @@ def build_profitability_gate(
             entry.update({
                 "decision": "ALLOW",
                 "reason": "profitability_cohort_eligible",
+                "source_discovery_config_hash": source_hashes[strategy],
                 "strategy_base_config_hash": normalized_targets[strategy],
                 "probability_model_id": PROBABILITY_MODEL_IDS[strategy],
             })
@@ -276,6 +258,30 @@ def _gate_reason(payload, now):
         or thresholds != _THRESHOLDS
     ):
         return "profitability_gate_invalid"
+    source_hashes = payload["source_discovery_config_hashes"]
+    target_hashes = payload["target_base_config_hashes"]
+    model_ids = payload["probability_model_ids"]
+    if (
+        any(
+            strategy not in PROBABILITY_STRATEGIES
+            or not isinstance(value, str)
+            or not value
+            or target_hashes.get(strategy) != value
+            for strategy, value in source_hashes.items()
+        )
+        or any(
+            strategy not in PROBABILITY_STRATEGIES
+            or not isinstance(value, str)
+            or not value
+            for strategy, value in target_hashes.items()
+        )
+        or set(model_ids) != set(target_hashes)
+        or any(
+            model_ids.get(strategy) != PROBABILITY_MODEL_IDS[strategy]
+            for strategy in target_hashes
+        )
+    ):
+        return "profitability_gate_invalid"
     cohort_version = payload.get("profitability_cohort_version")
     snapshot_hash = payload.get("calibration_snapshot_hash")
     if (
@@ -299,11 +305,14 @@ def _gate_reason(payload, now):
         ):
             return "profitability_gate_invalid"
         strategy = entry["dimensions"]["strategy"]
+        discovery_hash = source_hashes.get(strategy)
         if (
-            entry.get("strategy_base_config_hash")
-            != payload["target_base_config_hashes"].get(strategy)
+            not discovery_hash
+            or entry.get("source_discovery_config_hash") != discovery_hash
+            or entry.get("strategy_base_config_hash") != discovery_hash
+            or target_hashes.get(strategy) != discovery_hash
             or entry.get("probability_model_id")
-            != payload["probability_model_ids"].get(strategy)
+            != model_ids.get(strategy)
         ):
             return "profitability_gate_invalid"
     activated = _finite(payload.get("validation_activated_at"))

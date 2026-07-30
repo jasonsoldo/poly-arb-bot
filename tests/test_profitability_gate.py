@@ -51,7 +51,37 @@ def _calibration_map():
                         },
                     },
                 },
-                "overall": {},
+                "overall": {
+                    "0.7-0.8": {
+                        "samples": 60,
+                        "expected_up_rate": 0.75,
+                        "realized_up_rate": 0.8,
+                    },
+                },
+            },
+            "low_price_lottery_ev": {
+                "cohort": {
+                    "strategy_config_hash": "lottery-base-hash",
+                    "probability_model_id": PROBABILITY_MODEL_IDS[
+                        "low_price_lottery_ev"
+                    ],
+                },
+                "timeframes": {
+                    "5m": {
+                        "0.0-0.1": {
+                            "samples": 60,
+                            "expected_up_rate": 0.05,
+                            "realized_up_rate": 0.05,
+                        },
+                    },
+                },
+                "overall": {
+                    "0.0-0.1": {
+                        "samples": 60,
+                        "expected_up_rate": 0.05,
+                        "realized_up_rate": 0.05,
+                    },
+                },
             },
         },
     }
@@ -224,6 +254,9 @@ def test_gate_allows_only_cohorts_that_meet_every_profitability_threshold(tmp_pa
         STRATEGY: BASE_HASH,
     }
     assert payload["target_base_config_hashes"] == {STRATEGY: BASE_HASH}
+    assert payload["eligible_cohorts"][eligible_key][
+        "source_discovery_config_hash"
+    ] == BASE_HASH
     assert payload["content_hash"] == canonical_payload_hash(payload)
     assert evaluate_profitability_gate(
         _row(), payload, NOW + 1, _expected(snapshot)
@@ -253,24 +286,34 @@ def test_gate_rejects_cohort_not_bound_to_snapshot_base_config(tmp_path):
     )
 
 
-def test_gate_rejects_cohort_from_different_discovery_base_config(tmp_path):
+def test_gate_rejects_report_from_different_discovery_base_config(tmp_path):
     snapshot = _snapshot(tmp_path)
     report = _report()
     report["selected_config_hashes"][STRATEGY] = "different-discovery-base"
 
-    payload = build_profitability_gate(
-        report,
-        snapshot,
-        {STRATEGY: BASE_HASH},
-        NOW,
-        COHORT_VERSION,
-    )
+    with pytest.raises(ValueError, match="source discovery config"):
+        build_profitability_gate(
+            report,
+            snapshot,
+            {STRATEGY: BASE_HASH},
+            NOW,
+            COHORT_VERSION,
+        )
 
-    key = cohort_key(_row())
-    assert payload["decision"] == "NO_TRADE"
-    assert payload["rejected_cohorts"][key]["reason"] == (
-        "source_discovery_config_mismatch"
-    )
+
+def test_gate_rejects_empty_report_with_mismatched_discovery_base(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    report = _report(cohorts={})
+    report["selected_config_hashes"][STRATEGY] = "different-discovery-base"
+
+    with pytest.raises(ValueError, match="source discovery config"):
+        build_profitability_gate(
+            report,
+            snapshot,
+            {STRATEGY: BASE_HASH},
+            NOW,
+            COHORT_VERSION,
+        )
 
 
 def test_gate_rejects_report_cohort_key_that_disagrees_with_dimensions(tmp_path):
@@ -411,6 +454,52 @@ def test_gate_loader_rejects_rehashed_payload_missing_cohort_version(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "delete_top_discovery",
+        "change_top_discovery",
+        "delete_entry_discovery",
+        "change_entry_discovery",
+    ),
+)
+def test_rehashed_gate_cannot_break_discovery_target_identity(
+    tmp_path,
+    mutation,
+):
+    snapshot, payload = _gate(tmp_path)
+    key = cohort_key(_row())
+    if mutation == "delete_top_discovery":
+        del payload["source_discovery_config_hashes"][STRATEGY]
+    elif mutation == "change_top_discovery":
+        payload["source_discovery_config_hashes"][STRATEGY] = "different"
+    elif mutation == "delete_entry_discovery":
+        payload["eligible_cohorts"][key].pop(
+            "source_discovery_config_hash",
+            None,
+        )
+    else:
+        payload["eligible_cohorts"][key][
+            "source_discovery_config_hash"
+        ] = "different"
+    payload["content_hash"] = canonical_payload_hash(payload)
+    path = tmp_path / "gate.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_profitability_gate(path, NOW + 1) == (
+        None,
+        "profitability_gate_invalid",
+    )
+    result = evaluate_profitability_gate(
+        _row(),
+        payload,
+        NOW + 1,
+        _expected(snapshot),
+    )
+    assert result["decision"] == "BLOCK"
+    assert result["reason"] == "profitability_gate_unavailable"
+
+
 def test_build_rejects_report_with_blocking_exclusions(tmp_path):
     snapshot = _snapshot(tmp_path)
     with pytest.raises(ValueError, match="blocking_exclusions"):
@@ -472,12 +561,10 @@ def test_cli_valid_empty_report_publishes_no_trade_gate(tmp_path):
     research = tmp_path / "probability-calibration-research.json"
     validation = tmp_path / "probability-calibration-validation.json"
     gate = tmp_path / "profitability-gates.json"
-    report.write_text(json.dumps(_report(cohorts={})), encoding="utf-8")
-    research_payload = _calibration_map()
-    research_payload["strategies"][STRATEGY]["cohort"][
-        "strategy_config_hash"
-    ] = None
-    research.write_text(json.dumps(research_payload), encoding="utf-8")
+    report_payload = _report(cohorts={})
+    report_payload["selected_config_hashes"] = {}
+    report.write_text(json.dumps(report_payload), encoding="utf-8")
+    research.write_text(json.dumps(_calibration_map()), encoding="utf-8")
     environment = os.environ.copy()
     environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     environment["PROFITABILITY_COHORT_VERSION"] = COHORT_VERSION
@@ -506,3 +593,83 @@ def test_cli_valid_empty_report_publishes_no_trade_gate(tmp_path):
     assert completed.returncode == 0, completed.stderr
     assert json.loads(gate.read_text(encoding="utf-8"))["decision"] == "NO_TRADE"
     assert json.loads(validation.read_text(encoding="utf-8"))["content_hash"]
+
+
+def test_cli_empty_cohort_version_is_config_error_without_replacing_outputs(
+    tmp_path,
+):
+    report = tmp_path / "profitability-discovery.json"
+    research = tmp_path / "probability-calibration-research.json"
+    validation = tmp_path / "probability-calibration-validation.json"
+    gate = tmp_path / "profitability-gates.json"
+    report.write_text(json.dumps(_report()), encoding="utf-8")
+    research.write_text(json.dumps(_calibration_map()), encoding="utf-8")
+    validation.write_text("old-snapshot", encoding="utf-8")
+    gate.write_text("old-gate", encoding="utf-8")
+    environment = os.environ.copy()
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    environment["PROFITABILITY_COHORT_VERSION"] = ""
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "poly_arb_bot.cli",
+            "profitability-freeze",
+            "--profitability-report",
+            str(report),
+            "--calibration-map",
+            str(research),
+            "--validation-calibration",
+            str(validation),
+            "--gate-file",
+            str(gate),
+        ],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 3
+    assert "PROFITABILITY_FREEZE_ERROR" in completed.stderr
+    assert validation.read_text(encoding="utf-8") == "old-snapshot"
+    assert gate.read_text(encoding="utf-8") == "old-gate"
+
+
+def test_cli_path_collision_is_config_error_and_preserves_source(tmp_path):
+    report = tmp_path / "profitability-discovery.json"
+    research = tmp_path / "probability-calibration-research.json"
+    gate = tmp_path / "profitability-gates.json"
+    report.write_text(json.dumps(_report()), encoding="utf-8")
+    source_text = json.dumps(_calibration_map())
+    research.write_text(source_text, encoding="utf-8")
+    gate.write_text("old-gate", encoding="utf-8")
+    environment = os.environ.copy()
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "poly_arb_bot.cli",
+            "profitability-freeze",
+            "--profitability-report",
+            str(report),
+            "--calibration-map",
+            str(research),
+            "--validation-calibration",
+            str(research),
+            "--gate-file",
+            str(gate),
+        ],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 3
+    assert "paths must be distinct" in completed.stderr
+    assert research.read_text(encoding="utf-8") == source_text
+    assert gate.read_text(encoding="utf-8") == "old-gate"

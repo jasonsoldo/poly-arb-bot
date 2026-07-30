@@ -1052,6 +1052,14 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 3
+        cohort_version = os.getenv("PROFITABILITY_COHORT_VERSION", "1")
+        if not cohort_version.strip():
+            print(
+                "PROFITABILITY_FREEZE_ERROR "
+                "PROFITABILITY_COHORT_VERSION must be non-empty",
+                file=sys.stderr,
+            )
+            return 3
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -1085,7 +1093,7 @@ def main() -> int:
                 snapshot,
                 target_hashes,
                 now,
-                os.getenv("PROFITABILITY_COHORT_VERSION", "1"),
+                cohort_version,
             )
         except ValueError as exc:
             print(
@@ -1099,7 +1107,7 @@ def main() -> int:
         try:
             _publish_frozen_calibration_snapshot(snapshot, validation_path)
             publish_profitability_gate(gate, gate_path)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             print(f"PROFITABILITY_FREEZE_ERROR {exc}", file=sys.stderr)
             return 3
         print(
