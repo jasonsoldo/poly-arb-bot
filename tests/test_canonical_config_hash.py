@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from poly_arb_bot import ev_shadow
 from poly_arb_bot.ev_shadow import (
     _CANONICAL_STRATEGY_CONFIG_ENV,
     canonical_strategy_config_hash,
@@ -29,13 +30,93 @@ LOTTERY_HASH = "927adb85e22c496176430af3362d73c84cb16708e40f9cb756809be405b51412
 def clean_env(monkeypatch):
     for _, env, _ in _CANONICAL_STRATEGY_CONFIG_ENV:
         monkeypatch.delenv(env, raising=False)
+    for env in (
+        "PROFITABILITY_GATE_ENABLE",
+        "PROFITABILITY_GATE_PATH",
+        "PROFITABILITY_COHORT_VERSION",
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH",
+    ):
+        monkeypatch.delenv(env, raising=False)
     return monkeypatch
 
 
 def test_default_environment_digests_are_pinned(clean_env):
+    assert ev_shadow.canonical_strategy_base_config_hash() == DEFAULT_HASH
+    assert ev_shadow.canonical_strategy_base_config_hash(
+        "late_window_directional_ev"
+    ) == DIRECTIONAL_HASH
+    assert ev_shadow.canonical_strategy_base_config_hash(
+        "low_price_lottery_ev"
+    ) == LOTTERY_HASH
     assert canonical_strategy_config_hash() == DEFAULT_HASH
     assert canonical_strategy_config_hash("late_window_directional_ev") == DIRECTIONAL_HASH
     assert canonical_strategy_config_hash("low_price_lottery_ev") == LOTTERY_HASH
+
+
+def test_gate_disabled_final_hash_is_exactly_base_hash(clean_env):
+    clean_env.setenv("PROFITABILITY_GATE_ENABLE", "0")
+    for strategy in (None, "late_window_directional_ev", "low_price_lottery_ev"):
+        assert canonical_strategy_config_hash(
+            strategy
+        ) == ev_shadow.canonical_strategy_base_config_hash(strategy)
+
+
+def test_gate_enabled_final_hash_binds_exact_artifact_vector(
+    clean_env, monkeypatch,
+):
+    snapshot_hash = "a" * 64
+    gate_hash = "b" * 64
+    snapshot = {"content_hash": snapshot_hash}
+    gate = {
+        "content_hash": gate_hash,
+        "calibration_snapshot_hash": snapshot_hash,
+    }
+    monkeypatch.setattr(
+        ev_shadow,
+        "_content_bound_artifact",
+        lambda path: snapshot if str(path) == "validation.json" else gate,
+    )
+    clean_env.setenv("PROFITABILITY_GATE_ENABLE", "1")
+    clean_env.setenv(
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH", "validation.json",
+    )
+    clean_env.setenv("PROFITABILITY_GATE_PATH", "gate.json")
+    clean_env.setenv("PROFITABILITY_COHORT_VERSION", "7")
+
+    assert ev_shadow.canonical_strategy_base_config_hash(
+        "late_window_directional_ev"
+    ) == DIRECTIONAL_HASH
+    assert canonical_strategy_config_hash(
+        "late_window_directional_ev"
+    ) == "c44db2aed1585c6b42004a675f5df28377a96cbd3c53642292370d7900938197"
+
+
+def test_gate_binding_does_not_change_non_probability_strategy_hashes(
+    clean_env, monkeypatch,
+):
+    snapshot_hash = "a" * 64
+    monkeypatch.setattr(
+        ev_shadow,
+        "_content_bound_artifact",
+        lambda path: (
+            {"content_hash": snapshot_hash}
+            if str(path) == "validation.json"
+            else {
+                "content_hash": "b" * 64,
+                "calibration_snapshot_hash": snapshot_hash,
+            }
+        ),
+    )
+    clean_env.setenv("PROFITABILITY_GATE_ENABLE", "1")
+    clean_env.setenv(
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH", "validation.json",
+    )
+    clean_env.setenv("PROFITABILITY_GATE_PATH", "gate.json")
+
+    for strategy in (None, "paired_lock", "inventory_rebalancing_arb"):
+        assert canonical_strategy_config_hash(
+            strategy
+        ) == ev_shadow.canonical_strategy_base_config_hash(strategy)
 
 
 def test_canonical_only_key_changes_default_and_directional_but_not_lottery(clean_env):

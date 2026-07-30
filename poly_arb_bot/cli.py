@@ -1021,7 +1021,7 @@ def main() -> int:
             print(encoded)
         return 0
     if args.command == "profitability-freeze":
-        from .ev_shadow import canonical_strategy_config_hash
+        from .ev_shadow import canonical_strategy_base_config_hash
         from .probability_calibration_map import (
             PROBABILITY_MODEL_IDS,
             _build_frozen_calibration_snapshot,
@@ -1085,7 +1085,7 @@ def main() -> int:
                 now,
             )
             target_hashes = {
-                strategy: canonical_strategy_config_hash(strategy)
+                strategy: canonical_strategy_base_config_hash(strategy)
                 for strategy in PROBABILITY_MODEL_IDS
             }
             gate = build_profitability_gate(

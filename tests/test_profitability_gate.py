@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from poly_arb_bot.ev_shadow import canonical_strategy_config_hash
+from poly_arb_bot.ev_shadow import (
+    canonical_strategy_base_config_hash,
+    canonical_strategy_config_hash,
+)
 from poly_arb_bot.probability_calibration_map import (
     PROBABILITY_MODEL_IDS,
     freeze_calibration_snapshot,
@@ -659,6 +662,78 @@ def test_cli_valid_empty_report_publishes_no_trade_gate(tmp_path):
     assert completed.returncode == 0, completed.stderr
     assert json.loads(gate.read_text(encoding="utf-8"))["decision"] == "NO_TRADE"
     assert json.loads(validation.read_text(encoding="utf-8"))["content_hash"]
+
+
+def test_cli_freeze_targets_base_hash_when_previous_gate_is_enabled(tmp_path):
+    report = tmp_path / "profitability-discovery.json"
+    research = tmp_path / "probability-calibration-research.json"
+    validation = tmp_path / "probability-calibration-validation.json"
+    gate = tmp_path / "profitability-gates.json"
+    previous_validation = tmp_path / "previous-validation.json"
+    previous_gate = tmp_path / "previous-gate.json"
+    base_hashes = {
+        strategy: canonical_strategy_base_config_hash(strategy)
+        for strategy in PROBABILITY_MODEL_IDS
+    }
+    report_payload = _report(cohorts={})
+    report_payload["selected_config_hashes"] = {
+        STRATEGY: base_hashes[STRATEGY],
+    }
+    calibration_payload = _calibration_map()
+    for strategy, entry in calibration_payload["strategies"].items():
+        entry["cohort"]["strategy_config_hash"] = base_hashes[strategy]
+    report.write_text(json.dumps(report_payload), encoding="utf-8")
+    research.write_text(json.dumps(calibration_payload), encoding="utf-8")
+    previous_snapshot_payload = {"version": 2}
+    previous_snapshot_payload["content_hash"] = canonical_payload_hash(
+        previous_snapshot_payload,
+    )
+    previous_validation.write_text(
+        json.dumps(previous_snapshot_payload), encoding="utf-8",
+    )
+    previous_gate_payload = {
+        "version": 1,
+        "calibration_snapshot_hash": previous_snapshot_payload["content_hash"],
+    }
+    previous_gate_payload["content_hash"] = canonical_payload_hash(
+        previous_gate_payload,
+    )
+    previous_gate.write_text(
+        json.dumps(previous_gate_payload), encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    environment["PROFITABILITY_GATE_ENABLE"] = "1"
+    environment["PROFITABILITY_COHORT_VERSION"] = COHORT_VERSION
+    environment["PROBABILITY_VALIDATION_CALIBRATION_PATH"] = str(
+        previous_validation,
+    )
+    environment["PROFITABILITY_GATE_PATH"] = str(previous_gate)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "poly_arb_bot.cli",
+            "profitability-freeze",
+            "--profitability-report",
+            str(report),
+            "--calibration-map",
+            str(research),
+            "--validation-calibration",
+            str(validation),
+            "--gate-file",
+            str(gate),
+        ],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    published = json.loads(gate.read_text(encoding="utf-8"))
+    assert published["target_base_config_hashes"] == base_hashes
 
 
 def test_cli_empty_cohort_version_is_config_error_without_replacing_outputs(

@@ -5,6 +5,11 @@ import pytest
 
 from poly_arb_bot import ev_shadow
 from poly_arb_bot.ev_shadow import _historical_volatility, evaluate_market_event
+from poly_arb_bot.probability_calibration_map import PROBABILITY_MODEL_IDS
+from poly_arb_bot.profitability_gate import (
+    build_profitability_gate,
+    canonical_payload_hash,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +59,96 @@ def venue(volatility=0.001, model_span_seconds=120):
             "chainlink": {"symbol": "btc/usd", "market_type": "settlement", "quote_currency": "USD", "price": 100.8, "bid": None, "ask": None, "source_timestamp": "x", "received_at": 999000, "message_age_ms": 10, "status": "FRESH"},
         },
     }}}
+
+
+def _validation_snapshot(base_hashes, now=1000.0):
+    stats = {
+        "samples": 100,
+        "expected_up_rate": 0.9,
+        "realized_up_rate": 0.9,
+    }
+    payload = {
+        "version": 2,
+        "generated_at": now - 1,
+        "config": {"min_bucket_samples": 30, "prior_weight": 30.0},
+        "excluded_other_cohort": {
+            "late_window_directional_ev": 0,
+            "low_price_lottery_ev": 0,
+        },
+        "strategies": {
+            "late_window_directional_ev": {
+                "cohort": {
+                    "strategy_config_hash": base_hashes[
+                        "late_window_directional_ev"
+                    ],
+                    "probability_model_id": PROBABILITY_MODEL_IDS[
+                        "late_window_directional_ev"
+                    ],
+                },
+                "timeframes": {"5m": {"0.8-0.9": stats}},
+                "overall": {"0.8-0.9": stats},
+            },
+            "low_price_lottery_ev": {
+                "cohort": {
+                    "strategy_config_hash": base_hashes[
+                        "low_price_lottery_ev"
+                    ],
+                    "probability_model_id": PROBABILITY_MODEL_IDS[
+                        "low_price_lottery_ev"
+                    ],
+                },
+                "timeframes": {"5m": {"0.0-0.1": stats}},
+                "overall": {"0.0-0.1": stats},
+            },
+        },
+        "validation_activated_at": now - 1,
+        "validation_expires_at": now - 1 + 72 * 3600,
+    }
+    payload["content_hash"] = canonical_payload_hash(payload)
+    return payload
+
+
+def _eligible_directional_gate(snapshot, base_hash, now=1000.0):
+    key = (
+        "strategy=late_window_directional_ev|asset=BTC|timeframe=5m|"
+        "outcome=Up|probability=0.8-0.9|fill=0.4-0.5|seconds=30-60"
+    )
+    cohort = {
+        "dimensions": {
+            "strategy": "late_window_directional_ev",
+            "asset": "BTC",
+            "timeframe": "5m",
+            "outcome": "Up",
+            "probability": "0.8-0.9",
+            "fill": "0.4-0.5",
+            "seconds": "30-60",
+        },
+        "independent_markets": 60,
+        "mean_net_return": 0.05,
+        "net_pnl_usd": 12.0,
+        "lower_bound_95": 0.01,
+        "largest_positive_market_share": 0.10,
+    }
+    report = {
+        "version": 1,
+        "generated_at": now - 1,
+        "source": {},
+        "selected_config_hashes": {
+            "late_window_directional_ev": base_hash,
+        },
+        "blocking_exclusions": {},
+        "cohorts": {key: cohort},
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }
+    return build_profitability_gate(
+        report,
+        snapshot,
+        {"late_window_directional_ev": base_hash},
+        now=now,
+        cohort_version="1",
+    )
 
 
 def test_reference_age_recomputes_quorum_without_slow_optional_source(monkeypatch):
@@ -711,3 +806,170 @@ def test_missing_calibration_map_fails_closed_but_keeps_observing(monkeypatch):
         if row["strategy"] == "late_window_directional_ev" and row["outcome"] == "Up"
     )
     assert up["reason"] == "probability_calibration_unavailable"
+
+
+def test_missing_profitability_gate_blocks_deployable_without_hiding_accept(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "0")
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")
+    base_hashes = {
+        strategy: ev_shadow.canonical_strategy_base_config_hash(strategy)
+        for strategy in PROBABILITY_MODEL_IDS
+    }
+    snapshot = _validation_snapshot(base_hashes)
+    snapshot_path = tmp_path / "validation.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "1")
+    monkeypatch.setenv("PROFITABILITY_GATE_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv(
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH", str(snapshot_path),
+    )
+    monkeypatch.setenv("PROFITABILITY_COHORT_VERSION", "1")
+    monkeypatch.setenv("LOTTERY_EV_ENABLE", "0")
+    clean_event = event()
+    clean_event.update(up_best_ask=0.45, down_best_ask=0.56)
+
+    rows = evaluate_market_event(clean_event, market(), venue(), now=1000.0)
+    row = next(item for item in rows if item["outcome"] == "Up")
+
+    assert row["decision"] == "ACCEPT"
+    assert row["profitability_gate_decision"] == "BLOCK"
+    assert row["profitability_gate_reason"] == "profitability_gate_unavailable"
+    assert row["profitability_cohort_key"] == (
+        "strategy=late_window_directional_ev|asset=BTC|timeframe=5m|"
+        "outcome=Up|probability=0.8-0.9|fill=0.4-0.5|seconds=30-60"
+    )
+    assert row["profitability_gate_hash"] is None
+    assert row["calibration_snapshot_hash"] == snapshot["content_hash"]
+    assert row["deployable_candidate"] is False
+
+
+def test_eligible_profitability_gate_marks_accept_as_deployable(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "0")
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")
+    base_hashes = {
+        strategy: ev_shadow.canonical_strategy_base_config_hash(strategy)
+        for strategy in PROBABILITY_MODEL_IDS
+    }
+    snapshot = _validation_snapshot(base_hashes)
+    gate = _eligible_directional_gate(
+        snapshot, base_hashes["late_window_directional_ev"],
+    )
+    snapshot_path = tmp_path / "validation.json"
+    gate_path = tmp_path / "gate.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    gate_path.write_text(json.dumps(gate), encoding="utf-8")
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "1")
+    monkeypatch.setenv("PROFITABILITY_GATE_PATH", str(gate_path))
+    monkeypatch.setenv(
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH", str(snapshot_path),
+    )
+    monkeypatch.setenv("PROFITABILITY_COHORT_VERSION", "1")
+    monkeypatch.setenv("LOTTERY_EV_ENABLE", "0")
+    clean_event = event()
+    clean_event.update(up_best_ask=0.45, down_best_ask=0.56)
+
+    rows = evaluate_market_event(clean_event, market(), venue(), now=1000.0)
+    row = next(item for item in rows if item["outcome"] == "Up")
+
+    assert row["decision"] == "ACCEPT"
+    assert row["profitability_gate_decision"] == "ALLOW"
+    assert row["profitability_gate_reason"] == "profitability_cohort_eligible"
+    assert row["profitability_cohort_key"] in gate["eligible_cohorts"]
+    assert row["profitability_gate_hash"] == gate["content_hash"]
+    assert row["calibration_snapshot_hash"] == snapshot["content_hash"]
+    assert row["deployable_candidate"] is True
+    assert row["config_hash"] == ev_shadow.canonical_strategy_config_hash(
+        "late_window_directional_ev"
+    )
+
+
+def test_gate_identity_mismatch_blocks_deployable_but_keeps_base_accept(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "0")
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")
+    base_hashes = {
+        strategy: ev_shadow.canonical_strategy_base_config_hash(strategy)
+        for strategy in PROBABILITY_MODEL_IDS
+    }
+    snapshot = _validation_snapshot(base_hashes)
+    gate = _eligible_directional_gate(
+        snapshot, base_hashes["late_window_directional_ev"],
+    )
+    strategy = "late_window_directional_ev"
+    gate["target_base_config_hashes"][strategy] = "wrong-base"
+    gate["source_discovery_config_hashes"][strategy] = "wrong-base"
+    entry = next(iter(gate["eligible_cohorts"].values()))
+    entry["strategy_base_config_hash"] = "wrong-base"
+    entry["source_discovery_config_hash"] = "wrong-base"
+    gate["content_hash"] = canonical_payload_hash(gate)
+    snapshot_path = tmp_path / "validation.json"
+    gate_path = tmp_path / "gate.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    gate_path.write_text(json.dumps(gate), encoding="utf-8")
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "1")
+    monkeypatch.setenv("PROFITABILITY_GATE_PATH", str(gate_path))
+    monkeypatch.setenv(
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH", str(snapshot_path),
+    )
+    monkeypatch.setenv("PROFITABILITY_COHORT_VERSION", "1")
+    monkeypatch.setenv("LOTTERY_EV_ENABLE", "0")
+    clean_event = event()
+    clean_event.update(up_best_ask=0.45, down_best_ask=0.56)
+
+    row = next(
+        item for item in evaluate_market_event(
+            clean_event, market(), venue(), now=1000.0,
+        )
+        if item["outcome"] == "Up"
+    )
+
+    assert row["decision"] == "ACCEPT"
+    assert row["profitability_gate_decision"] == "BLOCK"
+    assert row["profitability_gate_reason"] == "profitability_gate_unavailable"
+    assert row["deployable_candidate"] is False
+
+
+def test_expired_frozen_snapshot_keeps_calibration_rejection(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "0")
+    monkeypatch.setenv("PROBABILITY_CALIBRATION_REQUIRE_MAP", "1")
+    base_hashes = {
+        strategy: ev_shadow.canonical_strategy_base_config_hash(strategy)
+        for strategy in PROBABILITY_MODEL_IDS
+    }
+    snapshot = _validation_snapshot(base_hashes, now=2.0)
+    snapshot_path = tmp_path / "expired-validation.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "1")
+    monkeypatch.setenv("PROFITABILITY_GATE_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv(
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH", str(snapshot_path),
+    )
+    monkeypatch.setenv("PROFITABILITY_COHORT_VERSION", "1")
+    monkeypatch.setenv("LOTTERY_EV_ENABLE", "0")
+    clean_event = event()
+    clean_event.update(
+        ts=300000.0, up_best_ask=0.45, down_best_ask=0.56,
+    )
+    current_market = market()
+    current_market["close_ts"] = 300045.0
+    current_venue = venue()
+    current_venue["updated_at_ms"] = 300000000
+
+    row = next(
+        item for item in evaluate_market_event(
+            clean_event, current_market, current_venue, now=300000.0,
+        )
+        if item["outcome"] == "Up"
+    )
+
+    assert row["decision"] == "REJECT"
+    assert row["reason"] == "probability_calibration_unavailable"
+    assert row["profitability_gate_decision"] == "BLOCK"
+    assert row["deployable_candidate"] is False

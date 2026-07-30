@@ -1,5 +1,20 @@
 [
   {
+    "name": "profitability_gate_allow",
+    "mode": "profitability_gate",
+    "strategy": "late_window_directional_ev",
+    "asset": "BTC",
+    "timeframe": "5m",
+    "outcome": "Up",
+    "calibration_input_probability": 0.85,
+    "expected_fill_price": 0.45,
+    "seconds_to_close": 45,
+    "artifacts_ready": true,
+    "eligible_cohorts": [
+      "strategy=late_window_directional_ev|asset=BTC|timeframe=5m|outcome=Up|probability=0.8-0.9|fill=0.4-0.5|seconds=30-60"
+    ]
+  },
+  {
     "name": "probability_up",
     "mode": "probability",
     "settlement_reference": 101.0,

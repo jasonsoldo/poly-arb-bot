@@ -21,8 +21,13 @@ from .ev_strategies import (
 )
 from .probability_calibration_map import (
     PROBABILITY_MODEL_IDS, calibrate_probability,
-    load_calibration_map,
+    load_calibration_map, load_frozen_calibration_snapshot,
     require_map_from_env,
+)
+from .profitability_gate import (
+    canonical_payload_hash,
+    evaluate_profitability_gate,
+    load_profitability_gate,
 )
 from .reference_layer import ReferenceState, reference_source_maximum_age_ms, reference_state_for_asset
 
@@ -282,12 +287,12 @@ def _canonical_strategy_relevant(strategy, key):
     return True
 
 
-def canonical_strategy_config_hash(strategy=None):
+def canonical_strategy_base_config_hash(strategy=None):
     """SHA-256 of the canonical (C++ producer) strategy config view.
 
-    Mirrors strategy_config_hash() in cpp/market_ws_engine/market_ws_engine.cpp;
+    Mirrors strategy_base_config_hash() in the C++ market engine;
     use this — not strategy_config()[1] — whenever comparing against
-    config_hash values emitted by the C++ engine.
+    frozen calibration and profitability gate target hashes.
     """
     values = {key: os.getenv(env, default)
               for key, env, default in _CANONICAL_STRATEGY_CONFIG_ENV}
@@ -298,6 +303,75 @@ def canonical_strategy_config_hash(strategy=None):
         values["strategy"] = strategy
     encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _content_bound_artifact(path):
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("content_hash"), str)
+        or payload["content_hash"] != canonical_payload_hash(payload)
+    ):
+        return None
+    return payload
+
+
+def canonical_strategy_config_hash(strategy=None):
+    """Final probability-strategy identity, gate-bound only when enabled."""
+    base_hash = canonical_strategy_base_config_hash(strategy)
+    if (
+        strategy not in PROBABILITY_MODEL_IDS
+        or not strategy_env_enabled("PROFITABILITY_GATE_ENABLE")
+    ):
+        return base_hash
+    snapshot = _content_bound_artifact(os.getenv(
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH",
+        "data/probability-calibration-validation.json",
+    ))
+    gate = _content_bound_artifact(os.getenv(
+        "PROFITABILITY_GATE_PATH", "data/profitability-gates.json",
+    ))
+    if (
+        snapshot is None
+        or gate is None
+        or gate.get("calibration_snapshot_hash") != snapshot.get("content_hash")
+    ):
+        return base_hash
+    binding = {
+        "probability_validation_calibration_content_hash": snapshot["content_hash"],
+        "profitability_cohort_version": os.getenv(
+            "PROFITABILITY_COHORT_VERSION", "1",
+        ),
+        "profitability_gate_content_hash": gate["content_hash"],
+        "shadow_cash_ledger_version": os.getenv(
+            "SHADOW_CASH_LEDGER_VERSION", "2",
+        ),
+        "strategy_base_config_hash": base_hash,
+    }
+    encoded = json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _profitability_artifacts(now):
+    if not strategy_env_enabled("PROFITABILITY_GATE_ENABLE"):
+        return None, None
+    snapshot, _ = load_frozen_calibration_snapshot(
+        Path(os.getenv(
+            "PROBABILITY_VALIDATION_CALIBRATION_PATH",
+            "data/probability-calibration-validation.json",
+        )),
+        now,
+    )
+    gate, _ = load_profitability_gate(
+        Path(os.getenv(
+            "PROFITABILITY_GATE_PATH", "data/profitability-gates.json",
+        )),
+        now,
+    )
+    return snapshot, gate
 
 
 def _market_start_ts(market):
@@ -658,8 +732,12 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
     up_implied_probability = (
         float(up_best_ask) if up_best_ask is not None else float(event.get("up_vwap", 1))
     )
-    calibration_payload = load_calibration_map()
-    calibration_required = require_map_from_env()
+    profitability_snapshot, profitability_gate = _profitability_artifacts(now)
+    profitability_enabled = strategy_env_enabled("PROFITABILITY_GATE_ENABLE")
+    calibration_payload = (
+        profitability_snapshot if profitability_enabled else load_calibration_map()
+    )
+    calibration_required = profitability_enabled or require_map_from_env()
     calibration_map_generated_at = float((calibration_payload or {}).get("generated_at", 0) or 0)
     rows = []
     for outcome, fill_key, ask_key, fee_key, depth_key, imbalance_key, directional_raw, lottery_raw in (
@@ -742,8 +820,12 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             calibration = calibrate_probability(
                 calibration_payload, strategy, market.get("interval", ""),
                 model_up_probability, now,
-                expected_config_hash=canonical_strategy_config_hash(strategy),
+                expected_config_hash=canonical_strategy_base_config_hash(strategy),
                 expected_model_id=PROBABILITY_MODEL_IDS[strategy],
+                require_map=calibration_required,
+                max_age_seconds=(
+                    float("inf") if profitability_enabled else None
+                ),
             )
             calibrated_up = calibration["probability"]
             # Uncalibrated rows keep the raw probability so prediction
@@ -819,7 +901,37 @@ def evaluate_market_event(event, market, venue, now=None, historical_models=None
             audit["target_size"] = size
             audit["window"] = market.get("window", "current")
             audit["config_version"] = STRATEGY_CONFIG_VERSION
-            audit["config_hash"] = strategy_config(strategy)[1]
+            gate_result = evaluate_profitability_gate(
+                audit,
+                profitability_gate,
+                now,
+                {
+                    "strategy_base_config_hash":
+                        canonical_strategy_base_config_hash(strategy),
+                    "probability_model_id": PROBABILITY_MODEL_IDS[strategy],
+                    "calibration_snapshot_hash": (
+                        profitability_snapshot.get("content_hash")
+                        if profitability_snapshot else None
+                    ),
+                    "profitability_cohort_version": os.getenv(
+                        "PROFITABILITY_COHORT_VERSION", "1",
+                    ),
+                },
+            )
+            audit["profitability_gate_decision"] = gate_result["decision"]
+            audit["profitability_gate_reason"] = gate_result["reason"]
+            audit["profitability_cohort_key"] = gate_result["cohort_key"]
+            audit["profitability_gate_hash"] = gate_result["gate_content_hash"]
+            audit["calibration_snapshot_hash"] = (
+                profitability_snapshot.get("content_hash")
+                if profitability_snapshot else
+                gate_result["calibration_snapshot_hash"]
+            )
+            audit["deployable_candidate"] = (
+                result.decision == "ACCEPT"
+                and gate_result["decision"] == "ALLOW"
+            )
+            audit["config_hash"] = canonical_strategy_config_hash(strategy)
             rows.append(audit)
     combined = _terminal_hedge_audit(rows, event, market, size)
     if combined:

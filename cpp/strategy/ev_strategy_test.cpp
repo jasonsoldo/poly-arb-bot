@@ -1,4 +1,5 @@
 #include "ev_strategy.hpp"
+#include "profitability_gate.hpp"
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -6,6 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 
@@ -31,6 +33,29 @@ int main() {
         ptree row;
         boost::property_tree::read_json(input, row);
         const std::string mode = row.get<std::string>("mode");
+        if (mode == "profitability_gate") {
+            profitability_gate::Candidate candidate{
+                row.get<std::string>("strategy"),
+                row.get<std::string>("asset"),
+                row.get<std::string>("timeframe"),
+                row.get<std::string>("outcome"),
+                row.get<double>("calibration_input_probability"),
+                row.get<double>("expected_fill_price"),
+                row.get<double>("seconds_to_close"),
+            };
+            std::set<std::string> eligible;
+            for (const auto& item : row.get_child("eligible_cohorts"))
+                eligible.insert(item.second.get_value<std::string>());
+            const auto output = profitability_gate::evaluate(
+                candidate, row.get<bool>("artifacts_ready"), eligible);
+            std::cout << "{\"profitability_gate_decision\":\""
+                      << output.decision
+                      << "\",\"profitability_gate_reason\":\""
+                      << output.reason
+                      << "\",\"profitability_cohort_key\":\""
+                      << output.cohort_key << "\"}\n";
+            continue;
+        }
         if (mode == "probability" || mode == "lottery_probability") {
             strategy::ProbabilityInput value;
             value.settlement_reference = optional_number(row, "settlement_reference");

@@ -338,8 +338,44 @@ def test_probability_calibration_map_is_bound_to_current_config_and_model_cohort
     assert 'root.get<int>("version", 0) != 2' in load_body
     assert '"cohort.strategy_config_hash"' in load_body
     assert '"cohort.probability_model_id"' in load_body
-    assert "strategy_hash_for(strategy_node.first)" in load_body
+    assert "strategy_base_hash_for(strategy_node.first)" in load_body
     assert "probability_model_id_for(strategy_node.first)" in load_body
+
+
+def test_probability_profitability_gate_is_content_bound_and_audit_only():
+    for token in (
+        "struct ProfitabilityGateResult",
+        "PROFITABILITY_GATE_ENABLE",
+        "PROFITABILITY_GATE_PATH",
+        "PROFITABILITY_COHORT_VERSION",
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH",
+        "load_profitability_artifacts",
+        "canonical_payload_hash",
+        "strategy_base_config_hash",
+        "profitability_gate::evaluate",
+    ):
+        assert token in SOURCE
+    for field in (
+        "profitability_gate_decision",
+        "profitability_gate_reason",
+        "profitability_cohort_key",
+        "profitability_gate_hash",
+        "calibration_snapshot_hash",
+        "deployable_candidate",
+    ):
+        assert f'\\"{field}\\":' in SOURCE
+    fingerprint = SOURCE.split("bool should_emit_strategy", 1)[1].split(
+        "const std::string& strategy_hash_for", 1,
+    )[0]
+    assert "profitability_gate" in fingerprint
+    evaluation = SOURCE.split("void evaluate_reference_strategies()", 1)[1].split(
+        "void emit_complete_set_evaluations", 1,
+    )[0]
+    gate_start = evaluation.index("evaluate_profitability_gate")
+    gate_end = evaluation.index("if (!is_lottery)", gate_start)
+    gate_segment = evaluation[gate_start:gate_end]
+    assert "decision.decision =" not in gate_segment
+    assert "apply_sizing_rejection" not in gate_segment
 
 
 def test_disconnect_and_market_reload_invalidate_pending_arbitrage_attempts():

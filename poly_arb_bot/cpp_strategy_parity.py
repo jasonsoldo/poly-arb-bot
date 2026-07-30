@@ -2,6 +2,7 @@ import json
 import math
 import subprocess
 
+from .profitability_analysis import cohort_key
 from .ev_shadow import (
     _lottery_market_blend_probability,
     _lottery_up_probability_model,
@@ -17,6 +18,22 @@ from .reference_layer import ReferenceState
 
 
 def python_result(case):
+    if case["mode"] == "profitability_gate":
+        key = cohort_key(case)
+        allowed = (
+            case["artifacts_ready"]
+            and key in case["eligible_cohorts"]
+        )
+        return {
+            "profitability_gate_decision": "ALLOW" if allowed else "BLOCK",
+            "profitability_gate_reason": (
+                "profitability_cohort_eligible" if allowed
+                else "profitability_cohort_not_eligible"
+                if case["artifacts_ready"]
+                else "profitability_gate_unavailable"
+            ),
+            "profitability_cohort_key": key,
+        }
     if case["mode"] == "terminal_hedge":
         main_unit_cost = (
             case["main_expected_fill_price"] + case["main_fee_per_share"]
