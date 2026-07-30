@@ -1,5 +1,6 @@
 import json
 
+import poly_arb_bot.shadow_execution as shadow_execution
 from poly_arb_bot.shadow_execution import ShadowExecutionStateMachine, process_audit_once
 
 
@@ -115,3 +116,27 @@ def test_orphan_and_invalidation_are_research_outcomes_not_fills(tmp_path):
     assert machine.data["arb_book_observations"]["orphaned"] == 1
     assert machine.data["arb_book_observations"]["invalidated"] == 1
     assert machine.data["real_fills"] == 0
+
+
+def test_gate_enabled_rolling_calibration_uses_research_file_not_frozen_files(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "1")
+    validation = tmp_path / "probability-calibration-validation.json"
+    gate = tmp_path / "profitability-gates.json"
+    validation.write_text("frozen-validation", encoding="utf-8")
+    gate.write_text("frozen-gate", encoding="utf-8")
+
+    rolling = shadow_execution._rolling_calibration_map_path(tmp_path)
+    rolling.write_text("rolling-research", encoding="utf-8")
+
+    assert rolling == tmp_path / "probability-calibration-research.json"
+    assert validation.read_text(encoding="utf-8") == "frozen-validation"
+    assert gate.read_text(encoding="utf-8") == "frozen-gate"
+
+
+def test_gate_disabled_rolling_calibration_preserves_legacy_path(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("PROFITABILITY_GATE_ENABLE", "0")
+    assert shadow_execution._rolling_calibration_map_path(tmp_path) == (
+        tmp_path / "probability-calibration-map.json"
+    )

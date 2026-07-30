@@ -140,6 +140,17 @@ def _json(path, default):
         return default
 
 
+def _rolling_calibration_map_path(data_dir="data"):
+    gate_enabled = str(
+        os.getenv("PROFITABILITY_GATE_ENABLE", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    filename = (
+        "probability-calibration-research.json"
+        if gate_enabled else "probability-calibration-map.json"
+    )
+    return Path(data_dir) / filename
+
+
 def run(audit_path, state_path, log_path, poll_seconds=0.5,
         strategy_audit_path="logs/strategy-audit.jsonl",
         strategy_state_path="state/strategy-shadow.json",
@@ -150,7 +161,7 @@ def run(audit_path, state_path, log_path, poll_seconds=0.5,
     from .probability_calibration_map import (
         PROBABILITY_MODEL_IDS, publish_calibration_map, publish_seconds_from_env,
     )
-    calibration_map_path = "data/probability-calibration-map.json"
+    calibration_map_path = _rolling_calibration_map_path()
     calibration_cohorts = {
         strategy: {
             "strategy_config_hash": lifecycle.strategy_config_hashes[strategy],

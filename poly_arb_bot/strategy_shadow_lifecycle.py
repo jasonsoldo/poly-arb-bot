@@ -133,6 +133,10 @@ class StrategyShadowLifecycle:
         self.data.setdefault("completed_predictions", [])
         self.data.setdefault("orphaned_predictions", [])
         self.data.setdefault("probability_calibration", {})
+        self.data.setdefault("research_positions", {})
+        self.data.setdefault("research_claimed_markets", [])
+        self.data.setdefault("deployable_claimed_markets", [])
+        self.data.setdefault("research_completed", [])
         self.data.setdefault("complete_set_inventory", {})
         self.data.setdefault("maker_quotes", {})
         self.data.setdefault("processed_complete_set_events", [])
@@ -148,8 +152,9 @@ class StrategyShadowLifecycle:
         self.data["profit_exit_min_pnl"] = self.profit_exit_min_pnl
         self.data["profit_exit_mode"] = self.profit_exit_mode
         self.data["profit_exit_ev_margin"] = self.profit_exit_ev_margin
-        self._mark_dirty()
         self._backfill_completed_trades()
+        self._migrate_lifecycle_state()
+        self._mark_dirty()
         self.refresh_risk_status()
         self._save(force=True)
 
@@ -166,6 +171,65 @@ class StrategyShadowLifecycle:
 
     def _mark_dirty(self):
         self._dirty = True
+
+    def _claim_key(self, market_id):
+        return f"{self.config_hash}|{market_id}"
+
+    def _migrate_lifecycle_state(self):
+        probability_strategies = {
+            "late_window_directional_ev", "low_price_lottery_ev",
+        }
+        research_claims = set(self.data["research_claimed_markets"])
+        deployable_claims = set(self.data["deployable_claimed_markets"])
+        changed = False
+
+        for key, position in list(self.data["positions"].items()):
+            if (
+                position.get("strategy") in probability_strategies
+                and not position.get("terminal_hedged")
+                and position.get("deployable_pnl") is not True
+            ):
+                position["risk_mode"] = "CALIBRATION_RESEARCH"
+                position["portfolio_limits_enforced"] = False
+                position["deployable_pnl"] = False
+                self.data["research_positions"].setdefault(key, position)
+                del self.data["positions"][key]
+                changed = True
+
+        for position in self.data["research_positions"].values():
+            if (
+                position.get("strategy") in probability_strategies
+                and position.get("market_id")
+            ):
+                research_claims.add(self._claim_key(position.get("market_id")))
+        for position in self.data["positions"].values():
+            if (
+                position.get("strategy") in probability_strategies
+                and not position.get("terminal_hedged")
+                and position.get("market_id")
+            ):
+                claim = self._claim_key(position.get("market_id"))
+                research_claims.add(claim)
+                deployable_claims.add(claim)
+        for trade in self.data["completed_trades"]:
+            if (
+                trade.get("strategy") in probability_strategies
+                and trade.get("market_id")
+            ):
+                claim = self._claim_key(trade.get("market_id"))
+                research_claims.add(claim)
+                deployable_claims.add(claim)
+
+        migrated_research = sorted(research_claims)
+        migrated_deployable = sorted(deployable_claims)
+        if self.data["research_claimed_markets"] != migrated_research:
+            self.data["research_claimed_markets"] = migrated_research
+            changed = True
+        if self.data["deployable_claimed_markets"] != migrated_deployable:
+            self.data["deployable_claimed_markets"] = migrated_deployable
+            changed = True
+        if changed:
+            self._mark_dirty()
 
     def _save(self, force=False):
         if not self._dirty:
@@ -347,6 +411,205 @@ class StrategyShadowLifecycle:
         return ":".join((row["strategy"], row["market_id"], outcome))
 
     @staticmethod
+    def _valid_probability_entry(row, market):
+        required = (
+            "event_id", "strategy", "market_id", "outcome", "ts",
+            "dynamic_target_size", "dynamic_cash_cost",
+            "dynamic_risk_adjusted_cost", "dynamic_vwap", "dynamic_fee",
+            "dynamic_buffer", "estimated_probability",
+            "calibration_input_probability", "asset", "condition_id",
+            "config_hash", "probability_model_id", "price_to_beat",
+        )
+        if (
+            row.get("config_version") != "shadow-buy-rules-v10"
+            or row.get("sizing_mode") != "real_market_dynamic_v1"
+            or any(row.get(field) is None for field in required)
+            or row.get("settlement_source_verified") is not True
+            or row.get("settlement_source") not in {"binance", "chainlink"}
+            or market.get("settlement_source") != row.get("settlement_source")
+            or market.get("close_ts") is None
+            or any(
+                type(row.get(field)) is not int or row.get(field) != 0
+                for field in (
+                    "real_order_submissions", "real_orders", "real_fills",
+                )
+            )
+        ):
+            return False
+        try:
+            size = float(row["dynamic_target_size"])
+            cash_cost = float(row["dynamic_cash_cost"])
+            risk_cost = float(row["dynamic_risk_adjusted_cost"])
+            vwap = float(row["dynamic_vwap"])
+            fee = float(row["dynamic_fee"])
+            buffer = float(row["dynamic_buffer"])
+            probability = float(row["estimated_probability"])
+            calibration_input = float(row["calibration_input_probability"])
+            entry_ts = float(row["ts"])
+            close_ts = float(market["close_ts"])
+        except (TypeError, ValueError):
+            return False
+        values = (
+            size, cash_cost, risk_cost, vwap, fee, buffer, probability,
+            calibration_input, entry_ts, close_ts,
+        )
+        return (
+            all(math.isfinite(value) for value in values)
+            and size > 0 and cash_cost > 0 and risk_cost > 0 and vwap > 0
+            and fee >= 0 and buffer >= 0
+            and 0 <= probability <= 1 and 0 <= calibration_input <= 1
+            and risk_cost + 1e-9 >= cash_cost
+            and math.isclose(
+                risk_cost, cash_cost + buffer, rel_tol=0, abs_tol=1e-9,
+            )
+        )
+
+    def _probability_position_from_row(
+            self, row, market, *, risk_mode, deployable_pnl):
+        return {
+            "event_id": row["event_id"],
+            "source_event_id": row.get("source_event_id", row["event_id"]),
+            "strategy": row["strategy"],
+            "lifecycle_state": "ACTIVE",
+            "market_id": row["market_id"],
+            "outcome": row["outcome"],
+            "entry_ts": float(row["ts"]),
+            "close_ts": float(market["close_ts"]),
+            "target_size": float(row["dynamic_target_size"]),
+            "entry_cost": round(float(row["dynamic_cash_cost"]), 12),
+            "risk_adjusted_entry_cost": round(
+                float(row["dynamic_risk_adjusted_cost"]), 12),
+            "dynamic_vwap": float(row["dynamic_vwap"]),
+            "expected_fill_price": float(row["dynamic_vwap"]),
+            "dynamic_fee": float(row["dynamic_fee"]),
+            "fees_per_share": float(row["dynamic_fee"]),
+            "dynamic_buffer": float(row["dynamic_buffer"]),
+            "estimated_probability": float(row["estimated_probability"]),
+            "calibration_input_probability": float(
+                row["calibration_input_probability"]),
+            "raw_estimated_probability": row.get(
+                "raw_estimated_probability"),
+            "market_implied_probability": row.get(
+                "market_implied_probability"),
+            "gross_edge": row.get("gross_edge"),
+            "net_ev": row.get("net_ev"),
+            "consensus_price": row.get("consensus_price"),
+            "fast_price": row.get("fast_price"),
+            "asset": row["asset"],
+            "timeframe": row.get("timeframe", market.get("interval")),
+            "condition_id": row["condition_id"],
+            "price_to_beat": row.get("price_to_beat"),
+            "strategy_config_version": row.get("config_version"),
+            "strategy_config_hash": row["config_hash"],
+            "probability_model_id": row["probability_model_id"],
+            "profitability_cohort_key": row.get("profitability_cohort_key"),
+            "profitability_gate_decision": row.get(
+                "profitability_gate_decision"),
+            "profitability_gate_reason": row.get("profitability_gate_reason"),
+            "profitability_gate_hash": row.get("profitability_gate_hash"),
+            "calibration_snapshot_hash": row.get("calibration_snapshot_hash"),
+            "deployable_candidate": row.get("deployable_candidate"),
+            "settlement_source": row["settlement_source"],
+            "settlement_source_verified": row[
+                "settlement_source_verified"],
+            "settlement_reference": row.get("settlement_reference"),
+            "probability_reference_source": row.get(
+                "probability_reference_source"),
+            "probability_reference_price": row.get(
+                "probability_reference_price"),
+            "reference_state": row.get("reference_state"),
+            "reference_quorum_met": row.get("reference_quorum_met"),
+            "cross_source_divergence_bps": row.get(
+                "cross_source_divergence_bps"),
+            "seconds_to_close": row.get("seconds_to_close"),
+            "model_source": row.get("model_source"),
+            "model_sample_count": row.get("model_sample_count"),
+            "model_sample_span_seconds": row.get(
+                "model_sample_span_seconds"),
+            "minimum_model_sample_span_seconds": row.get(
+                "minimum_model_sample_span_seconds"),
+            "volatility_per_sqrt_second": row.get(
+                "volatility_per_sqrt_second"),
+            "expected_move_log_std": row.get("expected_move_log_std"),
+            "reference_log_distance": row.get("reference_log_distance"),
+            "up_standardized_distance": row.get(
+                "up_standardized_distance"),
+            "up_momentum_z": row.get("up_momentum_z"),
+            "up_imbalance_z": row.get("up_imbalance_z"),
+            "up_final_model_z": row.get("up_final_model_z"),
+            "paired_book_imbalance": row.get("paired_book_imbalance"),
+            "input_quality_score": row.get("input_quality_score"),
+            "confidence_type": row.get("confidence_type"),
+            "sizing_mode": row.get("sizing_mode"),
+            "market_minimum_size": row.get("market_minimum_size"),
+            "dynamic_target_size": row.get("dynamic_target_size"),
+            "dynamic_maximum_loss": row.get("dynamic_maximum_loss"),
+            "capital_budget_usd": row.get("capital_budget_usd"),
+            "size_binding_constraint": row.get("size_binding_constraint"),
+            "window": row.get("window"),
+            "generation": row.get("generation"),
+            "session": row.get("session"),
+            "evaluation_sequence": row.get("evaluation_sequence"),
+            "risk_mode": risk_mode,
+            "portfolio_limits_enforced": bool(deployable_pnl),
+            "would_block_reason": None,
+            "deployable_pnl": bool(deployable_pnl),
+            "cash_ledger_version": 2,
+            "config_version": self.config_version,
+            "config_hash": self.config_hash,
+            "real_order_submissions": 0,
+            "real_orders": 0,
+            "real_fills": 0,
+        }
+
+    @staticmethod
+    def _research_position_id(row):
+        identity = "|".join((
+            str(row.get("strategy", "")),
+            str(row.get("market_id", "")),
+            str(row.get("config_hash", "")),
+            str(row.get("probability_model_id", "")),
+            str(row.get("calibration_snapshot_hash", "")),
+        ))
+        return f"research:{hashlib.sha256(identity.encode()).hexdigest()}"
+
+    def capture_research_candidate(self, row, markets):
+        strategy = row.get("strategy")
+        market_id = row.get("market_id")
+        if (
+            row.get("event_type") != "shadow_eval"
+            or strategy not in {
+                "late_window_directional_ev", "low_price_lottery_ev",
+            }
+            or row.get("decision") != "ACCEPT"
+            or market_id not in markets
+        ):
+            return False
+        claim = self._claim_key(market_id)
+        if claim in self.data["research_claimed_markets"]:
+            return False
+        market = markets[market_id]
+        if not self._valid_probability_entry(row, market):
+            return False
+        source_event_id = row["event_id"]
+        research_id = self._research_position_id(row)
+        research_row = {
+            **row, "event_id": research_id, "source_event_id": source_event_id,
+        }
+        position = self._probability_position_from_row(
+            research_row, market,
+            risk_mode="CALIBRATION_RESEARCH", deployable_pnl=False,
+        )
+        key = self._key(row)
+        self.data["research_positions"][key] = position
+        self.data["research_claimed_markets"] = sorted({
+            *self.data["research_claimed_markets"], claim,
+        })
+        self._mark_dirty()
+        self._save(force=True)
+        return True
+
+    @staticmethod
     def _prediction_id(row, horizon):
         identity = "|".join((
             str(row.get("strategy", "")), str(row.get("market_id", "")),
@@ -517,6 +780,39 @@ class StrategyShadowLifecycle:
             changed = durable_transition = True
         return changed, durable_transition
 
+    def _consume_probability_candidate(self, row, market):
+        if self.calibration_mode:
+            return self._reject(row, "calibration_research_only")
+        if row.get("profitability_gate_decision") != "ALLOW":
+            return self._reject(
+                row,
+                row.get("profitability_gate_reason")
+                or "profitability_gate_unavailable",
+            )
+        if not self._valid_probability_entry(row, market):
+            return self._reject(row, "settlement_provenance_unverified")
+        risk_adjusted_entry_cost = float(row["dynamic_risk_adjusted_cost"])
+        block_reason = self._portfolio_block_reason(
+            row, market, risk_adjusted_entry_cost,
+        )
+        if block_reason:
+            return self._reject(row, block_reason)
+        claim = self._claim_key(row["market_id"])
+        if claim in self.data["deployable_claimed_markets"]:
+            return False
+        key = self._key(row)
+        self.data["portfolio_rejections"].pop(key, None)
+        self.data["positions"][key] = self._probability_position_from_row(
+            row, market, risk_mode="PORTFOLIO_LIMITS_ENFORCED",
+            deployable_pnl=True,
+        )
+        self.data["deployable_claimed_markets"] = sorted({
+            *self.data["deployable_claimed_markets"], claim,
+        })
+        self._mark_dirty()
+        self._save(force=True)
+        return True
+
     def consume(self, row, markets):
         strategy = row.get("strategy")
         if self._try_profit_exit(row):
@@ -545,6 +841,10 @@ class StrategyShadowLifecycle:
         key = self._key(row)
         if key in self.data["positions"]:
             return False
+        if probability_strategy and not hedged:
+            return self._consume_probability_candidate(
+                row, markets[row["market_id"]],
+            )
         dynamic = not hedged and (probability_strategy or strategy == "paired_lock")
         if dynamic:
             required = [
@@ -724,96 +1024,128 @@ class StrategyShadowLifecycle:
         ):
             return False
         key = self._key(row)
-        position = self.data["positions"].get(key)
-        if not position or position.get("terminal_hedged"):
-            return False
-        if float(row.get("ts") or 0) <= float(position.get("entry_ts") or 0):
-            return False
-        size = float(position.get("target_size") or 0)
-        fill_quantity = float(row.get("exit_fill_quantity") or 0)
-        if (
-            size <= 0
-            or row.get("exit_depth_ok") is not True
-            or row.get("exit_book_fresh") is not True
-            or fill_quantity + 1e-12 < size
-        ):
+        positions = [
+            ("positions", "shadow_complete", self.data["positions"].get(key)),
+            (
+                "research_positions", "shadow_research_complete",
+                self.data["research_positions"].get(key),
+            ),
+        ]
+        positions = [
+            item for item in positions
+            if item[2] is not None and not item[2].get("terminal_hedged")
+        ]
+        if not positions:
             return False
         exit_vwap = float(row.get("exit_vwap") or 0)
         if not math.isfinite(exit_vwap) or exit_vwap <= 0:
             return False
         exit_fee = float(row.get("exit_total_fee") or 0)
         exit_buffer = float(row.get("exit_execution_buffer") or 0)
-        exit_cash_proceeds = round(size * exit_vwap - exit_fee, 12)
-        exit_risk_adjusted_proceeds = round(
-            exit_cash_proceeds - exit_buffer, 12)
-        risk_adjusted_profit = round(
-            exit_risk_adjusted_proceeds - float(position.get(
-                "risk_adjusted_entry_cost", position["entry_cost"])), 12)
-        pnl = round(exit_cash_proceeds - float(position["entry_cost"]), 12)
-        if risk_adjusted_profit + 1e-12 < self.profit_exit_min_pnl:
-            return False
-        mode = self._profit_exit_mode_for(position.get("strategy"))
-        expected_settlement_value = None
-        if mode == "ev":
-            try:
-                probability = float(position.get("estimated_probability"))
-            except (TypeError, ValueError):
-                probability = None
-            if probability is None or not math.isfinite(probability) or probability < 0:
-                # Fail closed toward holding: without probability evidence
-                # there is no justification for clipping the settlement
-                # payoff early.
-                return False
-            expected_settlement_value = round(probability * size, 12)
+        completed_any = False
+        for collection_name, event_type, position in positions:
+            if float(row.get("ts") or 0) <= float(position.get("entry_ts") or 0):
+                continue
+            size = float(position.get("target_size") or 0)
+            fill_quantity = float(row.get("exit_fill_quantity") or 0)
             if (
-                exit_risk_adjusted_proceeds + 1e-12
-                < expected_settlement_value + self.profit_exit_ev_margin
+                size <= 0
+                or row.get("exit_depth_ok") is not True
+                or row.get("exit_book_fresh") is not True
+                or fill_quantity + 1e-12 < size
             ):
-                return False
+                continue
+            exit_cash_proceeds = round(size * exit_vwap - exit_fee, 12)
+            exit_risk_adjusted_proceeds = round(
+                exit_cash_proceeds - exit_buffer, 12)
+            risk_adjusted_profit = round(
+                exit_risk_adjusted_proceeds - float(position.get(
+                    "risk_adjusted_entry_cost", position["entry_cost"])), 12)
+            pnl = round(exit_cash_proceeds - float(position["entry_cost"]), 12)
+            if risk_adjusted_profit + 1e-12 < self.profit_exit_min_pnl:
+                continue
+            mode = self._profit_exit_mode_for(position.get("strategy"))
+            expected_settlement_value = None
+            if mode == "ev":
+                try:
+                    probability = float(position.get("estimated_probability"))
+                except (TypeError, ValueError):
+                    probability = None
+                if (
+                    probability is None
+                    or not math.isfinite(probability)
+                    or probability < 0
+                ):
+                    continue
+                expected_settlement_value = round(probability * size, 12)
+                if (
+                    exit_risk_adjusted_proceeds + 1e-12
+                    < expected_settlement_value + self.profit_exit_ev_margin
+                ):
+                    continue
 
-        complete_id = f'{position["event_id"]}:profit-exit:{row["event_id"]}'
-        complete = {
-            **position,
-            "event_id": complete_id,
-            "entry_event_id": position["event_id"],
-            "exit_source_entry_event_id": row.get("entry_event_id"),
-            "exit_event_id": row["event_id"],
-            "event_type": "shadow_complete",
-            "timestamp": float(row.get("ts") or time.time()),
-            "ts": float(row.get("ts") or time.time()),
-            "lifecycle_state": "COMPLETE",
-            "completion_reason": "profit_target_book_executable",
-            "profit_exit_mode": mode,
-            "expected_settlement_value": expected_settlement_value,
-            "exit_ev_margin": self.profit_exit_ev_margin if mode == "ev" else None,
-            "exit_fill_quantity": fill_quantity,
-            "exit_vwap": exit_vwap,
-            "exit_total_fee": exit_fee,
-            "exit_execution_buffer": exit_buffer,
-            "exit_cash_proceeds": exit_cash_proceeds,
-            "exit_risk_adjusted_proceeds": exit_risk_adjusted_proceeds,
-            "exit_net_proceeds": exit_risk_adjusted_proceeds,
-            "payout": exit_cash_proceeds,
-            "realized_simulated_pnl": pnl,
-            "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
-            "simulated_fill": False,
-            "real_order_submissions": 0,
-            "real_orders": 0,
-            "real_fills": 0,
-        }
-        self.logger.write("shadow_complete", complete)
-        self.data["completed"] = (self.data["completed"] + [complete_id])[-20000:]
-        self.data["completed_trades"] = (
-            self.data["completed_trades"] + [{
+            complete_id = (
+                f'{position["event_id"]}:profit-exit:{row["event_id"]}'
+            )
+            complete = {
+                **position,
                 "event_id": complete_id,
-                "strategy": position["strategy"],
-                "market_id": position["market_id"],
-                "ts": complete["ts"],
-                "pnl": pnl,
-                "strategy_config_hash": position.get("strategy_config_hash"),
-            }]
-        )[-20000:]
-        del self.data["positions"][key]
+                "entry_event_id": position["event_id"],
+                "exit_source_entry_event_id": row.get("entry_event_id"),
+                "exit_event_id": row["event_id"],
+                "event_type": event_type,
+                "timestamp": float(row.get("ts") or time.time()),
+                "ts": float(row.get("ts") or time.time()),
+                "lifecycle_state": "COMPLETE",
+                "completion_reason": "profit_target_book_executable",
+                "profit_exit_mode": mode,
+                "expected_settlement_value": expected_settlement_value,
+                "exit_ev_margin": (
+                    self.profit_exit_ev_margin if mode == "ev" else None
+                ),
+                "exit_fill_quantity": fill_quantity,
+                "exit_vwap": exit_vwap,
+                "exit_total_fee": exit_fee,
+                "exit_execution_buffer": exit_buffer,
+                "exit_cash_proceeds": exit_cash_proceeds,
+                "exit_risk_adjusted_proceeds": exit_risk_adjusted_proceeds,
+                "exit_net_proceeds": exit_risk_adjusted_proceeds,
+                "payout": exit_cash_proceeds,
+                "realized_simulated_pnl": pnl,
+                "net_pnl_usd": pnl,
+                "net_return_per_dollar_risked": (
+                    pnl / float(position["entry_cost"])
+                ),
+                "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+                "simulated_fill": False,
+                "real_order_submissions": 0,
+                "real_orders": 0,
+                "real_fills": 0,
+            }
+            self.logger.write(event_type, complete)
+            if event_type == "shadow_complete":
+                self.data["completed"] = (
+                    self.data["completed"] + [complete_id]
+                )[-20000:]
+                self.data["completed_trades"] = (
+                    self.data["completed_trades"] + [{
+                        "event_id": complete_id,
+                        "strategy": position["strategy"],
+                        "market_id": position["market_id"],
+                        "ts": complete["ts"],
+                        "pnl": pnl,
+                        "strategy_config_hash": position.get(
+                            "strategy_config_hash"),
+                    }]
+                )[-20000:]
+            else:
+                self.data["research_completed"] = (
+                    self.data["research_completed"] + [complete_id]
+                )[-20000:]
+            del self.data[collection_name][key]
+            completed_any = True
+        if not completed_any:
+            return False
         self.refresh_risk_status()
         self._mark_dirty()
         self._save(force=True)
@@ -990,12 +1322,13 @@ class StrategyShadowLifecycle:
             eligible.append(row)
         return min(eligible, key=lambda row: float(row["source_timestamp_ms"])) if eligible else None
 
-    def settle(self, markets, venue, now):
+    def _settle_position_collection(
+            self, collection_name, completion_event_type, markets, venue, now):
         completed = 0
         changed = False
         durable_transition = False
-
-        for key, position in list(self.data["positions"].items()):
+        positions = self.data[collection_name]
+        for key, position in list(positions.items()):
             close_ts = float(position.get("close_ts") or 0)
             if now < close_ts:
                 continue
@@ -1018,11 +1351,16 @@ class StrategyShadowLifecycle:
                     continue
 
                 orphan_id = f'{position["event_id"]}:orphaned'
+                orphan_event_type = (
+                    "shadow_research_orphaned"
+                    if completion_event_type == "shadow_research_complete"
+                    else "shadow_orphaned"
+                )
                 orphan = {
                     **position,
                     "event_id": orphan_id,
                     "entry_event_id": position["event_id"],
-                    "event_type": "shadow_orphaned",
+                    "event_type": orphan_event_type,
                     "timestamp": now,
                     "lifecycle_state": "ORPHANED",
                     "orphaned_at": now,
@@ -1035,11 +1373,11 @@ class StrategyShadowLifecycle:
                     "real_orders": 0,
                     "real_fills": 0,
                 }
-                self.logger.write("shadow_orphaned", orphan)
+                self.logger.write(orphan_event_type, orphan)
                 self.data["orphaned_positions"] = (
                     self.data["orphaned_positions"] + [orphan]
                 )[-20000:]
-                del self.data["positions"][key]
+                del positions[key]
                 changed = True
                 durable_transition = True
                 continue
@@ -1065,7 +1403,7 @@ class StrategyShadowLifecycle:
             pnl = round(payout - position["entry_cost"], 12)
             complete_id = f'{position["event_id"]}:complete'
 
-            self.logger.write("shadow_complete", {
+            self.logger.write(completion_event_type, {
                 **position,
                 "event_id": complete_id,
                 "entry_event_id": position["event_id"],
@@ -1076,29 +1414,61 @@ class StrategyShadowLifecycle:
                 "winning_outcome": winning_outcome,
                 "payout": payout,
                 "realized_simulated_pnl": pnl,
+                **({
+                    "ts": now,
+                    "net_pnl_usd": pnl,
+                    "net_return_per_dollar_risked": (
+                        pnl / float(position["entry_cost"])
+                    ),
+                } if "deployable_pnl" in position else {}),
                 "real_order_submissions": 0,
                 "real_orders": 0,
                 "real_fills": 0,
             })
 
-            self.data["completed"] = (
-                self.data["completed"] + [complete_id]
-            )[-20000:]
-            self.data["completed_trades"] = (
-                self.data["completed_trades"] + [{
-                    "event_id": complete_id,
-                    "strategy": position["strategy"],
-                    "market_id": position["market_id"],
-                    "ts": now,
-                    "pnl": pnl,
-                    "strategy_config_hash": position.get("strategy_config_hash"),
-                }]
-            )[-20000:]
+            if completion_event_type == "shadow_complete":
+                self.data["completed"] = (
+                    self.data["completed"] + [complete_id]
+                )[-20000:]
+                self.data["completed_trades"] = (
+                    self.data["completed_trades"] + [{
+                        "event_id": complete_id,
+                        "strategy": position["strategy"],
+                        "market_id": position["market_id"],
+                        "ts": now,
+                        "pnl": pnl,
+                        "strategy_config_hash": position.get(
+                            "strategy_config_hash"),
+                    }]
+                )[-20000:]
+            else:
+                self.data["research_completed"] = (
+                    self.data["research_completed"] + [complete_id]
+                )[-20000:]
 
-            del self.data["positions"][key]
+            del positions[key]
             completed += 1
             changed = True
             durable_transition = True
+        return completed, changed, durable_transition
+
+    def settle(self, markets, venue, now):
+        completed = 0
+        changed = False
+        durable_transition = False
+
+        for collection_name, event_type in (
+            ("positions", "shadow_complete"),
+            ("research_positions", "shadow_research_complete"),
+        ):
+            ledger_completed, ledger_changed, ledger_durable = (
+                self._settle_position_collection(
+                    collection_name, event_type, markets, venue, now,
+                )
+            )
+            completed += ledger_completed
+            changed = changed or ledger_changed
+            durable_transition = durable_transition or ledger_durable
 
         inventory_completed, inventory_changed = self._settle_complete_set_inventory(
             venue, now
@@ -1217,6 +1587,7 @@ def process_audit_once(audit_path, lifecycle, markets, offset_key="audit_offset"
         lifecycle._mark_dirty()
     opened = 0
     captured = 0
+    research_captured = 0
     with audit_path.open(encoding="utf-8") as handle:
         handle.seek(lifecycle.data.get(offset_key, 0))
         while line := handle.readline():
@@ -1225,10 +1596,13 @@ def process_audit_once(audit_path, lifecycle, markets, offset_key="audit_offset"
             except json.JSONDecodeError:
                 continue
             captured += lifecycle.capture_prediction(row, markets)
+            research_captured += lifecycle.capture_research_candidate(
+                row, markets,
+            )
             opened += lifecycle.consume(row, markets)
         offset = handle.tell()
         if offset != lifecycle.data.get(offset_key):
             lifecycle.data[offset_key] = offset
             lifecycle._mark_dirty()
-    lifecycle._save(force=bool(opened or captured))
+    lifecycle._save(force=bool(opened or captured or research_captured))
     return opened

@@ -4,6 +4,7 @@ from dataclasses import replace
 import pytest
 
 from poly_arb_bot.ev_shadow import canonical_strategy_config_hash
+from poly_arb_bot.profitability_analysis import build_profitability_report
 from poly_arb_bot.strategy_shadow_lifecycle import PortfolioLimits, StrategyShadowLifecycle, process_audit_once
 
 
@@ -31,18 +32,116 @@ def test_lifecycle_persists_real_order_invariants_on_initialization(tmp_path):
     assert stored["real_fills"] == 0
 
 
+def test_legacy_probability_state_migrates_without_touching_paired_lock(
+        tmp_path):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "positions": {
+            "late_window_directional_ev:m1:Up": {
+                "strategy": "late_window_directional_ev",
+                "market_id": "m1",
+                "deployable_pnl": False,
+            },
+            "low_price_lottery_ev:m2:Down": {
+                "strategy": "low_price_lottery_ev",
+                "market_id": "m2",
+                "deployable_pnl": True,
+            },
+            "paired_lock:m3:Both": {
+                "strategy": "paired_lock",
+                "market_id": "m3",
+            },
+        },
+        "completed": [],
+        "audit_offset": 0,
+        "paired_audit_offset": 0,
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+
+    lifecycle = StrategyShadowLifecycle(state, tmp_path / "events.jsonl")
+
+    assert set(lifecycle.data["positions"]) == {
+        "low_price_lottery_ev:m2:Down", "paired_lock:m3:Both",
+    }
+    assert set(lifecycle.data["research_positions"]) == {
+        "late_window_directional_ev:m1:Up",
+    }
+    assert lifecycle.data["research_positions"][
+        "late_window_directional_ev:m1:Up"
+    ]["risk_mode"] == "CALIBRATION_RESEARCH"
+    assert {
+        claim.rsplit("|", 1)[-1]
+        for claim in lifecycle.data["research_claimed_markets"]
+    } == {"m1", "m2"}
+    assert {
+        claim.rsplit("|", 1)[-1]
+        for claim in lifecycle.data["deployable_claimed_markets"]
+    } == {"m2"}
+    assert all("m3" not in claim for claim in (
+        lifecycle.data["research_claimed_markets"]
+        + lifecycle.data["deployable_claimed_markets"]
+    ))
+
+
+def test_legacy_completion_log_is_claimed_before_new_entries_are_consumed(
+        tmp_path):
+    log = tmp_path / "events.jsonl"
+    log.write_text(json.dumps({
+        "event_id": "legacy:complete",
+        "event_type": "shadow_complete",
+        "strategy": "late_window_directional_ev",
+        "market_id": "m1",
+        "ts": 1101,
+        "realized_simulated_pnl": 1.0,
+        "strategy_config_hash": canonical_strategy_config_hash(),
+    }) + "\n", encoding="utf-8")
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    row = accepted("new-after-upgrade")
+
+    assert lifecycle.capture_research_candidate(row, {"m1": market()}) is False
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["research_positions"] == {}
+    assert lifecycle.data["positions"] == {}
+    assert len(lifecycle.data["research_claimed_markets"]) == 1
+    assert len(lifecycle.data["deployable_claimed_markets"]) == 1
+
+
 def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up"):
+    probability_model_id = (
+        "directional_logistic_projected_v2"
+        if strategy == "late_window_directional_ev"
+        else "lottery_logistic_projected_v2"
+    )
     return {
         "event_id": event_id, "event_type": "shadow_eval", "strategy": strategy,
-        "market_id": "m1", "asset": "BTC", "timeframe": "5m", "outcome": outcome,
+        "market_id": "m1", "condition_id": "c1", "asset": "BTC",
+        "timeframe": "5m", "outcome": outcome,
         "decision": "ACCEPT", "expected_fill_price": 0.4, "fees": 0.01,
         "target_size": 10, "ts": 1000, "config_hash": canonical_strategy_config_hash(),
         "estimated_probability": 0.7,
+        "calibration_input_probability": 0.72,
+        "probability_model_id": probability_model_id,
+        "profitability_cohort_key": "late_window_directional_ev|5m|p70|t60",
+        "profitability_gate_decision": "ALLOW",
+        "profitability_gate_reason": "eligible_cohort",
+        "profitability_gate_hash": "gate-hash",
+        "calibration_snapshot_hash": "snapshot-hash",
+        "deployable_candidate": True,
+        "settlement_source": "chainlink",
+        "settlement_source_verified": True,
+        "price_to_beat": 100,
+        "seconds_to_close": 100,
+        "target_depth_ok": True,
+        "executable_depth_size": 12,
+        "fee_rate": 0.07,
         "config_version": "shadow-buy-rules-v10",
         "sizing_mode": "real_market_dynamic_v1",
         "dynamic_target_size": 10,
         "market_minimum_size": 1,
         "dynamic_buy_notional": 4.0,
+        "dynamic_vwap": 0.4,
         "dynamic_fee": 0.1,
         "dynamic_buffer": 0.2,
         "dynamic_cash_cost": 4.1,
@@ -51,6 +150,9 @@ def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up")
         "dynamic_maximum_loss": 4.1,
         "capital_budget_usd": 20,
         "size_binding_constraint": "capital_budget",
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
     }
 
 
@@ -394,7 +496,7 @@ def test_ev_mode_respects_configured_margin(tmp_path):
     assert len(lifecycle.data["positions"]) == 1
 
 
-def test_ev_mode_holds_without_probability_evidence(tmp_path):
+def test_probability_position_fails_closed_without_probability_evidence(tmp_path):
     lifecycle = StrategyShadowLifecycle(
         tmp_path / "state.json", tmp_path / "events.jsonl",
         profit_exit_min_pnl=.10,
@@ -402,10 +504,10 @@ def test_ev_mode_holds_without_probability_evidence(tmp_path):
     entry = accepted()
     entry["config_version"] = "shadow-buy-rules-v10"
     entry["estimated_probability"] = None
-    assert lifecycle.consume(entry, {"m1": market()}) is True
+    assert lifecycle.consume(entry, {"m1": market()}) is False
 
     assert lifecycle.consume(_exit_quote(entry), {"m1": market()}) is False
-    assert len(lifecycle.data["positions"]) == 1
+    assert lifecycle.data["positions"] == {}
 
 
 def test_per_strategy_env_override_restores_flat_mode(tmp_path, monkeypatch):
@@ -767,7 +869,10 @@ def test_chainlink_settlement_completes_winning_up_position(tmp_path):
 
 def test_binance_settlement_requires_matching_timeframe(tmp_path):
     lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", tmp_path / "complete.jsonl")
-    lifecycle.consume(accepted(), {"m1": market("binance", "1h")})
+    row = accepted()
+    row["settlement_source"] = "binance"
+    row["timeframe"] = "1h"
+    lifecycle.consume(row, {"m1": market("binance", "1h")})
     venue = {"assets": {"BTC": {"binance_settlement_samples": [
         {"source_timestamp_ms": 1_100_000, "price": 99, "timeframe": "4h"},
         {"source_timestamp_ms": 1_100_000, "price": 101, "timeframe": "1h"},
@@ -994,20 +1099,22 @@ def test_strategy_order_size_limits_are_enforced(tmp_path):
     assert reject["real_fills"] == 0
 
 
-def test_calibration_mode_bypasses_portfolio_limits_and_records_counterfactual(tmp_path):
+def test_calibration_mode_never_opens_deployable_position(tmp_path):
     limits = replace(PortfolioLimits(), directional_max_order_size=5)
     lifecycle = StrategyShadowLifecycle(
         tmp_path / "state.json", tmp_path / "events.jsonl", limits,
         calibration_mode=True,
     )
 
-    assert lifecycle.consume(accepted(), {"m1": market()}) is True
+    row = accepted()
+    assert lifecycle.capture_research_candidate(row, {"m1": market()}) is True
+    assert lifecycle.consume(row, {"m1": market()}) is False
 
-    position = next(iter(lifecycle.data["positions"].values()))
-    assert position["risk_mode"] == "CALIBRATION_UNTHROTTLED"
+    assert lifecycle.data["positions"] == {}
+    position = next(iter(lifecycle.data["research_positions"].values()))
+    assert position["risk_mode"] == "CALIBRATION_RESEARCH"
     assert position["portfolio_limits_enforced"] is False
-    assert position["would_block_reason"] == "directional_order_size_limit"
-    assert lifecycle.data["calibration_bypasses"] == {"directional_order_size_limit": 1}
+    assert position["deployable_pnl"] is False
     assert lifecycle.data["current_risk_halts"] == {}
 
 
@@ -1210,4 +1317,220 @@ def test_lifecycle_checkpoints_are_dirty_and_coalesced(tmp_path):
     assert len(writes) == 1
     lifecycle.flush()
     assert len(writes) == 1
+
+
+def _profit_exit(entry, event_id="exit-1"):
+    return {
+        **entry,
+        "event_id": event_id,
+        "event_type": "shadow_probability_profit_exit_book_executable",
+        "decision": "REJECT",
+        "reason": "net_ev_below_threshold",
+        "ts": 1010,
+        "exit_fill_quantity": 10,
+        "exit_vwap": .45,
+        "exit_total_fee": .02,
+        "exit_execution_buffer": .01,
+        "exit_depth_ok": True,
+        "exit_book_fresh": True,
+        "exit_observation_semantics": "BOOK_EXECUTABLE_NOT_FILL",
+    }
+
+
+def test_research_and_deployable_admission_are_isolated(tmp_path):
+    markets = {"m1": market()}
+    blocked = accepted()
+    blocked.update(
+        profitability_gate_decision="BLOCK",
+        profitability_gate_reason="profitability_gate_no_eligible_cohort",
+        deployable_candidate=False,
+    )
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "blocked-state.json", tmp_path / "blocked-events.jsonl",
+    )
+
+    assert lifecycle.capture_research_candidate(blocked, markets) is True
+    assert lifecycle.consume(blocked, markets) is False
+    assert lifecycle.data["positions"] == {}
+    assert len(lifecycle.data["research_positions"]) == 1
+    reject = json.loads(
+        (tmp_path / "blocked-events.jsonl").read_text().splitlines()[-1]
+    )
+    assert reject["reason"] == "profitability_gate_no_eligible_cohort"
+
+    allowed_lifecycle = StrategyShadowLifecycle(
+        tmp_path / "allowed-state.json", tmp_path / "allowed-events.jsonl",
+    )
+    allowed = accepted()
+    assert allowed_lifecycle.capture_research_candidate(allowed, markets) is True
+    assert allowed_lifecycle.consume(allowed, markets) is True
+    deployable = next(iter(allowed_lifecycle.data["positions"].values()))
+    research = next(iter(allowed_lifecycle.data["research_positions"].values()))
+    assert deployable["deployable_pnl"] is True
+    assert deployable["portfolio_limits_enforced"] is True
+    assert research["deployable_pnl"] is False
+    assert research["portfolio_limits_enforced"] is False
+    assert deployable["entry_cost"] == research["entry_cost"] == 4.1
+    assert deployable["risk_adjusted_entry_cost"] == research[
+        "risk_adjusted_entry_cost"] == 4.3
+
+
+def test_calibration_mode_is_research_only_even_when_gate_allows(tmp_path):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+        calibration_mode=True,
+    )
+    row = accepted()
+
+    assert lifecycle.capture_research_candidate(row, {"m1": market()}) is True
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["positions"] == {}
+    research = next(iter(lifecycle.data["research_positions"].values()))
+    assert research["risk_mode"] == "CALIBRATION_RESEARCH"
+    assert research["deployable_pnl"] is False
+
+
+@pytest.mark.parametrize("field,value", [
+    ("settlement_source", None),
+    ("settlement_source", "unverified"),
+    ("settlement_source_verified", False),
+    ("settlement_source_verified", None),
+])
+def test_probability_position_capture_requires_verified_entry_settlement_source(
+        tmp_path, field, value):
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+    )
+    row = accepted()
+    row[field] = value
+
+    assert lifecycle.capture_research_candidate(row, {"m1": market()}) is False
+    assert lifecycle.consume(row, {"m1": market()}) is False
+    assert lifecycle.data["research_positions"] == {}
+    assert lifecycle.data["positions"] == {}
+
+
+def test_same_bid_exit_completes_both_ledgers_and_claims_prevent_reopen(tmp_path):
+    log = tmp_path / "events.jsonl"
+    state = tmp_path / "state.json"
+    markets = {"m1": market()}
+    lifecycle = StrategyShadowLifecycle(
+        state, log, profit_exit_min_pnl=.10, profit_exit_mode="flat",
+    )
+    entry = accepted()
+    assert lifecycle.capture_research_candidate(entry, markets) is True
+    assert lifecycle.consume(entry, markets) is True
+
+    assert lifecycle.consume(_profit_exit(entry), markets) is True
+    assert lifecycle.data["positions"] == {}
+    assert lifecycle.data["research_positions"] == {}
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    completions = [
+        row for row in events
+        if row["event_type"] in {"shadow_complete", "shadow_research_complete"}
+    ]
+    assert {row["event_type"] for row in completions} == {
+        "shadow_complete", "shadow_research_complete",
+    }
+    assert next(row for row in completions if row["event_type"] == "shadow_complete")[
+        "deployable_pnl"] is True
+    assert next(
+        row for row in completions
+        if row["event_type"] == "shadow_research_complete"
+    )["deployable_pnl"] is False
+    assert all(row["net_pnl_usd"] == .38 for row in completions)
+    assert all(row["net_return_per_dollar_risked"] == pytest.approx(.38 / 4.1)
+               for row in completions)
+
+    restarted = StrategyShadowLifecycle(
+        state, log, profit_exit_min_pnl=.10, profit_exit_mode="flat",
+    )
+    reopened = accepted("a2")
+    assert restarted.capture_research_candidate(reopened, markets) is False
+    assert restarted.consume(reopened, markets) is False
+    assert restarted.data["positions"] == {}
+    assert restarted.data["research_positions"] == {}
+    assert len(restarted.data["research_claimed_markets"]) == 1
+    assert len(restarted.data["deployable_claimed_markets"]) == 1
+
+
+def test_same_settlement_evidence_completes_both_ledgers_with_entry_provenance(
+        tmp_path):
+    log = tmp_path / "events.jsonl"
+    lifecycle = StrategyShadowLifecycle(tmp_path / "state.json", log)
+    markets = {"m1": market()}
+    entry = accepted()
+    assert lifecycle.capture_research_candidate(entry, markets) is True
+    assert lifecycle.consume(entry, markets) is True
+    venue = {"assets": {"BTC": {"chainlink_settlement_samples": [
+        {"source_timestamp_ms": 1_100_000, "price": 101},
+    ]}}}
+
+    lifecycle.settle(markets, venue, now=1101)
+
+    completions = [
+        json.loads(line) for line in log.read_text().splitlines()
+        if json.loads(line)["event_type"] in {
+            "shadow_complete", "shadow_research_complete",
+        }
+    ]
+    assert {row["event_type"] for row in completions} == {
+        "shadow_complete", "shadow_research_complete",
+    }
+    assert all(row["settlement_source"] == "chainlink" for row in completions)
+    assert all(row["settlement_source_verified"] is True for row in completions)
+    assert all(row["real_order_submissions"] == 0 for row in completions)
+    assert all(row["real_orders"] == 0 for row in completions)
+    assert all(row["real_fills"] == 0 for row in completions)
+
+
+def test_lifecycle_settlement_is_eligible_for_profitability_reconciliation(
+        tmp_path):
+    strategy_audit = tmp_path / "strategy-audit.jsonl"
+    execution_log = tmp_path / "shadow-execution.jsonl"
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", execution_log,
+    )
+    markets = {"m1": market()}
+    entry = accepted()
+    strategy_audit.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+    assert lifecycle.capture_research_candidate(entry, markets) is True
+    assert lifecycle.consume(entry, markets) is True
+    lifecycle.settle(
+        markets,
+        {"assets": {"BTC": {"chainlink_settlement_samples": [
+            {"source_timestamp_ms": 1_100_000, "price": 101},
+        ]}}},
+        now=1101,
+    )
+
+    report = build_profitability_report(
+        strategy_audit,
+        execution_log,
+        {"late_window_directional_ev": entry["config_hash"]},
+    )
+
+    assert report["overall"]["independent_markets"] == 1
+    assert report["excluded"].get("settlement_provenance_unverified", 0) == 0
+    assert report["real_order_submissions"] == 0
+    assert report["real_orders"] == 0
+    assert report["real_fills"] == 0
+
+
+def test_process_audit_captures_research_before_gate_reject(tmp_path):
+    audit = tmp_path / "strategy.jsonl"
+    row = accepted()
+    row.update(
+        profitability_gate_decision="BLOCK",
+        profitability_gate_reason="profitability_gate_unavailable",
+        deployable_candidate=False,
+    )
+    audit.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    lifecycle = StrategyShadowLifecycle(
+        tmp_path / "state.json", tmp_path / "events.jsonl",
+    )
+
+    assert process_audit_once(audit, lifecycle, {"m1": market()}) == 0
+    assert len(lifecycle.data["research_positions"]) == 1
+    assert lifecycle.data["positions"] == {}
 
