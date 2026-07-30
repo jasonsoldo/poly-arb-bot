@@ -385,6 +385,16 @@ def test_probability_profitability_gate_is_content_bound_and_audit_only():
     assert "now_seconds()" in matching
 
 
+def test_profitability_artifacts_are_validated_before_any_boost_reparse():
+    loader = SOURCE.split("void load_profitability_artifacts()", 1)[1].split(
+        "ProfitabilityGateResult evaluate_profitability_gate", 1
+    )[0]
+    assert loader.index("profitability_gate::validate_artifacts") < (
+        loader.index("boost::property_tree::read_json")
+    )
+    assert "gate_stream" not in loader
+
+
 def test_disconnect_and_market_reload_invalidate_pending_arbitrage_attempts():
     reload_body = SOURCE.split("void reload_markets()", 1)[1].split(
         "void queue_write", 1

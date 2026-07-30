@@ -142,6 +142,16 @@ def _gate(snapshot):
     )
 
 
+def _task3_gate(snapshot):
+    gate = _gate(snapshot)
+    gate.update({
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    })
+    return _self_hash(gate)
+
+
 def _compile_profitability_runner(tmp_path):
     cxx = compiler()
     assert cxx, "g++ is required for C++ profitability boundary tests"
@@ -190,6 +200,25 @@ def _run_validation(
         command.append(str(evaluation_now))
     completed = subprocess.run(
         command,
+        check=True, text=True, capture_output=True,
+    )
+    return completed.stdout.splitlines()
+
+
+def _run_validation_raw(
+    binary, tmp_path, snapshot_encoded, gate_encoded, now=NOW + 1,
+):
+    snapshot_path = tmp_path / "snapshot-raw.json"
+    gate_path = tmp_path / "gate-raw.json"
+    snapshot_path.write_text(snapshot_encoded, encoding="utf-8")
+    gate_path.write_text(gate_encoded, encoding="utf-8")
+    completed = subprocess.run(
+        [
+            str(binary), "validate", str(snapshot_path), str(gate_path),
+            str(now), "1",
+            BASE_HASHES["late_window_directional_ev"],
+            BASE_HASHES["low_price_lottery_ev"],
+        ],
         check=True, text=True, capture_output=True,
     )
     return completed.stdout.splitlines()
@@ -457,6 +486,144 @@ def test_cpp_rejects_self_hashed_malformed_or_inconsistent_gates(tmp_path):
     allow_without_eligible = json.loads(json.dumps(valid_gate))
     allow_without_eligible["eligible_cohorts"] = {}
     mutations.append(allow_without_eligible)
+
+    for mutation in mutations:
+        _self_hash(mutation)
+        lines = _run_validation(binary, tmp_path, snapshot, mutation)
+        assert lines[0] == "BLOCKED"
+        assert lines[2] == "BLOCK"
+
+
+def test_cpp_rejects_duplicate_keys_before_any_boost_reparse(tmp_path):
+    binary = _compile_profitability_runner(tmp_path)
+    snapshot = _calibration_snapshot()
+    gate = _task3_gate(snapshot)
+    snapshot_encoded = json.dumps(snapshot, separators=(",", ":"))
+    gate_encoded = json.dumps(gate, separators=(",", ":"))
+
+    duplicate_top_level = snapshot_encoded.replace(
+        '"strategies":{',
+        '"strategies":{"malicious":true},"strategies":{',
+        1,
+    )
+    duplicate_nested = snapshot_encoded.replace(
+        '"min_bucket_samples":30',
+        '"min_bucket_samples":0,"min_bucket_samples":30',
+        1,
+    )
+    duplicate_gate_entry = gate_encoded.replace(
+        '"decision":"ALLOW"',
+        '"decision":"BLOCK","decision":"ALLOW"',
+        1,
+    )
+
+    for malicious_snapshot, malicious_gate in (
+        (duplicate_top_level, gate_encoded),
+        (duplicate_nested, gate_encoded),
+        (snapshot_encoded, duplicate_gate_entry),
+    ):
+        lines = _run_validation_raw(
+            binary, tmp_path, malicious_snapshot, malicious_gate
+        )
+        assert lines[0] == "BLOCKED"
+        assert lines[2] == "BLOCK"
+
+
+def test_cpp_rejects_unknown_or_missing_snapshot_schema_fields(tmp_path):
+    binary = _compile_profitability_runner(tmp_path)
+    valid_snapshot = _calibration_snapshot()
+    gate = _task3_gate(valid_snapshot)
+    mutations = []
+
+    extra_top = json.loads(json.dumps(valid_snapshot))
+    extra_top["unexpected"] = 1
+    mutations.append(extra_top)
+
+    extra_strategy_entry = json.loads(json.dumps(valid_snapshot))
+    extra_strategy_entry["strategies"]["late_window_directional_ev"][
+        "unexpected"
+    ] = 1
+    mutations.append(extra_strategy_entry)
+
+    extra_bucket_field = json.loads(json.dumps(valid_snapshot))
+    extra_bucket_field["strategies"]["late_window_directional_ev"][
+        "overall"
+    ]["0.8-0.9"]["unexpected"] = 1
+    mutations.append(extra_bucket_field)
+
+    missing_top = json.loads(json.dumps(valid_snapshot))
+    del missing_top["excluded_other_cohort"]
+    mutations.append(missing_top)
+
+    invalid_type = json.loads(json.dumps(valid_snapshot))
+    invalid_type["validation_expires_at"] = str(
+        invalid_type["validation_expires_at"]
+    )
+    mutations.append(invalid_type)
+
+    for mutation in mutations:
+        _self_hash(mutation)
+        rebound_gate = json.loads(json.dumps(gate))
+        rebound_gate["calibration_snapshot_hash"] = mutation["content_hash"]
+        _self_hash(rebound_gate)
+        assert _run_validation(
+            binary, tmp_path, mutation, rebound_gate
+        )[0] == "BLOCKED"
+
+
+def test_cpp_enforces_exact_task3_gate_schema_and_zero_real_orders(tmp_path):
+    binary = _compile_profitability_runner(tmp_path)
+    snapshot = _calibration_snapshot()
+    valid_gate = _task3_gate(snapshot)
+    mutations = []
+
+    extra_top = json.loads(json.dumps(valid_gate))
+    extra_top["unexpected"] = 1
+    mutations.append(extra_top)
+
+    missing_source_metadata = json.loads(json.dumps(valid_gate))
+    del missing_source_metadata["source"]
+    mutations.append(missing_source_metadata)
+
+    missing_real_order_field = json.loads(json.dumps(valid_gate))
+    del missing_real_order_field["real_orders"]
+    mutations.append(missing_real_order_field)
+
+    nonzero_real_order_field = json.loads(json.dumps(valid_gate))
+    nonzero_real_order_field["real_order_submissions"] = 1
+    mutations.append(nonzero_real_order_field)
+
+    invalid_real_order_type = json.loads(json.dumps(valid_gate))
+    invalid_real_order_type["real_fills"] = 0.0
+    mutations.append(invalid_real_order_type)
+
+    extra_dimensions = json.loads(json.dumps(valid_gate))
+    next(iter(extra_dimensions["eligible_cohorts"].values()))[
+        "dimensions"
+    ]["unexpected"] = "x"
+    mutations.append(extra_dimensions)
+
+    extra_eligible_metadata = json.loads(json.dumps(valid_gate))
+    next(iter(extra_eligible_metadata["eligible_cohorts"].values()))[
+        "unexpected"
+    ] = 1
+    mutations.append(extra_eligible_metadata)
+
+    extra_rejected_metadata = json.loads(json.dumps(valid_gate))
+    next(iter(extra_rejected_metadata["rejected_cohorts"].values()))[
+        "unexpected"
+    ] = 1
+    mutations.append(extra_rejected_metadata)
+
+    missing_generated_at = json.loads(json.dumps(valid_gate))
+    del missing_generated_at["generated_at"]
+    mutations.append(missing_generated_at)
+
+    invalid_source_map_type = json.loads(json.dumps(valid_gate))
+    invalid_source_map_type["source_discovery_config_hashes"][
+        "late_window_directional_ev"
+    ] = 1
+    mutations.append(invalid_source_map_type)
 
     for mutation in mutations:
         _self_hash(mutation)

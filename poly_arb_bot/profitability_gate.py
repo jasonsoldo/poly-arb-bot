@@ -33,6 +33,50 @@ _COHORT_DIMENSIONS = (
     "fill",
     "seconds",
 )
+_PROBABILITY_BUCKETS = frozenset(
+    f"{index / 10:.1f}-{(index + 1) / 10:.1f}"
+    for index in range(10)
+)
+_SECONDS_BUCKETS = frozenset({
+    "0-30", "30-60", "60-90", "90-180",
+    "180-300", "300-600", "600-inf",
+})
+_COHORT_FIELDS = {
+    "dimensions",
+    "independent_markets",
+    "mean_net_return",
+    "net_pnl_usd",
+    "lower_bound_95",
+    "largest_positive_market_share",
+}
+_ELIGIBLE_FIELDS = _COHORT_FIELDS | {
+    "decision",
+    "reason",
+    "source_discovery_config_hash",
+    "strategy_base_config_hash",
+    "probability_model_id",
+}
+_REJECTED_FIELDS = _COHORT_FIELDS | {"decision", "reason"}
+_GATE_FIELDS = {
+    "version",
+    "generated_at",
+    "validation_activated_at",
+    "validation_expires_at",
+    "profitability_cohort_version",
+    "calibration_snapshot_hash",
+    "source",
+    "source_discovery_config_hashes",
+    "target_base_config_hashes",
+    "probability_model_ids",
+    "thresholds",
+    "decision",
+    "eligible_cohorts",
+    "rejected_cohorts",
+    "real_order_submissions",
+    "real_orders",
+    "real_fills",
+    "content_hash",
+}
 
 
 def canonical_payload_hash(
@@ -120,12 +164,46 @@ def _cohort_rejection(cohort):
 
 
 def _dimensions_key(dimensions):
-    if not isinstance(dimensions, dict) or any(
+    if (
+        not isinstance(dimensions, dict)
+        or set(dimensions) != set(_COHORT_DIMENSIONS)
+        or any(
         not isinstance(dimensions.get(name), str) or not dimensions[name]
         for name in _COHORT_DIMENSIONS
+        )
+        or dimensions["probability"] not in _PROBABILITY_BUCKETS
+        or dimensions["fill"] not in _PROBABILITY_BUCKETS
+        or dimensions["seconds"] not in _SECONDS_BUCKETS
     ):
         return None
     return "|".join(f"{name}={dimensions[name]}" for name in _COHORT_DIMENSIONS)
+
+
+def _cohort_schema_valid(cohort, expected_fields, allow_unknown_strategy=False):
+    if not isinstance(cohort, dict) or set(cohort) != expected_fields:
+        return False
+    dimensions = cohort.get("dimensions")
+    if (
+        _dimensions_key(dimensions) is None
+        or (
+            not allow_unknown_strategy
+            and dimensions["strategy"] not in PROBABILITY_STRATEGIES
+        )
+        or type(cohort.get("independent_markets")) is not int
+        or cohort["independent_markets"] < 0
+    ):
+        return False
+    return all(
+        isinstance(cohort.get(field), (int, float))
+        and not isinstance(cohort[field], bool)
+        and math.isfinite(float(cohort[field]))
+        for field in (
+            "mean_net_return",
+            "net_pnl_usd",
+            "lower_bound_95",
+            "largest_positive_market_share",
+        )
+    )
 
 
 def build_profitability_gate(
@@ -229,6 +307,9 @@ def build_profitability_gate(
         "decision": "ALLOW" if eligible else "NO_TRADE",
         "eligible_cohorts": eligible,
         "rejected_cohorts": rejected,
+        "real_order_submissions": report["real_order_submissions"],
+        "real_orders": report["real_orders"],
+        "real_fills": report["real_fills"],
     }
     payload["content_hash"] = canonical_payload_hash(payload)
     return payload
@@ -238,7 +319,12 @@ def _gate_reason(payload, now):
     current = _finite(now)
     if current is None:
         return "profitability_gate_invalid"
-    if not isinstance(payload, dict) or payload.get("version") != GATE_VERSION:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _GATE_FIELDS
+        or payload.get("version") != GATE_VERSION
+        or not isinstance(payload.get("source"), dict)
+    ):
         return "profitability_gate_invalid"
     for field in (
         "eligible_cohorts",
@@ -302,7 +388,7 @@ def _gate_reason(payload, now):
     for key, entry in payload["eligible_cohorts"].items():
         if (
             not isinstance(key, str)
-            or not isinstance(entry, dict)
+            or not _cohort_schema_valid(entry, _ELIGIBLE_FIELDS)
             or _dimensions_key(entry.get("dimensions")) != key
             or entry.get("decision") != "ALLOW"
             or entry.get("reason") != "profitability_cohort_eligible"
@@ -320,11 +406,63 @@ def _gate_reason(payload, now):
             != model_ids.get(strategy)
         ):
             return "profitability_gate_invalid"
+    rejection_reasons = {
+        "insufficient_independent_markets",
+        "mean_net_return_not_positive",
+        "lower_bound_95_not_positive",
+        "positive_pnl_too_concentrated",
+        "cohort_key_mismatch",
+        "unknown_strategy",
+        "target_base_config_hash_unavailable",
+        "calibration_cohort_mismatch",
+    }
+    for key, entry in payload["rejected_cohorts"].items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(entry, dict)
+            or entry.get("reason") not in rejection_reasons
+            or not _cohort_schema_valid(
+                entry,
+                _REJECTED_FIELDS,
+                allow_unknown_strategy=entry.get("reason") == "unknown_strategy",
+            )
+            or entry.get("decision") != "BLOCK"
+            or (
+                entry["reason"] != "cohort_key_mismatch"
+                and _dimensions_key(entry["dimensions"]) != key
+            )
+            or key in payload["eligible_cohorts"]
+        ):
+            return "profitability_gate_invalid"
+        threshold_reason = _cohort_rejection(entry)
+        if entry["reason"] in {
+            "insufficient_independent_markets",
+            "mean_net_return_not_positive",
+            "lower_bound_95_not_positive",
+            "positive_pnl_too_concentrated",
+        } and threshold_reason != entry["reason"]:
+            return "profitability_gate_invalid"
+        if entry["reason"] in {
+            "cohort_key_mismatch",
+            "unknown_strategy",
+            "target_base_config_hash_unavailable",
+            "calibration_cohort_mismatch",
+        } and threshold_reason is not None:
+            return "profitability_gate_invalid"
+    for field in ("real_order_submissions", "real_orders", "real_fills"):
+        if type(payload.get(field)) is not int or payload[field] != 0:
+            return "profitability_gate_invalid"
+    generated = _finite(payload.get("generated_at"))
     activated = _finite(payload.get("validation_activated_at"))
     expires = _finite(payload.get("validation_expires_at"))
     if (
-        activated is None
+        generated is None
+        or activated is None
         or expires is None
+        or generated <= 0
+        or generated != activated
+        or activated <= 0
+        or expires <= activated
         or expires > activated + VALIDATION_SECONDS
         or current < activated
     ):

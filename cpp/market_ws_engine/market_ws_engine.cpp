@@ -3293,9 +3293,6 @@ private:
                 snapshot.get<double>("generated_at", 0);
             snapshot_ready = true;
 
-            ptree gate;
-            std::istringstream gate_stream(gate_encoded);
-            boost::property_tree::read_json(gate_stream, gate);
             profitability_gate_hash_ =
                 profitability_artifacts_.gate_hash;
             profitability_gate_snapshot_hash_ =

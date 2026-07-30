@@ -125,7 +125,10 @@ private:
             require(':');
             skip_space();
             Json child = parse_value();
-            value.object[std::move(key)] = std::move(child);
+            if (!value.object.emplace(
+                    std::move(key), std::move(child)).second)
+                throw std::invalid_argument(
+                    "duplicate JSON object key");
             skip_space();
             if (consume('}')) break;
             require(',');
@@ -630,7 +633,11 @@ inline bool validate_dimensions(
         "strategy", "asset", "timeframe", "outcome",
         "probability", "fill", "seconds",
     };
-    if (dimensions.type != Json::Type::Object) return false;
+    if (!exact_fields(dimensions, {
+            "strategy", "asset", "timeframe", "outcome",
+            "probability", "fill", "seconds",
+        }))
+        return false;
     std::ostringstream output;
     for (std::size_t index = 0; index < names.size(); ++index) {
         const std::string value =
@@ -680,7 +687,12 @@ inline bool validate_snapshot(
         Artifacts& artifacts) {
     long long version = 0;
     double generated = 0, activated = 0, expires = 0;
-    if (snapshot.type != Json::Type::Object ||
+    if (!exact_fields(snapshot, {
+            "version", "generated_at", "config",
+            "excluded_other_cohort", "strategies",
+            "validation_activated_at", "validation_expires_at",
+            "content_hash",
+        }) ||
             !integer_value(field(snapshot, "version"), version) ||
             version != 2 ||
             !number_value(field(snapshot, "generated_at"), generated) ||
@@ -763,7 +775,17 @@ inline bool validate_gate(
     const Json* sources = field(gate, "source_discovery_config_hashes");
     const Json* models = field(gate, "probability_model_ids");
     const Json* thresholds = field(gate, "thresholds");
-    if (gate.type != Json::Type::Object ||
+    if (!exact_fields(gate, {
+            "version", "generated_at",
+            "validation_activated_at", "validation_expires_at",
+            "profitability_cohort_version",
+            "calibration_snapshot_hash", "source",
+            "source_discovery_config_hashes",
+            "target_base_config_hashes", "probability_model_ids",
+            "thresholds", "decision", "eligible_cohorts",
+            "rejected_cohorts", "real_order_submissions",
+            "real_orders", "real_fills", "content_hash",
+        }) ||
             !integer_value(field(gate, "version"), version) ||
             version != 1 || !eligible || !rejected || !targets ||
             !sources || !models || !thresholds ||
@@ -772,6 +794,8 @@ inline bool validate_gate(
             targets->type != Json::Type::Object ||
             sources->type != Json::Type::Object ||
             models->type != Json::Type::Object ||
+            !field(gate, "source") ||
+            field(gate, "source")->type != Json::Type::Object ||
             !exact_fields(*thresholds, {
                 "minimum_independent_markets",
                 "minimum_mean_net_return_exclusive",
@@ -800,20 +824,34 @@ inline bool validate_gate(
         return false;
     const std::string decision =
         string_value(field(gate, "decision"));
+    long long real_order_submissions = -1;
+    long long real_orders = -1;
+    long long real_fills = -1;
     if ((decision != "ALLOW" && decision != "NO_TRADE") ||
             (decision == "ALLOW") != !eligible->object.empty() ||
-            (decision == "NO_TRADE" && !eligible->object.empty()))
+            (decision == "NO_TRADE" && !eligible->object.empty()) ||
+            !integer_value(
+                field(gate, "real_order_submissions"),
+                real_order_submissions) ||
+            !integer_value(field(gate, "real_orders"), real_orders) ||
+            !integer_value(field(gate, "real_fills"), real_fills) ||
+            real_order_submissions != 0 || real_orders != 0 ||
+            real_fills != 0)
         return false;
     artifacts.calibration_snapshot_hash =
         string_value(field(gate, "calibration_snapshot_hash"));
+    double generated = 0;
     if (!hash_is_valid(artifacts.calibration_snapshot_hash) ||
             string_value(field(
                 gate, "profitability_cohort_version")) !=
                 expected.profitability_cohort_version ||
+            !number_value(field(gate, "generated_at"), generated) ||
             !number_value(
                 field(gate, "validation_activated_at"), activated) ||
             !number_value(field(gate, "validation_expires_at"), expires) ||
-            now < activated || now >= expires ||
+            generated <= 0 || generated != activated ||
+            activated <= 0 || now < activated || now >= expires ||
+            expires <= activated ||
             expires > activated + 72 * 3600)
         return false;
     for (const auto& item : targets->object) {
@@ -849,13 +887,22 @@ inline bool validate_gate(
         const Json& entry = item.second;
         const Json* dimensions = field(entry, "dimensions");
         std::string dimensions_key;
-        if (!dimensions ||
+        double net_pnl = 0;
+        if (!exact_fields(entry, {
+                "dimensions", "independent_markets",
+                "mean_net_return", "net_pnl_usd", "lower_bound_95",
+                "largest_positive_market_share", "decision", "reason",
+                "source_discovery_config_hash",
+                "strategy_base_config_hash", "probability_model_id",
+            }) ||
+                !dimensions ||
                 !validate_dimensions(*dimensions, &dimensions_key) ||
                 dimensions_key != key ||
                 string_value(field(entry, "decision")) != "ALLOW" ||
                 string_value(field(entry, "reason")) !=
                     "profitability_cohort_eligible" ||
-                !cohort_rejection(entry).empty())
+                !cohort_rejection(entry).empty() ||
+                !number_value(field(entry, "net_pnl_usd"), net_pnl))
             return false;
         const std::string strategy = string_value(
             field(*dimensions, "strategy"));
@@ -887,24 +934,42 @@ inline bool validate_gate(
         const std::string key = utf8(item.first);
         const Json& entry = item.second;
         const std::string reason = string_value(field(entry, "reason"));
-        if (entry.type != Json::Type::Object ||
+        if (!exact_fields(entry, {
+                "dimensions", "independent_markets",
+                "mean_net_return", "net_pnl_usd", "lower_bound_95",
+                "largest_positive_market_share", "decision", "reason",
+            }) ||
                 string_value(field(entry, "decision")) != "BLOCK" ||
                 !rejection_reasons.count(reason) ||
                 artifacts.eligible_cohorts.count(key))
             return false;
         const Json* dimensions = field(entry, "dimensions");
-        if (dimensions) {
-            std::string dimensions_key;
-            if (!validate_dimensions(
+        std::string dimensions_key;
+        if (!dimensions ||
+                !validate_dimensions(
                     *dimensions, &dimensions_key,
                     reason == "unknown_strategy"))
-                return false;
-            if (reason != "cohort_key_mismatch" &&
-                    dimensions_key != key)
-                return false;
-        } else if (reason != "invalid_cohort") {
             return false;
-        }
+        if (reason != "cohort_key_mismatch" &&
+                dimensions_key != key)
+            return false;
+        long long rejected_markets = -1;
+        double rejected_mean = 0, rejected_pnl = 0;
+        double rejected_lower = 0, rejected_share = 0;
+        if (!integer_value(
+                field(entry, "independent_markets"),
+                rejected_markets) ||
+                rejected_markets < 0 ||
+                !number_value(
+                    field(entry, "mean_net_return"), rejected_mean) ||
+                !number_value(
+                    field(entry, "net_pnl_usd"), rejected_pnl) ||
+                !number_value(
+                    field(entry, "lower_bound_95"), rejected_lower) ||
+                !number_value(
+                    field(entry, "largest_positive_market_share"),
+                    rejected_share))
+            return false;
         const std::string threshold_reason = cohort_rejection(entry);
         if ((reason == "insufficient_independent_markets" ||
              reason == "mean_net_return_not_positive" ||
@@ -971,6 +1036,11 @@ inline Artifacts validate_artifacts(
                 detail::field(gate, "calibration_snapshot_hash"));
         if (snapshot_binding != snapshot_hash ||
                 !detail::validate_gate(gate, now, expected, artifacts))
+            return artifacts;
+        if (artifacts.gate_activated_at <
+                artifacts.snapshot_activated_at ||
+                artifacts.gate_expires_at >
+                artifacts.snapshot_expires_at)
             return artifacts;
         artifacts.gate_hash = gate_hash;
         artifacts.ready = true;

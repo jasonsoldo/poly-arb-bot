@@ -103,11 +103,13 @@ def _row():
     }
 
 
-def _cohort(markets=60, mean=0.05, lower=0.01, share=0.10):
+def _cohort(
+    markets=60, mean=0.05, lower=0.01, share=0.10, asset="BTC",
+):
     return {
         "dimensions": {
             "strategy": STRATEGY,
-            "asset": "BTC",
+            "asset": asset,
             "timeframe": "5m",
             "outcome": "Up",
             "probability": "0.7-0.8",
@@ -240,8 +242,8 @@ def test_gate_allows_only_cohorts_that_meet_every_profitability_threshold(tmp_pa
     concentrated_row = {**_row(), "asset": "SOL"}
     report = _report({
         eligible_key: _cohort(),
-        cohort_key(insufficient_row): _cohort(markets=49),
-        cohort_key(concentrated_row): _cohort(share=0.30),
+        cohort_key(insufficient_row): _cohort(markets=49, asset="ETH"),
+        cohort_key(concentrated_row): _cohort(share=0.30, asset="SOL"),
     })
 
     snapshot, payload = _gate(tmp_path, report)
@@ -262,6 +264,18 @@ def test_gate_allows_only_cohorts_that_meet_every_profitability_threshold(tmp_pa
         "source_discovery_config_hash"
     ] == BASE_HASH
     assert payload["content_hash"] == canonical_payload_hash(payload)
+    assert {
+        field: payload[field]
+        for field in (
+            "real_order_submissions",
+            "real_orders",
+            "real_fills",
+        )
+    } == {
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }
     assert evaluate_profitability_gate(
         _row(), payload, NOW + 1, _expected(snapshot)
     )["decision"] == "ALLOW"

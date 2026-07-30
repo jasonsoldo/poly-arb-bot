@@ -220,7 +220,23 @@ def _bucket_map_error(buckets, minimum_samples):
 
 
 def _calibration_payload_error(payload, reference_time=None):
-    if not isinstance(payload, dict) or payload.get("version") != MAP_VERSION:
+    base_fields = {
+        "version",
+        "generated_at",
+        "config",
+        "excluded_other_cohort",
+        "strategies",
+    }
+    frozen_fields = {
+        "validation_activated_at",
+        "validation_expires_at",
+        "content_hash",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) not in (base_fields, base_fields | frozen_fields)
+        or payload.get("version") != MAP_VERSION
+    ):
         return "calibration map version or schema is invalid"
     generated_at = _finite_number(payload.get("generated_at"))
     if (
