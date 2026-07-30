@@ -281,6 +281,86 @@ def test_gate_allows_only_cohorts_that_meet_every_profitability_threshold(tmp_pa
     )["decision"] == "ALLOW"
 
 
+def test_gate_source_identity_schema_is_exact_and_typed(tmp_path):
+    _, payload = _gate(tmp_path)
+    path = tmp_path / "gate.json"
+    publish_profitability_gate(payload, path)
+    assert load_profitability_gate(path, NOW + 1)[0] == payload
+
+    mutations = []
+    missing_side = json.loads(json.dumps(payload))
+    del missing_side["source"]["execution_log"]
+    mutations.append(missing_side)
+    extra_side = json.loads(json.dumps(payload))
+    extra_side["source"]["unexpected"] = {}
+    mutations.append(extra_side)
+    invalid_path = json.loads(json.dumps(payload))
+    invalid_path["source"]["strategy_audit"]["path"] = 1
+    mutations.append(invalid_path)
+    invalid_files = json.loads(json.dumps(payload))
+    invalid_files["source"]["execution_log"]["files"] = [{
+        "path": "",
+        "bytes": -1,
+        "sha256": "bad",
+    }]
+    mutations.append(invalid_files)
+    extra_file_field = json.loads(json.dumps(payload))
+    extra_file_field["source"]["execution_log"]["files"] = [{
+        "path": "execution.jsonl",
+        "bytes": 0,
+        "sha256": "a" * 64,
+        "extra": True,
+    }]
+    mutations.append(extra_file_field)
+
+    for mutation in mutations:
+        mutation["content_hash"] = canonical_payload_hash(mutation)
+        path.write_text(json.dumps(mutation), encoding="utf-8")
+        assert load_profitability_gate(path, NOW + 1) == (
+            None,
+            "profitability_gate_invalid",
+        )
+
+
+def test_invalid_cohort_rejected_union_round_trips_and_is_exact(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    report = _report(cohorts={"malformed": ["not", "a", "cohort"]})
+    payload = build_profitability_gate(
+        report,
+        snapshot,
+        {STRATEGY: BASE_HASH},
+        NOW,
+        COHORT_VERSION,
+    )
+    rejected = payload["rejected_cohorts"]["malformed"]
+    assert rejected == {
+        "source": ["not", "a", "cohort"],
+        "decision": "BLOCK",
+        "reason": "invalid_cohort",
+    }
+    path = tmp_path / "invalid-cohort-gate.json"
+    publish_profitability_gate(payload, path)
+    assert load_profitability_gate(path, NOW + 1)[0] == payload
+
+    for mutation in ("missing_source", "extra", "decision", "reason"):
+        malformed = json.loads(json.dumps(payload))
+        entry = malformed["rejected_cohorts"]["malformed"]
+        if mutation == "missing_source":
+            del entry["source"]
+        elif mutation == "extra":
+            entry["extra"] = 1
+        elif mutation == "decision":
+            entry["decision"] = "ALLOW"
+        else:
+            entry["reason"] = "unknown"
+        malformed["content_hash"] = canonical_payload_hash(malformed)
+        path.write_text(json.dumps(malformed), encoding="utf-8")
+        assert load_profitability_gate(path, NOW + 1) == (
+            None,
+            "profitability_gate_invalid",
+        )
+
+
 def test_gate_rejects_cohort_not_bound_to_snapshot_base_config(tmp_path):
     snapshot = _snapshot(tmp_path)
     snapshot["strategies"][STRATEGY]["cohort"][

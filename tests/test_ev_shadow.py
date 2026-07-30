@@ -132,7 +132,10 @@ def _eligible_directional_gate(snapshot, base_hash, now=1000.0):
     report = {
         "version": 1,
         "generated_at": now - 1,
-        "source": {},
+        "source": {
+            "strategy_audit": {"path": "audit.jsonl", "files": []},
+            "execution_log": {"path": "execution.jsonl", "files": []},
+        },
         "selected_config_hashes": {
             "late_window_directional_ev": base_hash,
         },

@@ -598,6 +598,35 @@ inline bool probability_strategy(const std::string& strategy) {
         strategy == "low_price_lottery_ev";
 }
 
+inline bool validate_source_identity(const Json& source) {
+    if (!exact_fields(
+            source, {"strategy_audit", "execution_log"}))
+        return false;
+    for (const std::string side : {
+             "strategy_audit", "execution_log",
+         }) {
+        const Json* identity = field(source, side);
+        if (!identity ||
+                !exact_fields(*identity, {"path", "files"}) ||
+                string_value(field(*identity, "path")).empty())
+            return false;
+        const Json* files = field(*identity, "files");
+        if (!files || files->type != Json::Type::Array)
+            return false;
+        for (const Json& item : files->array) {
+            long long bytes = -1;
+            if (!exact_fields(item, {"path", "bytes", "sha256"}) ||
+                    string_value(field(item, "path")).empty() ||
+                    !integer_value(field(item, "bytes"), bytes) ||
+                    bytes < 0 ||
+                    !hash_is_valid(
+                        string_value(field(item, "sha256"))))
+                return false;
+        }
+    }
+    return true;
+}
+
 inline bool validate_bucket_map(
         const Json& buckets, long long minimum_samples,
         bool require_usable) {
@@ -795,7 +824,7 @@ inline bool validate_gate(
             sources->type != Json::Type::Object ||
             models->type != Json::Type::Object ||
             !field(gate, "source") ||
-            field(gate, "source")->type != Json::Type::Object ||
+            !validate_source_identity(*field(gate, "source")) ||
             !exact_fields(*thresholds, {
                 "minimum_independent_markets",
                 "minimum_mean_net_return_exclusive",
@@ -934,6 +963,11 @@ inline bool validate_gate(
         const std::string key = utf8(item.first);
         const Json& entry = item.second;
         const std::string reason = string_value(field(entry, "reason"));
+        if (exact_fields(entry, {"source", "decision", "reason"}) &&
+                string_value(field(entry, "decision")) == "BLOCK" &&
+                reason == "invalid_cohort" &&
+                !artifacts.eligible_cohorts.count(key))
+            continue;
         if (!exact_fields(entry, {
                 "dimensions", "independent_markets",
                 "mean_net_return", "net_pnl_usd", "lower_bound_95",

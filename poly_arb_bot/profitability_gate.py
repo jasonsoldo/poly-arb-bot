@@ -77,6 +77,9 @@ _GATE_FIELDS = {
     "real_fills",
     "content_hash",
 }
+_SOURCE_SIDES = {"strategy_audit", "execution_log"}
+_SOURCE_IDENTITY_FIELDS = {"path", "files"}
+_SOURCE_FILE_FIELDS = {"path", "bytes", "sha256"}
 
 
 def canonical_payload_hash(
@@ -108,6 +111,37 @@ def _finite(value):
     return number if math.isfinite(number) else None
 
 
+def _source_identity_valid(source):
+    if not isinstance(source, dict) or set(source) != _SOURCE_SIDES:
+        return False
+    for identity in source.values():
+        if (
+            not isinstance(identity, dict)
+            or set(identity) != _SOURCE_IDENTITY_FIELDS
+            or not isinstance(identity.get("path"), str)
+            or not identity["path"]
+            or not isinstance(identity.get("files"), list)
+        ):
+            return False
+        for item in identity["files"]:
+            if (
+                not isinstance(item, dict)
+                or set(item) != _SOURCE_FILE_FIELDS
+                or not isinstance(item.get("path"), str)
+                or not item["path"]
+                or type(item.get("bytes")) is not int
+                or item["bytes"] < 0
+                or not isinstance(item.get("sha256"), str)
+                or len(item["sha256"]) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in item["sha256"]
+                )
+            ):
+                return False
+    return True
+
+
 def _atomic_publish(payload, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,6 +164,8 @@ def _validated_report(report):
         raise ValueError(f"profitability report blocking_exclusions: {reasons}")
     cohorts = report.get("cohorts")
     source_hashes = report.get("selected_config_hashes")
+    if not _source_identity_valid(report.get("source")):
+        raise ValueError("profitability report source identity is invalid")
     if not isinstance(cohorts, dict) or not isinstance(source_hashes, dict):
         raise ValueError("profitability report cohorts or config hashes are invalid")
     if any(
@@ -323,7 +359,7 @@ def _gate_reason(payload, now):
         not isinstance(payload, dict)
         or set(payload) != _GATE_FIELDS
         or payload.get("version") != GATE_VERSION
-        or not isinstance(payload.get("source"), dict)
+        or not _source_identity_valid(payload.get("source"))
     ):
         return "profitability_gate_invalid"
     for field in (
@@ -407,6 +443,7 @@ def _gate_reason(payload, now):
         ):
             return "profitability_gate_invalid"
     rejection_reasons = {
+        "invalid_cohort",
         "insufficient_independent_markets",
         "mean_net_return_not_positive",
         "lower_bound_95_not_positive",
@@ -417,6 +454,15 @@ def _gate_reason(payload, now):
         "calibration_cohort_mismatch",
     }
     for key, entry in payload["rejected_cohorts"].items():
+        if (
+            isinstance(key, str)
+            and isinstance(entry, dict)
+            and set(entry) == {"source", "decision", "reason"}
+            and entry.get("decision") == "BLOCK"
+            and entry.get("reason") == "invalid_cohort"
+            and key not in payload["eligible_cohorts"]
+        ):
+            continue
         if (
             not isinstance(key, str)
             or not isinstance(entry, dict)

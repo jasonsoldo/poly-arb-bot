@@ -108,7 +108,10 @@ def _gate(snapshot):
     report = {
         "version": 1,
         "generated_at": NOW,
-        "source": {},
+        "source": {
+            "strategy_audit": {"path": "audit.jsonl", "files": []},
+            "execution_log": {"path": "execution.jsonl", "files": []},
+        },
         "selected_config_hashes": {
             "late_window_directional_ev": BASE_HASHES[
                 "late_window_directional_ev"
@@ -150,6 +153,38 @@ def _task3_gate(snapshot):
         "real_fills": 0,
     })
     return _self_hash(gate)
+
+
+def _invalid_cohort_gate(snapshot):
+    report = {
+        "version": 1,
+        "generated_at": NOW,
+        "source": {
+            "strategy_audit": {"path": "audit.jsonl", "files": []},
+            "execution_log": {"path": "execution.jsonl", "files": []},
+        },
+        "selected_config_hashes": {
+            "late_window_directional_ev": BASE_HASHES[
+                "late_window_directional_ev"
+            ],
+        },
+        "blocking_exclusions": {},
+        "cohorts": {"malformed-cohort": ["not", "a", "cohort"]},
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }
+    return build_profitability_gate(
+        report,
+        snapshot,
+        {
+            "late_window_directional_ev": BASE_HASHES[
+                "late_window_directional_ev"
+            ],
+        },
+        NOW,
+        "1",
+    )
 
 
 def _compile_profitability_runner(tmp_path):
@@ -630,6 +665,93 @@ def test_cpp_enforces_exact_task3_gate_schema_and_zero_real_orders(tmp_path):
         lines = _run_validation(binary, tmp_path, snapshot, mutation)
         assert lines[0] == "BLOCKED"
         assert lines[2] == "BLOCK"
+
+
+def test_cpp_enforces_exact_task2_source_identity_schema(tmp_path):
+    binary = _compile_profitability_runner(tmp_path)
+    snapshot = _calibration_snapshot()
+    valid_gate = _task3_gate(snapshot)
+    assert _run_validation(
+        binary, tmp_path, snapshot, valid_gate
+    )[0] == "READY"
+    mutations = []
+
+    missing_source_side = json.loads(json.dumps(valid_gate))
+    del missing_source_side["source"]["execution_log"]
+    mutations.append(missing_source_side)
+
+    extra_source_side = json.loads(json.dumps(valid_gate))
+    extra_source_side["source"]["unexpected"] = {}
+    mutations.append(extra_source_side)
+
+    bad_source_path = json.loads(json.dumps(valid_gate))
+    bad_source_path["source"]["strategy_audit"]["path"] = 1
+    mutations.append(bad_source_path)
+
+    bad_files_type = json.loads(json.dumps(valid_gate))
+    bad_files_type["source"]["strategy_audit"]["files"] = {}
+    mutations.append(bad_files_type)
+
+    extra_file_metadata = json.loads(json.dumps(valid_gate))
+    extra_file_metadata["source"]["strategy_audit"]["files"] = [{
+        "path": "audit.jsonl",
+        "bytes": 1,
+        "sha256": "a" * 64,
+        "unexpected": 1,
+    }]
+    mutations.append(extra_file_metadata)
+
+    invalid_file_values = json.loads(json.dumps(valid_gate))
+    invalid_file_values["source"]["execution_log"]["files"] = [{
+        "path": "",
+        "bytes": -1,
+        "sha256": "not-a-hash",
+    }]
+    mutations.append(invalid_file_values)
+
+    for mutation in mutations:
+        _self_hash(mutation)
+        assert _run_validation(
+            binary, tmp_path, snapshot, mutation
+        )[0] == "BLOCKED"
+
+
+def test_cpp_accepts_only_exact_invalid_cohort_rejected_union(tmp_path):
+    binary = _compile_profitability_runner(tmp_path)
+    snapshot = _calibration_snapshot()
+    valid_gate = _invalid_cohort_gate(snapshot)
+    assert _run_validation(
+        binary, tmp_path, snapshot, valid_gate
+    )[0] == "READY"
+    rejected = next(iter(valid_gate["rejected_cohorts"].values()))
+    assert set(rejected) == {"source", "decision", "reason"}
+    mutations = []
+
+    missing_source = json.loads(json.dumps(valid_gate))
+    del next(iter(missing_source["rejected_cohorts"].values()))["source"]
+    mutations.append(missing_source)
+
+    extra_field = json.loads(json.dumps(valid_gate))
+    next(iter(extra_field["rejected_cohorts"].values()))["unexpected"] = 1
+    mutations.append(extra_field)
+
+    wrong_decision = json.loads(json.dumps(valid_gate))
+    next(iter(wrong_decision["rejected_cohorts"].values()))[
+        "decision"
+    ] = "ALLOW"
+    mutations.append(wrong_decision)
+
+    wrong_reason = json.loads(json.dumps(valid_gate))
+    next(iter(wrong_reason["rejected_cohorts"].values()))[
+        "reason"
+    ] = "unknown"
+    mutations.append(wrong_reason)
+
+    for mutation in mutations:
+        _self_hash(mutation)
+        assert _run_validation(
+            binary, tmp_path, snapshot, mutation
+        )[0] == "BLOCKED"
 
 
 def test_cpp_matches_python_strategy_results(tmp_path):
