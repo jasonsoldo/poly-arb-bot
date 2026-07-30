@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from poly_arb_bot.ev_shadow import canonical_strategy_config_hash
 from poly_arb_bot.probability_calibration_map import (
     PROBABILITY_MODEL_IDS,
     freeze_calibration_snapshot,
@@ -316,6 +317,21 @@ def test_gate_rejects_empty_report_with_mismatched_discovery_base(tmp_path):
         )
 
 
+def test_gate_rejects_eligible_cohort_missing_selected_config_hash(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    report = _report()
+    report["selected_config_hashes"] = {}
+
+    with pytest.raises(ValueError, match="selected_config_hashes.*strategy"):
+        build_profitability_gate(
+            report,
+            snapshot,
+            {STRATEGY: BASE_HASH},
+            NOW,
+            COHORT_VERSION,
+        )
+
+
 def test_gate_rejects_report_cohort_key_that_disagrees_with_dimensions(tmp_path):
     snapshot = _snapshot(tmp_path)
 
@@ -552,6 +568,56 @@ def test_cli_blocking_report_exits_two_without_replacing_gate_or_snapshot(
 
     assert completed.returncode == 2
     assert "source_file_missing" in completed.stderr
+    assert validation.read_text(encoding="utf-8") == "old-snapshot"
+    assert gate.read_text(encoding="utf-8") == "old-gate"
+
+
+def test_cli_missing_selected_config_hash_exits_two_without_replacing_outputs(
+    tmp_path,
+):
+    report = tmp_path / "profitability-discovery.json"
+    research = tmp_path / "probability-calibration-research.json"
+    validation = tmp_path / "probability-calibration-validation.json"
+    gate = tmp_path / "profitability-gates.json"
+    report_payload = _report()
+    report_payload["selected_config_hashes"] = {}
+    report.write_text(json.dumps(report_payload), encoding="utf-8")
+    calibration_payload = _calibration_map()
+    for strategy, entry in calibration_payload["strategies"].items():
+        entry["cohort"]["strategy_config_hash"] = (
+            canonical_strategy_config_hash(strategy)
+        )
+    research.write_text(json.dumps(calibration_payload), encoding="utf-8")
+    validation.write_text("old-snapshot", encoding="utf-8")
+    gate.write_text("old-gate", encoding="utf-8")
+    environment = os.environ.copy()
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    environment["PROFITABILITY_COHORT_VERSION"] = COHORT_VERSION
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "poly_arb_bot.cli",
+            "profitability-freeze",
+            "--profitability-report",
+            str(report),
+            "--calibration-map",
+            str(research),
+            "--validation-calibration",
+            str(validation),
+            "--gate-file",
+            str(gate),
+        ],
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert "selected_config_hashes" in completed.stderr
+    assert STRATEGY in completed.stderr
     assert validation.read_text(encoding="utf-8") == "old-snapshot"
     assert gate.read_text(encoding="utf-8") == "old-gate"
 

@@ -185,6 +185,11 @@ def build_profitability_gate(
             != PROBABILITY_MODEL_IDS[strategy]
         ):
             reason = "calibration_cohort_mismatch"
+        if reason is None and strategy not in source_hashes:
+            raise ValueError(
+                "profitability report selected_config_hashes missing strategy: "
+                + strategy
+            )
         entry = dict(cohort) if isinstance(cohort, dict) else {"source": cohort}
         if reason is None:
             entry.update({
