@@ -361,6 +361,168 @@ def test_unresolved_legacy_research_string_persists_fail_closed_guard(
     ) is True
 
 
+def test_conflicting_valid_history_rows_keep_legacy_research_unresolved(
+        tmp_path):
+    state = tmp_path / "state.json"
+    log = tmp_path / "events.jsonl"
+    event_id = "conflicted-research:complete"
+    state.write_text(json.dumps({
+        "positions": {},
+        "research_positions": {},
+        "research_completed": [event_id],
+        "research_claimed_markets": [],
+        "deployable_claimed_markets": [],
+        "completed": [],
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+    genuine = _research_completion(event_id, "m1", "a" * 64)
+    conflicting = _research_completion(event_id, "wrong-market", "b" * 64)
+    log.write_text(json.dumps(genuine) + "\n", encoding="utf-8")
+    (tmp_path / "events.jsonl.1").write_text(
+        json.dumps(conflicting) + "\n", encoding="utf-8",
+    )
+
+    lifecycle = StrategyShadowLifecycle(state, log)
+
+    assert lifecycle.data["research_completed"] == [event_id]
+    assert event_id in lifecycle.data["research_claim_migration_incomplete"]
+    assert any(
+        marker.startswith("conflict:")
+        for marker in lifecycle.data["research_claim_migration_incomplete"]
+    )
+    assert lifecycle.data["research_claimed_markets"] == []
+    assert lifecycle.capture_research_candidate(
+        accepted("blocked-by-conflict"), {"m1": market()},
+    ) is False
+
+    (tmp_path / "events.jsonl.1").unlink()
+    restarted = StrategyShadowLifecycle(state, log)
+    assert restarted.data["research_completed"] == [event_id]
+    assert event_id in restarted.data["research_claim_migration_incomplete"]
+    assert restarted.data["research_claimed_markets"] == []
+
+
+def test_identical_valid_history_duplicates_resolve_legacy_research(
+        tmp_path):
+    state = tmp_path / "state.json"
+    log = tmp_path / "events.jsonl"
+    event_id = "duplicate-research:complete"
+    old_hash = "a" * 64
+    state.write_text(json.dumps({
+        "positions": {},
+        "research_positions": {},
+        "research_completed": [event_id],
+        "research_claimed_markets": [],
+        "deployable_claimed_markets": [],
+        "completed": [],
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+    completion = _research_completion(event_id, "m1", old_hash)
+    serialized = json.dumps(completion) + "\n"
+    log.write_text(serialized, encoding="utf-8")
+    (tmp_path / "events.jsonl.1").write_text(
+        serialized, encoding="utf-8",
+    )
+
+    lifecycle = StrategyShadowLifecycle(state, log)
+
+    assert lifecycle.data["research_completed"] == [{
+        "event_id": event_id,
+        "strategy": "late_window_directional_ev",
+        "market_id": "m1",
+        "research_lifecycle_config_hash": old_hash,
+        "research_claim_key": f"{old_hash}|m1",
+    }]
+    assert lifecycle.data["research_claim_migration_incomplete"] == []
+    assert lifecycle.data["research_claimed_markets"] == [f"{old_hash}|m1"]
+
+
+def test_malformed_research_completion_without_event_id_is_retained_and_guarded(
+        tmp_path):
+    state = tmp_path / "state.json"
+    log = tmp_path / "events.jsonl"
+    malformed = {
+        "strategy": "late_window_directional_ev",
+        "market_id": "m1",
+        "unexpected": ["raw", "evidence"],
+    }
+    state.write_text(json.dumps({
+        "positions": {},
+        "research_positions": {},
+        "research_completed": [malformed],
+        "research_claimed_markets": [],
+        "deployable_claimed_markets": [],
+        "completed": [],
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+
+    lifecycle = StrategyShadowLifecycle(state, log)
+
+    assert lifecycle.data["research_completed"] == [malformed]
+    assert len(lifecycle.data["research_claim_migration_incomplete"]) == 1
+    marker = lifecycle.data["research_claim_migration_incomplete"][0]
+    assert marker.startswith("opaque:")
+    assert lifecycle.data["research_claimed_markets"] == []
+    persisted = json.loads(state.read_text(encoding="utf-8"))
+    assert persisted["research_completed"] == [malformed]
+    assert persisted["research_claim_migration_incomplete"] == [marker]
+
+    restarted = StrategyShadowLifecycle(state, log)
+    assert restarted.data["research_completed"] == [malformed]
+    assert restarted.data["research_claim_migration_incomplete"] == [marker]
+    assert restarted.capture_research_candidate(
+        accepted("blocked-by-opaque-guard"), {"m1": market()},
+    ) is False
+
+
+def test_opaque_research_guard_survives_completion_history_truncation(
+        tmp_path):
+    state = tmp_path / "state.json"
+    log = tmp_path / "events.jsonl"
+    malformed = {"strategy": "late_window_directional_ev"}
+    state.write_text(json.dumps({
+        "positions": {},
+        "research_positions": {},
+        "research_completed": [malformed],
+        "research_claimed_markets": [],
+        "deployable_claimed_markets": [],
+        "completed": [],
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+    lifecycle = StrategyShadowLifecycle(state, log)
+    marker = lifecycle.data["research_claim_migration_incomplete"][0]
+    valid = _research_completion("retained-valid:complete", "m1", "f" * 64)
+    lifecycle.data["research_completed"] = [malformed] + [valid] * 20000
+    lifecycle._append_research_completion(
+        _research_completion("new-valid:complete", "m2", "e" * 64)
+    )
+    assert malformed in lifecycle.data["research_completed"]
+    assert len(lifecycle.data["research_completed"]) == 20001
+    assert marker in lifecycle.data["research_claim_migration_incomplete"]
+
+    lifecycle.data["research_completed"] = (
+        lifecycle.data["research_completed"][-20000:]
+    )
+    lifecycle._mark_dirty()
+    lifecycle.flush()
+
+    restarted = StrategyShadowLifecycle(state, log)
+
+    assert malformed not in restarted.data["research_completed"]
+    assert restarted.data["research_claim_migration_incomplete"] == [marker]
+    assert restarted.capture_research_candidate(
+        accepted("blocked-after-truncation"), {"m2": dict(market(), market_id="m2")},
+    ) is False
+
+
 def accepted(event_id="a1", strategy="late_window_directional_ev", outcome="Up"):
     probability_model_id = (
         "directional_logistic_projected_v2"

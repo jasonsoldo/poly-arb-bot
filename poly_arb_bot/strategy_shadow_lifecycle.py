@@ -232,13 +232,52 @@ class StrategyShadowLifecycle:
             "research_claim_key": claim_key,
         }
 
+    @staticmethod
+    def _research_completion_event_id(item):
+        event_id = (
+            item if isinstance(item, str)
+            else item.get("event_id") if isinstance(item, dict)
+            else None
+        )
+        if (
+            not isinstance(event_id, str)
+            or not event_id
+            or not event_id.strip()
+        ):
+            return None
+        return event_id
+
+    @staticmethod
+    def _opaque_research_completion_marker(item):
+        serialized = json.dumps(
+            item, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        )
+        return "opaque:" + hashlib.sha256(serialized.encode()).hexdigest()
+
+    @staticmethod
+    def _research_completion_conflict_marker(event_id):
+        return "conflict:" + hashlib.sha256(event_id.encode()).hexdigest()
+
+    @staticmethod
+    def _research_completion_identity(record):
+        return (
+            record["strategy"],
+            record["market_id"],
+            record["research_lifecycle_config_hash"],
+            record["research_claim_key"],
+        )
+
     def _migrate_lifecycle_state(self):
         probability_strategies = {
             "late_window_directional_ev", "low_price_lottery_ev",
         }
         research_claims = set(self.data["research_claimed_markets"])
         deployable_claims = set(self.data["deployable_claimed_markets"])
-        migration_incomplete = set()
+        migration_incomplete = {
+            marker
+            for marker in self.data["research_claim_migration_incomplete"]
+            if isinstance(marker, str) and marker
+        }
         changed = False
 
         for key, position in list(self.data["positions"].items()):
@@ -278,15 +317,12 @@ class StrategyShadowLifecycle:
             record = self._research_completion_record(completion)
             if record is not None:
                 research_claims.add(record["research_claim_key"])
-            elif isinstance(completion, str) and completion:
-                migration_incomplete.add(completion)
             else:
+                event_id = self._research_completion_event_id(completion)
                 migration_incomplete.add(
-                    str(
-                        completion.get("event_id")
-                        if isinstance(completion, dict)
-                        else "invalid_research_completion_record"
-                    )
+                    event_id
+                    if event_id is not None
+                    else self._opaque_research_completion_marker(completion)
                 )
         for position in self.data["positions"].values():
             if (
@@ -390,22 +426,27 @@ class StrategyShadowLifecycle:
                     known[event_id] = self.data["completed_trades"][-1]
                     changed = True
         original_research = list(self.data["research_completed"])
-        valid_research = {}
-        unresolved_research = {}
-        original_order = []
+        candidate_records = {}
+        original_sequence = []
+        original_by_event_id = {}
+        seen_original_event_ids = set()
+
+        def add_research_candidate(record):
+            event_id = record["event_id"]
+            identity = self._research_completion_identity(record)
+            candidate_records.setdefault(event_id, {})[identity] = record
+
         for item in original_research:
-            event_id = (
-                item if isinstance(item, str)
-                else item.get("event_id") if isinstance(item, dict)
-                else None
-            )
-            if isinstance(event_id, str) and event_id:
-                original_order.append(event_id)
+            event_id = self._research_completion_event_id(item)
+            if event_id is None:
+                original_sequence.append(("opaque", item))
+            elif event_id not in seen_original_event_ids:
+                original_sequence.append(("event", event_id))
+                original_by_event_id[event_id] = item
+                seen_original_event_ids.add(event_id)
             record = self._research_completion_record(item)
             if record is not None:
-                valid_research.setdefault(record["event_id"], record)
-            elif isinstance(event_id, str) and event_id:
-                unresolved_research.setdefault(event_id, item)
+                add_research_candidate(record)
         for log_path in history_paths(self.logger.path):
             if not log_path.exists():
                 continue
@@ -422,22 +463,74 @@ class StrategyShadowLifecycle:
                     )
                     if record is None:
                         continue
-                    valid_research.setdefault(record["event_id"], record)
+                    add_research_candidate(record)
+
+        persisted_migration_incomplete = {
+            marker
+            for marker in self.data["research_claim_migration_incomplete"]
+            if isinstance(marker, str) and marker
+        }
+        resolved_research = {}
+        unresolved_event_ids = set()
+        conflict_markers = set()
+        for event_id, candidates in candidate_records.items():
+            conflict_marker = self._research_completion_conflict_marker(
+                event_id
+            )
+            if conflict_marker in persisted_migration_incomplete:
+                unresolved_event_ids.add(event_id)
+                continue
+            if len(candidates) == 1:
+                resolved_research[event_id] = next(iter(candidates.values()))
+            else:
+                unresolved_event_ids.add(event_id)
+                conflict_markers.add(conflict_marker)
+        for event_id in original_by_event_id:
+            if event_id not in resolved_research:
+                unresolved_event_ids.add(event_id)
+
         rebuilt_research = []
         emitted_research = set()
-        for event_id in original_order:
+        opaque_markers = set()
+        for item_type, item in original_sequence:
+            if item_type == "opaque":
+                rebuilt_research.append(item)
+                opaque_markers.add(
+                    self._opaque_research_completion_marker(item)
+                )
+                continue
+            event_id = item
             if event_id in emitted_research:
                 continue
-            if event_id in valid_research:
-                rebuilt_research.append(valid_research[event_id])
+            if event_id in resolved_research:
+                rebuilt_research.append(resolved_research[event_id])
             else:
-                rebuilt_research.append(unresolved_research[event_id])
+                rebuilt_research.append(event_id)
             emitted_research.add(event_id)
-        for event_id, record in valid_research.items():
+        for event_id, candidates in candidate_records.items():
             if event_id not in emitted_research:
-                rebuilt_research.append(record)
+                if event_id in resolved_research:
+                    rebuilt_research.append(resolved_research[event_id])
+                else:
+                    rebuilt_research.append(event_id)
+                    unresolved_event_ids.add(event_id)
+                emitted_research.add(event_id)
         if rebuilt_research != original_research:
             self.data["research_completed"] = rebuilt_research
+            changed = True
+        migration_incomplete = persisted_migration_incomplete
+        migration_incomplete.difference_update(resolved_research)
+        migration_incomplete.update(unresolved_event_ids)
+        migration_incomplete.update(opaque_markers)
+        migration_incomplete.update(conflict_markers)
+        migrated_incomplete = sorted(migration_incomplete)
+        if (
+            self.data["research_claim_migration_incomplete"]
+            != migrated_incomplete
+        ):
+            self.data["research_claim_migration_incomplete"] = (
+                migrated_incomplete
+            )
             changed = True
         missing_hashes = {event_id for event_id, trade in known.items()
                           if event_id and not trade.get("strategy_config_hash")}
@@ -460,7 +553,19 @@ class StrategyShadowLifecycle:
                         missing_hashes.remove(event_id)
                         changed = True
         self.data["completed_trades"] = self.data["completed_trades"][-20000:]
+        if changed:
+            self._mark_dirty()
         return changed
+
+    def _append_research_completion(self, completion):
+        unresolved = []
+        valid = []
+        for item in self.data["research_completed"] + [completion]:
+            if self._research_completion_record(item) is None:
+                unresolved.append(item)
+            else:
+                valid.append(item)
+        self.data["research_completed"] = unresolved + valid[-20000:]
 
     def _loss_block_reason(self, strategy, daily_limit, consecutive_limit, prefix):
         today = int(time.time() // 86400)
@@ -1412,17 +1517,15 @@ class StrategyShadowLifecycle:
                     }]
                 )[-20000:]
             else:
-                self.data["research_completed"] = (
-                    self.data["research_completed"] + [{
-                        "event_id": complete_id,
-                        "strategy": position["strategy"],
-                        "market_id": position["market_id"],
-                        "research_lifecycle_config_hash": position.get(
-                            "research_lifecycle_config_hash"),
-                        "research_claim_key": position.get(
-                            "research_claim_key"),
-                    }]
-                )[-20000:]
+                self._append_research_completion({
+                    "event_id": complete_id,
+                    "strategy": position["strategy"],
+                    "market_id": position["market_id"],
+                    "research_lifecycle_config_hash": position.get(
+                        "research_lifecycle_config_hash"),
+                    "research_claim_key": position.get(
+                        "research_claim_key"),
+                })
             del self.data[collection_name][key]
             completed_any = True
         if not completed_any:
@@ -1728,17 +1831,15 @@ class StrategyShadowLifecycle:
                     }]
                 )[-20000:]
             else:
-                self.data["research_completed"] = (
-                    self.data["research_completed"] + [{
-                        "event_id": complete_id,
-                        "strategy": position["strategy"],
-                        "market_id": position["market_id"],
-                        "research_lifecycle_config_hash": position.get(
-                            "research_lifecycle_config_hash"),
-                        "research_claim_key": position.get(
-                            "research_claim_key"),
-                    }]
-                )[-20000:]
+                self._append_research_completion({
+                    "event_id": complete_id,
+                    "strategy": position["strategy"],
+                    "market_id": position["market_id"],
+                    "research_lifecycle_config_hash": position.get(
+                        "research_lifecycle_config_hash"),
+                    "research_claim_key": position.get(
+                        "research_claim_key"),
+                })
 
             del positions[key]
             completed += 1
