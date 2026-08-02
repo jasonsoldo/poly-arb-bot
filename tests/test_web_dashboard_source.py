@@ -72,6 +72,9 @@ def test_dashboard_separates_research_and_portfolio_limited_shadow_pnl():
     ):
         assert field in source
 
+    # shadow_report returns trade ledgers newest-first.
+    assert "const lt=ledger.length?ledger[0]:null;" in source
+
 
 def test_dashboard_renders_reference_sources_dynamically_per_asset():
     # dashboard-data-map P6: source columns must be derived from

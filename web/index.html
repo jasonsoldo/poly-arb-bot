@@ -543,7 +543,7 @@ function renderPnl(d){
       '<circle cx="'+last[0]+'" cy="'+last[1]+'" r="3" fill="#0B9470"/></svg>';
   }
   const ledger=d.deployable_trade_ledger||[];
-  const lt=ledger.length?ledger[ledger.length-1]:null;
+  const lt=ledger.length?ledger[0]:null;
   $('lastTradeCard').innerHTML='<span class="lbl">LAST COMPLETED</span>'+
     '<div class="big '+(lt?(Number(lt.pnl)>=0?'g':'r'):'na')+'">'+(lt?money(lt.pnl):'N/A')+'</div>'+
     '<span class="sub">'+(lt?esc(String(lt.strategy||'').toUpperCase().replace(/_/g,' ')):'NO COMPLETED SIMULATION')+'</span>';
