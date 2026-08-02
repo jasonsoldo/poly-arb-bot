@@ -35,7 +35,11 @@ STRATEGIES = (
     "inventory_rebalancing_arb",
     "maker_complete_set_arb",
 )
-SUMMARY_VERSION = 1
+PROBABILITY_STRATEGIES = frozenset({
+    "late_window_directional_ev",
+    "low_price_lottery_ev",
+})
+SUMMARY_VERSION = 2
 MAX_RECENT_VALUES = 20_000
 MAX_SEEN_EVENTS = 50_000
 MAX_COMPLETED_TRADES = 20_000
@@ -58,7 +62,11 @@ def _metrics(ledger):
             "sharpe": sharpe, "sharpe_samples": len(samples)}
 
 
-def _performance_from_rows(rows, current_complete_set_hashes=None):
+def _performance_from_rows(
+    rows,
+    current_complete_set_hashes=None,
+    filter_current_config=True,
+):
     ledger = []
     for row in rows:
         event_id = row.get("event_id")
@@ -98,7 +106,7 @@ def _performance_from_rows(rows, current_complete_set_hashes=None):
                 max(rows, key=lambda item: item["ts"]).get("strategy_config_hash")
                 if rows else None
             )
-    current = [
+    current = ledger if not filter_current_config else [
         item for item in ledger
         if (
             item.get("strategy") in hash_selected_strategies
@@ -139,16 +147,72 @@ def _performance_from_rows(rows, current_complete_set_hashes=None):
         "current_strategy_config_hash": current_hash,
         "current_strategy_config_hashes": current_hashes,
         "current_complete_set_config_hashes": current_complete_set_hashes,
-        "current_paired_config_hash": current_complete_set_hashes["paired_lock"],
+        "current_paired_config_hash": current_complete_set_hashes.get("paired_lock"),
     }
+
+
+def _split_performance(rows, current_complete_set_hashes=None):
+    deployable = []
+    research = []
+    paired_and_other = []
+    historical_probability_completions_excluded = 0
+    for row in rows:
+        strategy = row.get("strategy")
+        event_type = row.get("event_type")
+        if strategy in PROBABILITY_STRATEGIES:
+            if (
+                event_type == "shadow_complete"
+                and row.get("deployable_pnl") is True
+            ):
+                deployable.append(row)
+            elif (
+                event_type == "shadow_research_complete"
+                and row.get("deployable_pnl") is False
+            ):
+                research.append(row)
+            elif event_type == "shadow_complete":
+                historical_probability_completions_excluded += 1
+        elif event_type == "shadow_complete":
+            paired_and_other.append(row)
+
+    result = _performance_from_rows(
+        paired_and_other + deployable,
+        current_complete_set_hashes,
+    )
+    deployable_result = _performance_from_rows(deployable)
+    research_result = _performance_from_rows(
+        research,
+        filter_current_config=False,
+    )
+    result.update({
+        "research_performance": research_result["performance"],
+        "research_equity_curve": research_result["equity_curve"],
+        "research_trade_ledger": research_result["trade_ledger"],
+        "deployable_performance": deployable_result["performance"],
+        "deployable_equity_curve": deployable_result["equity_curve"],
+        "deployable_trade_ledger": deployable_result["trade_ledger"],
+        "deployable_asset_latest_pnl": deployable_result["asset_latest_pnl"],
+        "historical_probability_completions_excluded":
+            historical_probability_completions_excluded,
+        "profitability_validation": {
+            "deployable_pnl": True,
+            "performance": deployable_result["performance"],
+            "equity_curve": deployable_result["equity_curve"],
+            "trade_ledger": deployable_result["trade_ledger"],
+        },
+    })
+    return result
 
 
 def _performance(opportunities, execution_path):
     completed = {}
     for row in _rows(execution_path):
-        if row and row.get("event_type") == "shadow_complete":
+        if row and row.get("event_type") in {
+            "shadow_complete",
+            "shadow_research_complete",
+        }:
             completed.setdefault(row.get("event_id"), row)
-    return _performance_from_rows(completed.values())
+    return _split_performance(completed.values())
 
 
 class IncrementalReport:
@@ -303,7 +367,13 @@ class IncrementalReport:
 
     def _consume_execution(self, row):
         bucket = self.state["execution"]
-        if row.get("event_type") != "shadow_complete" or not row.get("event_id"):
+        if (
+            row.get("event_type") not in {
+                "shadow_complete",
+                "shadow_research_complete",
+            }
+            or not row.get("event_id")
+        ):
             return
         event_id = row["event_id"]
         if event_id in self._execution_seen:
@@ -351,7 +421,7 @@ class IncrementalReport:
                 "samples": len(source_ages),
             },
         }
-        result.update(_performance_from_rows(
+        result.update(_split_performance(
             self._completed, current_complete_set_hashes,
         ))
         return result

@@ -349,10 +349,176 @@ def test_web_status_includes_completed_shadow_analytics(tmp_path):
 
     status = build_status(data, logs / "legacy.jsonl", tmp_path / "state.json")
 
-    assert status["performance"]["completed"] == 1
-    assert status["performance"]["simulated_pnl"] == 0.25
+    assert status["performance"]["completed"] == 0
+    assert status["performance"]["simulated_pnl"] is None
+    assert status["shadow_report"]["performance"]["completed"] == 1
+    assert status["shadow_report"]["performance"]["simulated_pnl"] == 0.25
     assert status["counts"]["simulated_complete"] == 1
     assert status["performance_by_strategy"]["paired_lock"]["completed"] == 1
+
+
+def test_web_status_exposes_split_profitability_and_missing_acceptance(
+    tmp_path,
+):
+    data = tmp_path / "data"
+    data.mkdir()
+
+    status = build_status(
+        data, tmp_path / "missing-audit.jsonl", tmp_path / "state.json"
+    )
+
+    assert status["profitability"]["research"]["deployable_pnl"] is False
+    assert (
+        status["profitability"]["portfolio_limited"]["deployable_pnl"] is True
+    )
+    assert status["profitability"]["portfolio_limited"]["status"] in {
+        "PASS",
+        "FAIL",
+        "INCOMPLETE",
+    }
+    assert (
+        status["profitability"]["portfolio_limited"]["status"] == "INCOMPLETE"
+    )
+    assert (
+        status["profitability"]["portfolio_limited"]["reason"]
+        == "profitability_acceptance_not_run"
+    )
+    assert (
+        status["profitability"]["artifacts"]["gate"]["reason"]
+        == "profitability_gate_unavailable"
+    )
+    assert (
+        status["profitability"]["artifacts"]["calibration_snapshot"]["reason"]
+        == "calibration_snapshot_unavailable"
+    )
+
+
+def test_web_status_maps_validated_profitability_artifacts_without_inference(
+    tmp_path,
+    monkeypatch,
+):
+    data = tmp_path / "data"
+    state_dir = tmp_path / "state"
+    data.mkdir()
+    state_dir.mkdir()
+    (state_dir / "strategy-shadow.json").write_text(json.dumps({
+        "positions": {},
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+    gate = {
+        "content_hash": "g" * 64,
+        "calibration_snapshot_hash": "s" * 64,
+        "profitability_cohort_version": 2,
+        "validation_activated_at": 1_000.0,
+        "validation_expires_at": 260_200.0,
+        "target_base_config_hashes": {
+            "late_window_directional_ev": "directional-config",
+        },
+        "probability_model_ids": {
+            "late_window_directional_ev": "directional-model",
+        },
+        "eligible_cohorts": {
+            "directional-cohort": {"independent_markets": 60},
+        },
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }
+    frozen = {"content_hash": "s" * 64}
+    expected_hashes = []
+
+    monkeypatch.setattr(
+        web_monitor,
+        "load_profitability_gate",
+        lambda path, now: (gate, None),
+    )
+
+    def load_snapshot(path, now, expected_content_hash=None):
+        expected_hashes.append(expected_content_hash)
+        return frozen, None
+
+    monkeypatch.setattr(
+        web_monitor,
+        "load_frozen_calibration_snapshot",
+        load_snapshot,
+    )
+    (data / "profitability-acceptance.json").write_text(json.dumps({
+        "status": "PASS",
+        "reason": "profitability_validation_passed",
+        "metrics": {
+            "runtime_seconds": 172_800,
+            "independent_markets": 300,
+            "total_pnl": 12.5,
+            "mean_return": 0.02,
+            "maximum_drawdown_pct": 0.04,
+            "lower_bound_95": 0.001,
+        },
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
+
+    status = build_status(
+        data, tmp_path / "missing-audit.jsonl", tmp_path / "state.json"
+    )
+    portfolio = status["profitability"]["portfolio_limited"]
+
+    assert portfolio["status"] == "PASS"
+    assert portfolio["reason"] == "profitability_validation_passed"
+    assert portfolio["validation_started_at"] == 1_000.0
+    assert portfolio["validation_expires_at"] == 260_200.0
+    assert portfolio["sample_counts"] == {"directional-cohort": 60}
+    assert portfolio["metrics"]["independent_markets"] == 300
+    assert portfolio["metrics"]["total_pnl"] == 12.5
+    assert portfolio["metrics"]["maximum_drawdown_pct"] == 0.04
+    assert portfolio["metrics"]["lower_bound_95"] == 0.001
+    assert portfolio["identities"]["profitability_gate_hash"] == "g" * 64
+    assert portfolio["identities"]["calibration_snapshot_hash"] == "s" * 64
+    assert portfolio["real_order_invariants"]["gate"] == {
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }
+    assert portfolio["real_order_invariants"]["lifecycle"] == {
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }
+    assert expected_hashes == ["s" * 64]
+
+
+def test_web_status_never_passes_malformed_profitability_artifacts(
+    tmp_path,
+):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "profitability-gates.json").write_text("{bad", encoding="utf-8")
+    (data / "probability-calibration-validation.json").write_text(
+        "{bad", encoding="utf-8"
+    )
+    (data / "profitability-acceptance.json").write_text(json.dumps({
+        "status": "PASS",
+        "reason": "should_not_escape_artifact_validation",
+    }), encoding="utf-8")
+
+    status = build_status(
+        data, tmp_path / "missing-audit.jsonl", tmp_path / "state.json"
+    )
+    profitability = status["profitability"]
+
+    assert profitability["portfolio_limited"]["status"] == "INCOMPLETE"
+    assert (
+        profitability["portfolio_limited"]["reason"]
+        == "profitability_gate_invalid"
+    )
+    assert profitability["artifacts"]["gate"]["reason"] == (
+        "profitability_gate_invalid"
+    )
+    assert profitability["artifacts"]["calibration_snapshot"]["reason"] == (
+        "calibration_snapshot_invalid"
+    )
 
 
 def test_web_status_exposes_latest_completed_pnl_per_asset(tmp_path):

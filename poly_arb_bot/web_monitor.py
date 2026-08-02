@@ -11,6 +11,8 @@ from pathlib import Path
 from .shadow_report import IncrementalReport
 from .ev_shadow import directional_ev_enabled, lottery_ev_enabled
 from .maker_shadow import maker_accumulate_enabled
+from .probability_calibration_map import load_frozen_calibration_snapshot
+from .profitability_gate import load_profitability_gate
 from .reference_layer import reference_source_maximum_age_ms, reference_state_for_asset
 from .strategy_config import StrategyConfig
 
@@ -130,10 +132,22 @@ def build_report_empty():
         "source_age_ms": {"latest": None, "p50": None, "p95": None, "p99": None,
                           "max": None, "samples": 0},
         "performance": dict(empty_performance),
+        "research_performance": dict(empty_performance),
+        "deployable_performance": dict(empty_performance),
         "performance_by_strategy": {
             strategy: dict(empty_performance) for strategy in STRATEGIES
         },
         "equity_curve": [], "trade_ledger": [], "asset_latest_pnl": {},
+        "research_equity_curve": [], "research_trade_ledger": [],
+        "deployable_equity_curve": [], "deployable_trade_ledger": [],
+        "deployable_asset_latest_pnl": {},
+        "historical_probability_completions_excluded": 0,
+        "profitability_validation": {
+            "deployable_pnl": True,
+            "performance": dict(empty_performance),
+            "equity_curve": [],
+            "trade_ledger": [],
+        },
     }
 
 
@@ -248,6 +262,217 @@ def _probability_calibration_view(raw):
             "calibration_buckets": buckets,
         }
     return result
+
+
+def _profitability_view(
+    data_dir,
+    lifecycle_state,
+    shadow_execution,
+    report,
+    now,
+):
+    gate_path = Path(os.getenv(
+        "PROFITABILITY_GATE_PATH",
+        str(data_dir / "profitability-gates.json"),
+    ))
+    snapshot_path = Path(os.getenv(
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH",
+        str(data_dir / "probability-calibration-validation.json"),
+    ))
+    acceptance_path = data_dir / "profitability-acceptance.json"
+
+    gate, gate_reason = load_profitability_gate(gate_path, now)
+    expected_snapshot_hash = (
+        gate.get("calibration_snapshot_hash") if gate else None
+    )
+    calibration_snapshot, snapshot_reason = (
+        load_frozen_calibration_snapshot(
+            snapshot_path,
+            now,
+            expected_content_hash=expected_snapshot_hash,
+        )
+    )
+
+    acceptance = None
+    acceptance_reason = None
+    try:
+        acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        acceptance_reason = "profitability_acceptance_not_run"
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        acceptance_reason = "profitability_acceptance_invalid"
+    if (
+        acceptance is not None
+        and (
+            not isinstance(acceptance, dict)
+            or acceptance.get("status") not in {
+                "PASS",
+                "FAIL",
+                "INCOMPLETE",
+            }
+        )
+    ):
+        acceptance = None
+        acceptance_reason = "profitability_acceptance_invalid"
+
+    if acceptance is None:
+        status = "INCOMPLETE"
+        reason = acceptance_reason
+    elif gate_reason:
+        status = "INCOMPLETE"
+        reason = gate_reason
+    elif snapshot_reason:
+        status = "INCOMPLETE"
+        reason = snapshot_reason
+    else:
+        status = acceptance["status"]
+        reason = acceptance.get("reason")
+
+    metrics = (
+        acceptance.get("metrics", acceptance)
+        if isinstance(acceptance, dict)
+        else {}
+    )
+    metric_fields = (
+        "runtime_seconds",
+        "independent_markets",
+        "completed",
+        "sample_count",
+        "samples_by_cohort",
+        "total_pnl",
+        "total_pnl_usd",
+        "mean_return",
+        "mean_net_return",
+        "mean_net_return_per_dollar_risked",
+        "maximum_drawdown_usd",
+        "maximum_drawdown_pct",
+        "lower_bound_95",
+        "confidence_lower_bound_95",
+        "starting_shadow_capital_usd",
+    )
+    exposed_metrics = {
+        field: metrics.get(field)
+        for field in metric_fields
+        if field in metrics
+    }
+    eligible_cohorts = (
+        gate.get("eligible_cohorts", {}) if isinstance(gate, dict) else {}
+    )
+    gate_invariants = {
+        field: gate.get(field) if isinstance(gate, dict) else None
+        for field in (
+            "real_order_submissions",
+            "real_orders",
+            "real_fills",
+        )
+    }
+    lifecycle_invariants = {
+        field: lifecycle_state.get(field)
+        for field in (
+            "real_order_submissions",
+            "real_orders",
+            "real_fills",
+        )
+    }
+    acceptance_invariants = {
+        field: acceptance.get(field) if isinstance(acceptance, dict) else None
+        for field in (
+            "real_order_submissions",
+            "real_orders",
+            "real_fills",
+        )
+    }
+    identities = {
+        "profitability_gate_hash": (
+            gate.get("content_hash") if isinstance(gate, dict) else None
+        ),
+        "calibration_snapshot_hash": (
+            calibration_snapshot.get("content_hash")
+            if isinstance(calibration_snapshot, dict) else None
+        ),
+        "profitability_cohort_version": (
+            gate.get("profitability_cohort_version")
+            if isinstance(gate, dict) else None
+        ),
+        "strategy_config_hashes": (
+            gate.get("target_base_config_hashes")
+            if isinstance(gate, dict) else None
+        ),
+        "probability_model_ids": (
+            gate.get("probability_model_ids")
+            if isinstance(gate, dict) else None
+        ),
+    }
+    portfolio_limited = {
+        "deployable_pnl": True,
+        "semantics": "SHADOW / NOT REAL MONEY",
+        "status": status,
+        "reason": reason,
+        "performance": report["deployable_performance"],
+        "equity_curve": report["deployable_equity_curve"],
+        "trade_ledger": report["deployable_trade_ledger"],
+        "validation_started_at": (
+            gate.get("validation_activated_at")
+            if isinstance(gate, dict) else None
+        ),
+        "validation_expires_at": (
+            gate.get("validation_expires_at")
+            if isinstance(gate, dict) else None
+        ),
+        "enabled_cohorts": eligible_cohorts,
+        "sample_counts": {
+            key: entry.get("independent_markets")
+            for key, entry in eligible_cohorts.items()
+            if isinstance(entry, dict)
+        },
+        "metrics": exposed_metrics,
+        "identities": identities,
+        "real_order_invariants": {
+            "gate": gate_invariants,
+            "lifecycle": lifecycle_invariants,
+            "shadow_execution": {
+                field: shadow_execution.get(field)
+                for field in (
+                    "real_order_submissions",
+                    "real_orders",
+                    "real_fills",
+                )
+            },
+            "acceptance": acceptance_invariants,
+        },
+    }
+    return {
+        "research": {
+            "deployable_pnl": False,
+            "semantics": "RESEARCH ONLY / NOT DEPLOYABLE PNL",
+            "performance": report["research_performance"],
+            "equity_curve": report["research_equity_curve"],
+            "trade_ledger": report["research_trade_ledger"],
+        },
+        "portfolio_limited": portfolio_limited,
+        "historical_probability_completions_excluded": report[
+            "historical_probability_completions_excluded"
+        ],
+        "artifacts": {
+            "gate": {
+                "path": str(gate_path),
+                "status": "VALID" if gate else "INVALID",
+                "reason": gate_reason,
+            },
+            "calibration_snapshot": {
+                "path": str(snapshot_path),
+                "status": (
+                    "VALID" if calibration_snapshot else "INVALID"
+                ),
+                "reason": snapshot_reason,
+            },
+            "acceptance": {
+                "path": str(acceptance_path),
+                "status": "VALID" if acceptance else "INVALID",
+                "reason": acceptance_reason,
+            },
+        },
+    }
 
 
 def _save_strategy_state(path, state):
@@ -794,6 +1019,13 @@ def build_status(data_dir, log_file, state_file):
         data_dir.parent / "state" / "strategy-shadow.json",
         {"positions": {}, "completed": []},
     )
+    profitability = _profitability_view(
+        data_dir,
+        lifecycle_state,
+        shadow_execution,
+        report,
+        time.time(),
+    )
     maker_shadow_state = _json(
         data_dir.parent / "state" / "maker-shadow.json",
         {},
@@ -1208,6 +1440,8 @@ def build_status(data_dir, log_file, state_file):
         "probability_calibration": _probability_calibration_view(
             lifecycle_state.get("probability_calibration", {})
         ),
+        "profitability": profitability,
+        "profitability_validation": profitability["portfolio_limited"],
         "probability_observations": {
             "pending": len(lifecycle_state.get("probability_predictions", {})),
             "settled": len(lifecycle_state.get("completed_predictions", [])),
@@ -1247,11 +1481,23 @@ def build_status(data_dir, log_file, state_file):
         "system_status": system_status,
         "rejection_reasons": report["rejection_reasons"] or dict(rejection_reasons),
         "shadow_report": report,
-        "performance": report["performance"],
+        "performance": report["deployable_performance"],
         "performance_by_strategy": report["performance_by_strategy"],
-        "equity_curve": report["equity_curve"],
-        "trade_ledger": report["trade_ledger"],
-        "pnl_meter": {"simulated_pnl": report["performance"]["simulated_pnl"], "realized_pnl": 0.0},
+        "equity_curve": report["deployable_equity_curve"],
+        "trade_ledger": report["deployable_trade_ledger"],
+        "research_performance": report["research_performance"],
+        "research_equity_curve": report["research_equity_curve"],
+        "research_trade_ledger": report["research_trade_ledger"],
+        "deployable_performance": report["deployable_performance"],
+        "deployable_equity_curve": report["deployable_equity_curve"],
+        "deployable_trade_ledger": report["deployable_trade_ledger"],
+        "historical_probability_completions_excluded": report[
+            "historical_probability_completions_excluded"
+        ],
+        "pnl_meter": {
+            "simulated_pnl": report["deployable_performance"]["simulated_pnl"],
+            "realized_pnl": 0.0,
+        },
         "strategy_score": strategy_score,
         "current_pair": current_pair,
         "maker_accumulate": maker_accumulate,

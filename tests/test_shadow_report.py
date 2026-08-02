@@ -64,6 +64,7 @@ def test_shadow_report_uses_realized_shadow_complete_pnl(tmp_path):
         "strategy": "late_window_directional_ev", "market_id": "m1",
         "strategy_config_version": "shadow-buy-rules-v2",
         "strategy_config_hash": current_hash,
+        "deployable_pnl": True,
         "realized_simulated_pnl": 5.9,
     }) + "\n", encoding="utf-8")
     report = build_report(audit, execution)
@@ -81,7 +82,8 @@ def test_shadow_report_keeps_terminal_hedge_fields_in_ledger(tmp_path):
     execution.write_text(json.dumps({
         "ts": 1101, "event_type": "shadow_complete", "event_id": "h1",
         "strategy": "late_window_directional_ev", "market_id": "m1",
-        "strategy_config_hash": current_hash, "realized_simulated_pnl": -0.4,
+        "strategy_config_hash": current_hash, "deployable_pnl": True,
+        "realized_simulated_pnl": -0.4,
         "execution_mode": "terminal_hedged", "main_outcome": "Up",
         "hedge_outcome": "Down", "main_size": 10, "hedge_size": 8.5,
         "total_entry_cost": 8.9,
@@ -103,10 +105,10 @@ def test_shadow_report_excludes_other_hash_from_current_performance(tmp_path):
     rows = [
         {"ts": 1, "event_type": "shadow_complete", "event_id": "current",
          "strategy": "late_window_directional_ev", "strategy_config_hash": current_hash,
-         "realized_simulated_pnl": 1},
+         "deployable_pnl": True, "realized_simulated_pnl": 1},
         {"ts": 2, "event_type": "shadow_complete", "event_id": "old",
          "strategy": "late_window_directional_ev", "strategy_config_hash": "old-hash",
-         "realized_simulated_pnl": -10},
+         "deployable_pnl": True, "realized_simulated_pnl": -10},
     ]
     execution.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
     report = build_report(audit, execution)
@@ -136,6 +138,75 @@ def test_shadow_report_excludes_unversioned_historical_paired_completions(tmp_pa
     assert report["performance"]["completed"] == 1
     assert report["performance"]["simulated_pnl"] == 0.2
     assert report["excluded_other_strategy_config"] == 1
+
+
+def test_shadow_report_separates_research_and_deployable_probability_pnl(
+    tmp_path,
+):
+    audit = tmp_path / "audit.jsonl"
+    execution = tmp_path / "execution.jsonl"
+    audit.write_text("", encoding="utf-8")
+    directional_hash = canonical_strategy_config_hash(
+        "late_window_directional_ev"
+    )
+    rows = [
+        {
+            "ts": 1,
+            "event_type": "shadow_complete",
+            "event_id": "historical-unmarked",
+            "strategy": "late_window_directional_ev",
+            "strategy_config_hash": directional_hash,
+            "realized_simulated_pnl": 99,
+        },
+        {
+            "ts": 2,
+            "event_type": "shadow_research_complete",
+            "event_id": "research",
+            "strategy": "low_price_lottery_ev",
+            "strategy_config_hash": "historical-research-hash",
+            "deployable_pnl": False,
+            "realized_simulated_pnl": 4,
+        },
+        {
+            "ts": 3,
+            "event_type": "shadow_complete",
+            "event_id": "deployable",
+            "strategy": "late_window_directional_ev",
+            "strategy_config_hash": directional_hash,
+            "deployable_pnl": True,
+            "realized_simulated_pnl": 0.5,
+        },
+        {
+            "ts": 4,
+            "event_type": "shadow_complete",
+            "event_id": "paired",
+            "strategy": "paired_lock",
+            "strategy_config_hash": "paired-current",
+            "realized_simulated_pnl": 0.2,
+        },
+    ]
+    execution.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    report = build_report(audit, execution)
+
+    assert report["research_performance"]["completed"] == 1
+    assert report["research_performance"]["simulated_pnl"] == 4
+    assert report["deployable_performance"]["completed"] == 1
+    assert report["deployable_performance"]["simulated_pnl"] == 0.5
+    assert report["historical_probability_completions_excluded"] == 1
+    assert report["performance_by_strategy"]["paired_lock"]["completed"] == 1
+    assert report["profitability_validation"]["performance"] == report[
+        "deployable_performance"
+    ]
+    assert [row["event_id"] for row in report["research_equity_curve"]] == [
+        "research"
+    ]
+    assert [row["event_id"] for row in report["deployable_equity_curve"]] == [
+        "deployable"
+    ]
 
 
 def test_shadow_report_quarantines_future_clock_records(tmp_path):
@@ -260,6 +331,7 @@ def test_incremental_report_matches_clean_full_build(tmp_path):
     execution_rows = [
         {"ts": time.time(), "event_id": "c1", "event_type": "shadow_complete",
          "strategy": "late_window_directional_ev", "strategy_config_hash": current_hash,
+         "deployable_pnl": True,
          "market_id": "m1", "asset": "BTC", "timeframe": "5m",
          "realized_simulated_pnl": 0.25},
     ]

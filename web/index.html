@@ -272,13 +272,13 @@ footer{padding:4px 12px 10px;display:flex;justify-content:space-between;font:500
 <main>
 <div class="grid">
 
-  <!-- ============ P2 · SIMULATED PNL ============ -->
+  <!-- ============ P2 · PORTFOLIO-LIMITED SHADOW ============ -->
   <section class="panel s7">
-    <div class="phead"><h2>SIMULATED PNL · CURRENT CONFIG</h2><span class="meta" id="pnlMeta">SHADOW / NOT REAL MONEY</span></div>
+    <div class="phead"><h2>PORTFOLIO-LIMITED SHADOW</h2><span class="meta" id="pnlMeta">SHADOW / NOT REAL MONEY</span></div>
     <div class="hero-row">
       <div>
         <div class="hero na-hero" id="simPnl">N/A</div>
-        <span class="sub">SIMULATED COMPLETED PNL · HISTORICAL CONFIGS EXCLUDED</span>
+        <span class="sub">SIMULATED PNL · CURRENT CONFIG · DEPLOYABLE PROBABILITY COMPLETIONS ONLY · HISTORICAL CONFIGS EXCLUDED</span>
       </div>
       <div class="result-card" id="lastTradeCard">
         <span class="lbl">LAST COMPLETED</span>
@@ -301,6 +301,18 @@ footer{padding:4px 12px 10px;display:flex;justify-content:space-between;font:500
       <span class="lbl" id="exposureLbl">EXPOSURE / MAX LOSS</span>
       <div class="meter"><i id="exposureFill" style="width:0%"></i></div>
       <span class="chip chip--gray" id="riskMode">N/A</span>
+    </div>
+    <div class="counts-strip" id="profitValidation"></div>
+  </section>
+
+  <!-- ============ P2b · CALIBRATION RESEARCH ============ -->
+  <section class="panel s5">
+    <div class="phead"><h2>CALIBRATION RESEARCH</h2><span class="meta"><span class="chip chip--orange">RESEARCH ONLY / NOT DEPLOYABLE PNL</span></span></div>
+    <div class="hero na-hero" id="researchPnl">N/A</div>
+    <div class="counts-strip" id="researchCounts"></div>
+    <div class="eqwrap">
+      <div class="eqhead"><span>RESEARCH EQUITY · SEPARATE CURVE</span><span id="researchEqCount">N/A</span></div>
+      <div id="researchEquityChart"><div class="eq-empty">N/A · NO RESEARCH COMPLETIONS</div></div>
     </div>
   </section>
 
@@ -503,7 +515,7 @@ function renderTicker(d){
 
 /* ================= P2 pnl ================= */
 function renderPnl(d){
-  const p=d.performance||{};
+  const p=d.deployable_performance||{};
   const hero=$('simPnl');
   if(isNum(p.simulated_pnl)){
     hero.textContent=(Number(p.simulated_pnl)<0?'-$':'$')+Math.abs(Number(p.simulated_pnl)).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -515,7 +527,7 @@ function renderPnl(d){
   $('kWinRate').className=isNum(p.win_rate)?'g':'na';
   $('kSharpe').textContent=isNum(p.sharpe)?Number(p.sharpe).toFixed(2):'N/A';
   $('kSharpeN').textContent='SAMPLES '+(isNum(p.sharpe_samples)?p.sharpe_samples:'N/A');
-  const curve=d.equity_curve||[];
+  const curve=d.deployable_equity_curve||[];
   $('eqCount').textContent=curve.length?curve.length+' POINTS':'N/A';
   if(!curve.length){
     $('equityChart').innerHTML='<div class="eq-empty">N/A · NO COMPLETED SIMULATIONS</div>';
@@ -530,7 +542,7 @@ function renderPnl(d){
       '<polyline fill="none" stroke="#0B9470" stroke-width="1.5" points="'+pts+'"/>'+
       '<circle cx="'+last[0]+'" cy="'+last[1]+'" r="3" fill="#0B9470"/></svg>';
   }
-  const ledger=d.trade_ledger||[];
+  const ledger=d.deployable_trade_ledger||[];
   const lt=ledger.length?ledger[ledger.length-1]:null;
   $('lastTradeCard').innerHTML='<span class="lbl">LAST COMPLETED</span>'+
     '<div class="big '+(lt?(Number(lt.pnl)>=0?'g':'r'):'na')+'">'+(lt?money(lt.pnl):'N/A')+'</div>'+
@@ -542,6 +554,51 @@ function renderPnl(d){
   const rm=(d.shadow_lifecycle||{}).risk_mode;
   $('riskMode').textContent=rm?String(rm).toUpperCase():'N/A';
   $('riskMode').className='chip '+(rm==='normal'?'chip--green':rm?'chip--orange':'chip--gray');
+  const pv=((d.profitability||{}).portfolio_limited)||{};
+  const vm=pv.metrics||{},ids=pv.identities||{},inv=pv.real_order_invariants||{};
+  const gateInv=inv.gate||{},lifeInv=inv.lifecycle||{},cohortSamples=Object.values(pv.sample_counts||{});
+  $('profitValidation').innerHTML=
+    '<span>VALIDATION <b>'+statusSpan(pv.status||'INCOMPLETE')+'</b></span>'+
+    '<span>REASON <b>'+esc(pv.reason||'N/A')+'</b></span>'+
+    '<span>COHORTS <b>'+Object.keys(pv.enabled_cohorts||{}).length+'</b></span>'+
+    '<span>COHORT SAMPLES <b>'+(cohortSamples.length?cohortSamples.map(cnt).join(' / '):'N/A')+'</b></span>'+
+    '<span>STARTED <b>'+(isNum(pv.validation_started_at)?new Date(Number(pv.validation_started_at)*1000).toISOString():'N/A')+'</b></span>'+
+    '<span>EXPIRES <b>'+(isNum(pv.validation_expires_at)?new Date(Number(pv.validation_expires_at)*1000).toISOString():'N/A')+'</b></span>'+
+    '<span>RUNTIME <b>'+dur(vm.runtime_seconds)+'</b></span>'+
+    '<span>INDEPENDENT MARKETS <b>'+cnt(vm.independent_markets)+'</b></span>'+
+    '<span>VALIDATION PNL <b>'+(isNum(vm.total_pnl)?signMoney(vm.total_pnl):isNum(vm.total_pnl_usd)?signMoney(vm.total_pnl_usd):'N/A')+'</b></span>'+
+    '<span>MEAN RETURN / RISK <b>'+num(vm.mean_return??vm.mean_net_return_per_dollar_risked,6)+'</b></span>'+
+    '<span>MAX DRAWDOWN <b>'+(isNum(vm.maximum_drawdown_pct)?(Number(vm.maximum_drawdown_pct)*100).toFixed(2)+'%':isNum(vm.maximum_drawdown_usd)?signMoney(vm.maximum_drawdown_usd):'N/A')+'</b></span>'+
+    '<span>LOWER BOUND 95 <b>'+num(vm.lower_bound_95??vm.confidence_lower_bound_95,6)+'</b></span>'+
+    '<span>GATE HASH <b>'+esc(ids.profitability_gate_hash?String(ids.profitability_gate_hash).slice(0,12):'N/A')+'</b></span>'+
+    '<span>SNAPSHOT HASH <b>'+esc(ids.calibration_snapshot_hash?String(ids.calibration_snapshot_hash).slice(0,12):'N/A')+'</b></span>'+
+    '<span>REAL SUBMISSIONS / ORDERS / FILLS <b>'+cnt(gateInv.real_order_submissions)+' / '+cnt(gateInv.real_orders)+' / '+cnt(gateInv.real_fills)+'</b></span>'+
+    '<span>LIFECYCLE REAL SUBMISSIONS / ORDERS / FILLS <b>'+cnt(lifeInv.real_order_submissions)+' / '+cnt(lifeInv.real_orders)+' / '+cnt(lifeInv.real_fills)+'</b></span>'+
+    '<span>HISTORICAL PROBABILITY EXCLUDED <b>'+cnt(d.historical_probability_completions_excluded)+'</b></span>';
+}
+
+function renderCalibrationPnl(d){
+  const p=d.research_performance||{},curve=d.research_equity_curve||[];
+  const hero=$('researchPnl');
+  if(isNum(p.simulated_pnl)){
+    hero.textContent=signMoney(p.simulated_pnl);
+    hero.className='hero '+(Number(p.simulated_pnl)>=0?'g':'r');
+  }else{hero.textContent='N/A';hero.className='hero na-hero';}
+  $('researchCounts').innerHTML=
+    '<span>COMPLETED <b>'+cnt(p.completed)+'</b></span>'+
+    '<span>WINS <b>'+cnt(p.wins)+'</b></span>'+
+    '<span>LOSSES <b>'+cnt(p.losses)+'</b></span>'+
+    '<span>WARNING <b>RESEARCH ONLY / NOT DEPLOYABLE PNL</b></span>';
+  $('researchEqCount').textContent=curve.length?curve.length+' POINTS':'N/A';
+  if(!curve.length){
+    $('researchEquityChart').innerHTML='<div class="eq-empty">N/A · NO RESEARCH COMPLETIONS</div>';
+    return;
+  }
+  const w=600,h=74,vals=curve.map(x=>Number(x.equity)||0);
+  const min=Math.min.apply(null,vals),max=Math.max.apply(null,vals),span=(max-min)||1;
+  const pts=vals.map((v,i)=>(i/(vals.length-1||1)*w).toFixed(1)+','+(h-8-(v-min)/span*(h-16)).toFixed(1)).join(' ');
+  $('researchEquityChart').innerHTML='<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+
+    '<polyline fill="none" stroke="#D67800" stroke-width="1.5" points="'+pts+'"/></svg>';
 }
 
 /* ================= P6 reference ================= */
@@ -1011,6 +1068,7 @@ function render(d){
   renderChrome(d);
   renderTicker(d);
   renderPnl(d);
+  renderCalibrationPnl(d);
   renderReference(d);
   renderPipeline(d);
   renderSizer(d);

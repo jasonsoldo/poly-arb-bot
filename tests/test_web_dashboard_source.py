@@ -41,6 +41,38 @@ def test_dashboard_contains_real_analytics_modules_without_static_equity():
     assert "REAL ORDERS" in source
 
 
+def test_dashboard_separates_research_and_portfolio_limited_shadow_pnl():
+    source = Path("web/index.html").read_text(encoding="utf-8")
+
+    for label in (
+        "CALIBRATION RESEARCH",
+        "RESEARCH ONLY / NOT DEPLOYABLE PNL",
+        "PORTFOLIO-LIMITED SHADOW",
+        "SHADOW / NOT REAL MONEY",
+        "INDEPENDENT MARKETS",
+        "COHORT SAMPLES",
+        "MAX DRAWDOWN",
+        "LOWER BOUND 95",
+        "REAL SUBMISSIONS / ORDERS / FILLS",
+    ):
+        assert label in source
+    assert "deployable_performance" in source
+    assert "deployable_equity_curve" in source
+    assert "research_performance" in source
+    assert "research_equity_curve" in source
+    for field in (
+        "validation_started_at",
+        "validation_expires_at",
+        "runtime_seconds",
+        "sample_counts",
+        "profitability_gate_hash",
+        "calibration_snapshot_hash",
+        "maximum_drawdown_pct",
+        "lower_bound_95",
+    ):
+        assert field in source
+
+
 def test_dashboard_renders_reference_sources_dynamically_per_asset():
     # dashboard-data-map P6: source columns must be derived from
     # reference_prices.assets.{asset}.sources (dynamic, incl bybit/okx),
