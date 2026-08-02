@@ -64,6 +64,12 @@ def valid_status():
             "paired_lock": {"completed": 0},
             "maker_paired_accumulate": {"completed": 0},
         },
+        "profitability": {
+            "portfolio_limited": {
+                "status": "PASS",
+                "reason": "profitability_validation_passed",
+            },
+        },
         "shadow_health": {
             "ws_connected": True,
             "stale": False,
@@ -86,6 +92,35 @@ def test_acceptance_passes_all_shadow_invariants():
     assert report["passed"] is True
     assert report["status"] == "PASS"
     assert all(check["passed"] for check in report["checks"])
+
+
+def test_acceptance_is_incomplete_when_forward_profitability_is_incomplete():
+    status = valid_status()
+    status["profitability"]["portfolio_limited"] = {
+        "status": "INCOMPLETE",
+        "reason": "minimum_independent_markets_not_met",
+    }
+
+    report = evaluate_status(status)
+
+    assert report["status"] == "INCOMPLETE"
+    assert report["passed"] is False
+    assert {
+        check["name"] for check in report["checks"] if not check["passed"]
+    } == {"forward_profitability"}
+
+
+def test_acceptance_fails_when_forward_profitability_fails():
+    status = valid_status()
+    status["profitability"]["portfolio_limited"] = {
+        "status": "FAIL",
+        "reason": "maximum_drawdown_exceeded",
+    }
+
+    report = evaluate_status(status)
+
+    assert report["status"] == "FAIL"
+    assert report["passed"] is False
 
 
 def test_acceptance_fails_missing_or_invalid_dynamic_sizing_evidence():

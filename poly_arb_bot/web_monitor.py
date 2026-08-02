@@ -12,6 +12,7 @@ from .shadow_report import IncrementalReport
 from .ev_shadow import directional_ev_enabled, lottery_ev_enabled
 from .maker_shadow import maker_accumulate_enabled
 from .probability_calibration_map import load_frozen_calibration_snapshot
+from .profitability_acceptance import load_profitability_acceptance
 from .profitability_gate import load_profitability_gate
 from .reference_layer import reference_source_maximum_age_ms, reference_state_for_asset
 from .strategy_config import StrategyConfig
@@ -293,29 +294,19 @@ def _profitability_view(
         )
     )
 
-    acceptance = None
-    acceptance_reason = None
-    try:
-        acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        acceptance_reason = "profitability_acceptance_not_run"
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        acceptance_reason = "profitability_acceptance_invalid"
-    if (
-        acceptance is not None
-        and (
-            not isinstance(acceptance, dict)
-            or acceptance.get("status") not in {
-                "PASS",
-                "FAIL",
-                "INCOMPLETE",
-            }
-        )
-    ):
-        acceptance = None
-        acceptance_reason = "profitability_acceptance_invalid"
+    acceptance, acceptance_reason = load_profitability_acceptance(
+        acceptance_path,
+        now,
+        expected_gate_hash=(
+            gate.get("content_hash") if isinstance(gate, dict) else None
+        ),
+        expected_snapshot_hash=(
+            calibration_snapshot.get("content_hash")
+            if isinstance(calibration_snapshot, dict) else None
+        ),
+    )
 
-    if acceptance is None:
+    if acceptance_reason == "profitability_acceptance_not_run":
         status = "INCOMPLETE"
         reason = acceptance_reason
     elif gate_reason:
@@ -324,6 +315,9 @@ def _profitability_view(
     elif snapshot_reason:
         status = "INCOMPLETE"
         reason = snapshot_reason
+    elif acceptance is None:
+        status = "INCOMPLETE"
+        reason = acceptance_reason
     else:
         status = acceptance["status"]
         reason = acceptance.get("reason")
@@ -382,6 +376,39 @@ def _profitability_view(
             "real_fills",
         )
     }
+    current_invariant_sections = (
+        gate_invariants,
+        lifecycle_invariants,
+        {
+            field: shadow_execution.get(field)
+            for field in (
+                "real_order_submissions",
+                "real_orders",
+                "real_fills",
+            )
+        },
+        acceptance_invariants,
+    )
+    current_invariant_values = [
+        section[field]
+        for section in current_invariant_sections
+        for field in (
+            "real_order_submissions",
+            "real_orders",
+            "real_fills",
+        )
+    ]
+    if status == "PASS" and any(
+        type(value) is int and value != 0
+        for value in current_invariant_values
+    ):
+        status = "FAIL"
+        reason = "real_order_invariant"
+    elif status == "PASS" and any(
+        type(value) is not int for value in current_invariant_values
+    ):
+        status = "INCOMPLETE"
+        reason = "real_order_invariant_unavailable"
     identities = {
         "profitability_gate_hash": (
             gate.get("content_hash") if isinstance(gate, dict) else None
@@ -420,11 +447,10 @@ def _profitability_view(
             if isinstance(gate, dict) else None
         ),
         "enabled_cohorts": eligible_cohorts,
-        "sample_counts": {
-            key: entry.get("independent_markets")
-            for key, entry in eligible_cohorts.items()
-            if isinstance(entry, dict)
-        },
+        "sample_counts": (
+            acceptance.get("sample_counts", {})
+            if isinstance(acceptance, dict) else {}
+        ),
         "metrics": exposed_metrics,
         "identities": identities,
         "real_order_invariants": {

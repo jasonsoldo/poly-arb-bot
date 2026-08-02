@@ -893,6 +893,7 @@ def main() -> int:
             "probability-calibration",
             "profitability-analysis",
             "profitability-freeze",
+            "profitability-acceptance",
             "paired-opportunity-report",
             "maker-shadow",
         ],
@@ -928,6 +929,12 @@ def main() -> int:
         default="data/profitability-discovery.json",
     )
     parser.add_argument("--gate-file", default="data/profitability-gates.json")
+    parser.add_argument(
+        "--strategy-state", default="state/strategy-shadow.json",
+    )
+    parser.add_argument(
+        "--acceptance-output", default="data/profitability-acceptance.json",
+    )
     parser.add_argument(
         "--calibration-map",
         default="data/probability-calibration-research.json",
@@ -1118,6 +1125,14 @@ def main() -> int:
             f"calibration_hash={snapshot['content_hash']}"
         )
         return 0
+    if args.command == "profitability-acceptance":
+        from .profitability_acceptance import run as run_profitability_acceptance
+        return run_profitability_acceptance(
+            Path(args.execution_log),
+            Path(args.gate_file),
+            Path(args.strategy_state),
+            Path(args.acceptance_output),
+        )
     if args.command == "paired-opportunity-report":
         from .paired_opportunity_report import PairedReportConfig, run_report
         return run_report(

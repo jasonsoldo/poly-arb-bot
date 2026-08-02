@@ -31,6 +31,9 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
     lifecycle = status.get("shadow_lifecycle", {})
     health = status.get("shadow_health", {})
     probability_observations = status.get("probability_observations", {})
+    profitability = status.get("profitability", {}).get(
+        "portfolio_limited", {}
+    )
     market_data_present = readiness.get("discovered_markets", 0) > 0
     max_reference_age = float(
         max_reference_ipc_age_p95_ms if max_reference_ipc_age_p95_ms is not None
@@ -155,6 +158,8 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
         {"name": "probability_observation_integrity", "passed":
          probability_observations.get("semantics") == "CALIBRATION_ONLY_NOT_ORDERS_OR_PNL"},
         {"name": "dynamic_sizing_integrity", "passed": dynamic_sizing_integrity},
+        {"name": "forward_profitability",
+         "passed": profitability.get("status") == "PASS"},
         {"name": "event_deduplication", "passed": shadow.get("duplicate_events", 0) == 0},
         {"name": "enabled_strategy_evaluations",
          "passed": all(row.get("evaluations", 0) > 0 for row in strategy_rows)},
@@ -172,8 +177,10 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
     ]
     passed = all(item["passed"] for item in checks)
     incomplete_checks = {"analytics_ready", "market_data_present", "audit_data_present",
-                         "enabled_strategy_evaluations", "probability_models_evaluated",
-                         "low_latency_observed"}
+                          "enabled_strategy_evaluations", "probability_models_evaluated",
+                          "low_latency_observed"}
+    if profitability.get("status") in {None, "INCOMPLETE"}:
+        incomplete_checks.add("forward_profitability")
     incomplete_only = all(item["passed"] or item["name"] in incomplete_checks for item in checks)
     status = "PASS" if passed else "INCOMPLETE" if incomplete_only else "FAIL"
     return {"passed": passed, "status": status, "checks": checks,
@@ -207,6 +214,8 @@ def evaluate_status(status, max_reference_ipc_age_p95_ms=None,
                             "invalid_active_position_details", []
                         ),
                         "dynamic_latest_failures": dynamic_latest_failures,
+                        "profitability_status": profitability.get("status"),
+                        "profitability_reason": profitability.get("reason"),
                         "market_health_age_seconds": health.get("age_seconds")}}
 
 

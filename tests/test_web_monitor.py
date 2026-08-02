@@ -407,6 +407,11 @@ def test_web_status_maps_validated_profitability_artifacts_without_inference(
         "real_orders": 0,
         "real_fills": 0,
     }), encoding="utf-8")
+    (state_dir / "shadow-execution.json").write_text(json.dumps({
+        "real_order_submissions": 0,
+        "real_orders": 0,
+        "real_fills": 0,
+    }), encoding="utf-8")
     gate = {
         "content_hash": "g" * 64,
         "calibration_snapshot_hash": "s" * 64,
@@ -444,9 +449,10 @@ def test_web_status_maps_validated_profitability_artifacts_without_inference(
         "load_frozen_calibration_snapshot",
         load_snapshot,
     )
-    (data / "profitability-acceptance.json").write_text(json.dumps({
+    acceptance = {
         "status": "PASS",
         "reason": "profitability_validation_passed",
+        "sample_counts": {"directional-cohort": 60},
         "metrics": {
             "runtime_seconds": 172_800,
             "independent_markets": 300,
@@ -458,7 +464,12 @@ def test_web_status_maps_validated_profitability_artifacts_without_inference(
         "real_order_submissions": 0,
         "real_orders": 0,
         "real_fills": 0,
-    }), encoding="utf-8")
+    }
+    monkeypatch.setattr(
+        web_monitor,
+        "load_profitability_acceptance",
+        lambda *args, **kwargs: (acceptance, None),
+    )
 
     status = build_status(
         data, tmp_path / "missing-audit.jsonl", tmp_path / "state.json"
@@ -487,6 +498,18 @@ def test_web_status_maps_validated_profitability_artifacts_without_inference(
         "real_fills": 0,
     }
     assert expected_hashes == ["s" * 64]
+
+    (state_dir / "strategy-shadow.json").write_text(json.dumps({
+        "positions": {},
+        "real_order_submissions": 0,
+        "real_orders": 1,
+        "real_fills": 0,
+    }), encoding="utf-8")
+    unsafe = build_status(
+        data, tmp_path / "missing-audit.jsonl", tmp_path / "state.json"
+    )["profitability"]["portfolio_limited"]
+    assert unsafe["status"] == "FAIL"
+    assert unsafe["reason"] == "real_order_invariant"
 
 
 def test_web_status_never_passes_malformed_profitability_artifacts(
