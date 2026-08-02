@@ -139,6 +139,7 @@ def _eligible_directional_gate(snapshot, base_hash, now=1000.0):
         "selected_config_hashes": {
             "late_window_directional_ev": base_hash,
         },
+        "completion_lifecycle": "research",
         "blocking_exclusions": {},
         "cohorts": {key: cohort},
         "real_order_submissions": 0,

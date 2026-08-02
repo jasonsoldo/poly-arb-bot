@@ -133,6 +133,7 @@ def _report(cohorts=None, blocking=None):
             "execution_log": {"path": "execution.jsonl", "files": []},
         },
         "selected_config_hashes": {STRATEGY: BASE_HASH},
+        "completion_lifecycle": "research",
         "blocking_exclusions": blocking or {},
         "cohorts": cohorts if cohorts is not None else {
             cohort_key(_row()): _cohort(),
@@ -281,6 +282,19 @@ def test_gate_allows_only_cohorts_that_meet_every_profitability_threshold(tmp_pa
     )["decision"] == "ALLOW"
 
 
+def test_gate_freeze_requires_research_lifecycle_discovery_report(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    report = _report()
+    report["completion_lifecycle"] = "deployable"
+
+    with pytest.raises(ValueError, match="research lifecycle"):
+        build_profitability_gate(
+            report,
+            snapshot,
+            {STRATEGY: BASE_HASH},
+            now=NOW,
+            cohort_version=COHORT_VERSION,
+        )
 def test_gate_source_identity_schema_is_exact_and_typed(tmp_path):
     _, payload = _gate(tmp_path)
     path = tmp_path / "gate.json"

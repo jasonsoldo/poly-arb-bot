@@ -928,6 +928,11 @@ def main() -> int:
         "--profitability-report",
         default="data/profitability-discovery.json",
     )
+    parser.add_argument(
+        "--profitability-source",
+        choices=["research", "deployable"],
+        default="research",
+    )
     parser.add_argument("--gate-file", default="data/profitability-gates.json")
     parser.add_argument(
         "--strategy-state", default="state/strategy-shadow.json",
@@ -990,6 +995,7 @@ def main() -> int:
         report = build_profitability_report(
             Path(args.strategy_audit_file),
             Path(args.execution_log),
+            completion_lifecycle=args.profitability_source,
         )
         encoded = json.dumps(report, indent=2, sort_keys=True)
         if args.output:

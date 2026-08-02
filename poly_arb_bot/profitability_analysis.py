@@ -31,7 +31,9 @@ BLOCKING_EXCLUSIONS = frozenset({
     "fee_schedule_unavailable",
     "pnl_recalculation_mismatch",
     "real_order_invariant",
+    "research_lifecycle_invalid",
 })
+COMPLETION_LIFECYCLES = frozenset({"deployable", "research"})
 SECONDS_BINS = (0, 30, 60, 90, 180, 300, 600, float("inf"))
 SETTLEMENT_MAX_DELAY_MS = 10_000
 _REAL_ORDER_FIELDS = (
@@ -195,11 +197,16 @@ def _entry_index(rows, excluded):
     return entries
 
 
-def _completion_rows(rows, excluded):
+def _completion_rows(rows, excluded, completion_lifecycle):
     completions = []
     seen = set()
+    expected_event_type = (
+        "shadow_research_complete"
+        if completion_lifecycle == "research"
+        else "shadow_complete"
+    )
     for row in rows:
-        if row.get("event_type") != "shadow_complete":
+        if row.get("event_type") != expected_event_type:
             continue
         if row.get("strategy") not in PROBABILITY_STRATEGIES:
             excluded["unrelated_strategy"] += 1
@@ -242,7 +249,7 @@ def _selected_hashes(completions, requested):
     }
 
 
-def _identity_reason(entry, complete):
+def _identity_reason(entry, complete, completion_lifecycle):
     if entry.get("decision") != "ACCEPT":
         return "missing_entry_event"
     if entry.get("config_version") not in {
@@ -273,11 +280,29 @@ def _identity_reason(entry, complete):
             return "strategy_config_mismatch"
     if not _has_zero_real_orders(entry) or not _has_zero_real_orders(complete):
         return "real_order_invariant"
-    if (
-        entry.get("config_version") == "shadow-buy-rules-v10"
-        and complete.get("deployable_pnl") is not True
-    ):
-        return "deployable_pnl_not_true"
+    if entry.get("config_version") == "shadow-buy-rules-v10":
+        if completion_lifecycle == "research":
+            lifecycle_hash = complete.get("research_lifecycle_config_hash")
+            expected_claim = f'{lifecycle_hash}|{complete.get("market_id")}'
+            if (
+                complete.get("event_type") != "shadow_research_complete"
+                or complete.get("deployable_pnl") is not False
+                or complete.get("risk_mode") != "CALIBRATION_RESEARCH"
+                or complete.get("portfolio_limits_enforced") is not False
+                or complete.get("source_event_id") != entry.get("event_id")
+                or not isinstance(complete.get("entry_event_id"), str)
+                or not complete["entry_event_id"].startswith("research:")
+                or not isinstance(lifecycle_hash, str)
+                or len(lifecycle_hash) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in lifecycle_hash
+                )
+                or complete.get("research_claim_key") != expected_claim
+            ):
+                return "research_lifecycle_invalid"
+        elif complete.get("deployable_pnl") is not True:
+            return "deployable_pnl_not_true"
     return None
 
 
@@ -447,8 +472,8 @@ def _completion_cash(
     }, None
 
 
-def _reconcile_candidate(entry, complete):
-    reason = _identity_reason(entry, complete)
+def _reconcile_candidate(entry, complete, completion_lifecycle):
+    reason = _identity_reason(entry, complete, completion_lifecycle)
     if reason:
         return None, reason
     entry_values, reason = _entry_cash(entry)
@@ -548,7 +573,10 @@ def reconcile_probability_trades(
     strategy_audit_path: Path,
     execution_path: Path,
     config_hashes: Optional[Dict[str, str]] = None,
+    completion_lifecycle: str = "deployable",
 ) -> dict:
+    if completion_lifecycle not in COMPLETION_LIFECYCLES:
+        raise ValueError("completion_lifecycle must be research or deployable")
     (
         audit_rows,
         audit_excluded,
@@ -584,7 +612,9 @@ def reconcile_probability_trades(
             if row.get("event_id") not in duplicate_event_ids
         ]
     entries = _entry_index(audit_rows, excluded)
-    completions = _completion_rows(execution_rows, excluded)
+    completions = _completion_rows(
+        execution_rows, excluded, completion_lifecycle,
+    )
     selected_hashes = _selected_hashes(completions, config_hashes)
 
     candidates = []
@@ -600,11 +630,17 @@ def reconcile_probability_trades(
         if selected_hash is None or not complete.get("strategy_config_hash"):
             excluded["strategy_config_mismatch"] += 1
             continue
-        entry_id = complete.get("entry_event_id")
+        entry_id = complete.get(
+            "source_event_id"
+            if completion_lifecycle == "research"
+            else "entry_event_id"
+        )
         if not isinstance(entry_id, str) or entry_id not in entries:
             excluded["missing_entry_event"] += 1
             continue
-        trade, reason = _reconcile_candidate(entries[entry_id], complete)
+        trade, reason = _reconcile_candidate(
+            entries[entry_id], complete, completion_lifecycle,
+        )
         if reason:
             excluded[reason] += 1
         else:
@@ -780,11 +816,13 @@ def build_profitability_report(
     strategy_audit_path: Path,
     execution_path: Path,
     config_hashes: Optional[Dict[str, str]] = None,
+    completion_lifecycle: str = "deployable",
 ) -> dict:
     reconciled = reconcile_probability_trades(
         strategy_audit_path,
         execution_path,
         config_hashes,
+        completion_lifecycle,
     )
     trades = reconciled["trades"]
     source = reconciled["source"]
@@ -792,6 +830,7 @@ def build_profitability_report(
         "version": 1,
         "source": source,
         "selected_config_hashes": reconciled["selected_config_hashes"],
+        "completion_lifecycle": completion_lifecycle,
     }
     seed_material = hashlib.sha256(json.dumps(
         seed_payload,
@@ -832,6 +871,7 @@ def build_profitability_report(
         "generated_at": generated_at,
         "source": source,
         "selected_config_hashes": reconciled["selected_config_hashes"],
+        "completion_lifecycle": completion_lifecycle,
         "independent_markets": len(trades),
         "excluded": excluded,
         "blocking_exclusions": {

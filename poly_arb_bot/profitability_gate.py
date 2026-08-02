@@ -156,6 +156,10 @@ def _atomic_publish(payload, path):
 def _validated_report(report):
     if not isinstance(report, dict) or report.get("version") != 1:
         raise ValueError("profitability report schema is invalid")
+    if report.get("completion_lifecycle") != "research":
+        raise ValueError(
+            "profitability report must use the research lifecycle"
+        )
     blocking = report.get("blocking_exclusions")
     if not isinstance(blocking, dict):
         raise ValueError("profitability report blocking_exclusions is invalid")

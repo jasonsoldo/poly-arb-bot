@@ -580,7 +580,9 @@ def test_cli_writes_only_the_requested_profitability_report(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert json.loads(output.read_text(encoding="utf-8"))["independent_markets"] == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["independent_markets"] == 0
+    assert report["completion_lifecycle"] == "research"
     assert gate.read_text(encoding="utf-8") == "sentinel"
 
 

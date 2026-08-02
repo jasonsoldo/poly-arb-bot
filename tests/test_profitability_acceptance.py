@@ -151,6 +151,7 @@ def _artifacts(tmp_path, monkeypatch, assets=("BTC",), capital="1000"):
             "execution_log": {"path": "execution.jsonl", "files": []},
         },
         "selected_config_hashes": {STRATEGY: base_hash},
+        "completion_lifecycle": "research",
         "blocking_exclusions": {},
         "cohorts": cohorts,
         "real_order_submissions": 0,

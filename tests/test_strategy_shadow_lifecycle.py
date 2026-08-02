@@ -2047,12 +2047,21 @@ def test_lifecycle_settlement_is_eligible_for_profitability_reconciliation(
         execution_log,
         {"late_window_directional_ev": entry["config_hash"]},
     )
+    research_report = build_profitability_report(
+        strategy_audit,
+        execution_log,
+        {"late_window_directional_ev": entry["config_hash"]},
+        completion_lifecycle="research",
+    )
 
     assert report["overall"]["independent_markets"] == 1
     assert report["excluded"].get("settlement_provenance_unverified", 0) == 0
     assert report["real_order_submissions"] == 0
     assert report["real_orders"] == 0
     assert report["real_fills"] == 0
+    assert research_report["completion_lifecycle"] == "research"
+    assert research_report["overall"]["independent_markets"] == 1
+    assert research_report["blocking_exclusions"] == {}
 
 
 def test_process_audit_captures_research_before_gate_reject(tmp_path):

@@ -117,6 +117,7 @@ def _gate(snapshot):
                 "late_window_directional_ev"
             ],
         },
+        "completion_lifecycle": "research",
         "blocking_exclusions": {},
         "cohorts": {
             cohort_key(eligible): _cohort(),
@@ -168,6 +169,7 @@ def _invalid_cohort_gate(snapshot):
                 "late_window_directional_ev"
             ],
         },
+        "completion_lifecycle": "research",
         "blocking_exclusions": {},
         "cohorts": {"malformed-cohort": ["not", "a", "cohort"]},
         "real_order_submissions": 0,
