@@ -39,11 +39,13 @@ rm -f state/reference-price.sock
 
 Do not add wallet keys or live-order credentials. `POLY_ARB_MODE` must remain `dry_run`.
 
-`SHADOW_CALIBRATION_MODE=1` disables only portfolio sampling throttles in Shadow
-(daily loss, consecutive loss, correlation, position count, and notional limits).
-Market-data, settlement, fee, depth, slippage, freshness, clock, and strategy EV
-checks remain fail closed. Each opened position records `would_block_reason`, and
-real submissions/orders/fills remain zero. Never use this setting for live execution.
+The checked-in example is the portfolio-limited forward-validation state:
+`SHADOW_CALIBRATION_MODE=0`, `DIRECTIONAL_ENFORCE_TIME_WINDOW=1`, and
+`PROFITABILITY_GATE_ENABLE=1`. A missing, expired, or mismatched gate produces no
+deployable probability positions. Research observations remain isolated and do
+not count as deployable PnL. The temporary discovery phase below is the only
+documented use of `SHADOW_CALIBRATION_MODE=1`; it remains Shadow-only and never
+enables live execution.
 
 ## 3. Build and verify locally on the VPS
 
@@ -128,7 +130,8 @@ grep -E 'REFERENCE_CONNECTED|WS_DATA|strategy_audit_backpressure' \
   /var/log/poly-arb-bot.err.log | tail -100
 ```
 
-Required result:
+Required safety result. Until the forward profitability acceptance below is
+`PASS`, the combined `shadow-acceptance` result is expected to be `INCOMPLETE`:
 
 ```text
 strategy_parity_mismatch = 0
@@ -171,13 +174,136 @@ PY
 Required result:
 
 ```text
-shadow-acceptance = PASS
+shadow-acceptance = INCOMPLETE or PASS
 real_order_submissions = 0
 real_orders = 0
 real_fills = 0
 ```
 
-## 8. Local pipeline performance gates
+## 8. Profitability discovery and frozen forward validation
+
+Run every command in this section from `/opt/poly-arb-bot`. Loading `.env` is
+mandatory because the canonical strategy hash includes the Shadow capital and
+cash-ledger settings.
+
+### 8.1 Collect research-only discovery data
+
+For a new cohort, temporarily set these three values in `.env`:
+
+```text
+SHADOW_CALIBRATION_MODE=1
+DIRECTIONAL_ENFORCE_TIME_WINDOW=1
+PROFITABILITY_GATE_ENABLE=0
+```
+
+Keep every canonical strategy setting, including the directional time window,
+identical to the intended forward configuration. Changing one after discovery
+changes the base config hash and correctly invalidates the gate.
+
+Restart only in Shadow mode and verify that no deployable positions are open:
+
+```bash
+cd /opt/poly-arb-bot
+set -a
+. ./.env
+set +a
+sudo systemctl restart poly-arb-bot poly-arb-web
+jq '{calibration_mode,portfolio_limits_enforced,risk_mode,
+     deployable_positions:(.positions|length),
+     research_positions:(.research_positions|length),
+     real_order_submissions,real_orders,real_fills}' \
+  state/strategy-shadow.json
+```
+
+Wait until `data/probability-calibration-research.json` contains the current
+strategy/model identities and enough occupied-bucket samples. Research
+completions are `shadow_research_complete` with `deployable_pnl=false`; they are
+not orders and are not deployable PnL.
+
+Generate the read-only discovery report. The CLI defaults to the isolated
+research lifecycle; `--profitability-source research` is shown explicitly for
+audit clarity:
+
+```bash
+set -a
+. ./.env
+set +a
+.venv/bin/python -m poly_arb_bot.cli profitability-analysis \
+  --profitability-source research \
+  --strategy-audit-file logs/strategy-audit.jsonl \
+  --execution-log logs/shadow-execution.jsonl \
+  --output data/profitability-discovery.json
+jq '{completion_lifecycle,selected_config_hashes,independent_markets,
+     blocking_exclusions,cohorts,real_order_submissions,real_orders,real_fills}' \
+  data/profitability-discovery.json
+```
+
+Review the selected config hashes, independent-market count, exclusions, cash
+ledger, eligible cohorts, and PnL concentration. Any `blocking_exclusions`
+entry blocks freezing. If no cohort meets the fixed discovery thresholds, leave
+the system `NO_TRADE`; do not reduce sample, fee, buffer, freshness, depth, or
+confidence thresholds.
+
+### 8.2 Freeze exact artifacts and activate a new forward cohort
+
+Freeze while the discovery configuration and research calibration map still
+match. Rotate `PROFITABILITY_COHORT_VERSION` for every new validation attempt,
+then set the final `.env` values shown below:
+
+```bash
+set -a
+. ./.env
+set +a
+.venv/bin/python -m poly_arb_bot.cli profitability-freeze \
+  --profitability-report data/profitability-discovery.json \
+  --calibration-map data/probability-calibration-research.json \
+  --validation-calibration data/probability-calibration-validation.json \
+  --gate-file data/profitability-gates.json
+```
+
+```text
+SHADOW_CALIBRATION_MODE=0
+DIRECTIONAL_ENFORCE_TIME_WINDOW=1
+PROFITABILITY_GATE_ENABLE=1
+PROFITABILITY_GATE_PATH=data/profitability-gates.json
+PROFITABILITY_COHORT_VERSION=<new version used for freeze>
+PROBABILITY_VALIDATION_CALIBRATION_PATH=data/probability-calibration-validation.json
+SHADOW_CASH_LEDGER_VERSION=2
+```
+
+Rebuild/restart and run the immediate fail-closed check:
+
+```bash
+sudo systemctl restart poly-arb-bot poly-arb-web
+set -a
+. ./.env
+set +a
+.venv/bin/python -m poly_arb_bot.cli profitability-acceptance \
+  --execution-log logs/shadow-execution.jsonl \
+  --gate-file data/profitability-gates.json \
+  --strategy-state state/strategy-shadow.json \
+  --acceptance-output data/profitability-acceptance.json
+```
+
+The first call must be `INCOMPLETE`: the new forward cohort starts with zero
+deployable completed markets. A gate/config/model/snapshot mismatch is exit code
+3 and must leave probability admission fail closed. All real submission, order,
+and fill counters must remain zero.
+
+### 8.3 Run acceptance after the approved window
+
+After at least 48 hours, and before the 72-hour gate expiry, run the same
+`profitability-acceptance` command. `PASS` requires at least 300 independent
+new markets, at least 50 markets in every enabled cohort, positive total cash
+PnL, positive mean return per dollar risked, a one-sided 95% block-bootstrap
+lower bound above zero, maximum drawdown no greater than 10% of starting Shadow
+capital, and zero real-order counters.
+
+Report exactly `PASS`, `FAIL`, or `INCOMPLETE`. Positive PnL with a non-positive
+confidence lower bound remains `INCOMPLETE`. A `PASS` is Shadow evidence only;
+it does not authorize live trading or prove future profitability.
+
+## 9. Local pipeline performance gates
 
 After five minutes of warm-up, inspect the bounded p95 samples written by C++:
 
@@ -209,7 +335,7 @@ strategy_audit_backpressure = 0
 
 These are local pipeline metrics. Exchange/network message age is a different metric and must not be relabeled as latency.
 
-## 9. Monitoring
+## 10. Monitoring
 
 ```bash
 journalctl -u poly-arb-bot -f

@@ -106,3 +106,37 @@ def test_strategy_parity_smoke_closes_stdin_in_build_scripts():
         assert '"estimated_probability"' in script
         assert '"settlement_reference":101' in script
         assert '"estimated_probability":[0-9]' in script
+
+
+def test_deploy_environment_enables_frozen_profitability_validation():
+    for setting in (
+        "SHADOW_CALIBRATION_MODE=0",
+        "DIRECTIONAL_ENFORCE_TIME_WINDOW=1",
+        "PROFITABILITY_GATE_ENABLE=1",
+        "PROFITABILITY_GATE_PATH=data/profitability-gates.json",
+        "PROFITABILITY_COHORT_VERSION=1",
+        "PROBABILITY_VALIDATION_CALIBRATION_PATH=data/probability-calibration-validation.json",
+        "SHADOW_CASH_LEDGER_VERSION=2",
+    ):
+        assert setting in ENV_EXAMPLE
+
+
+def test_deploy_guide_has_exact_profitability_validation_workflow():
+    for command_or_gate in (
+        "set -a",
+        ". ./.env",
+        "profitability-analysis",
+        "--output data/profitability-discovery.json",
+        "profitability-freeze",
+        "--validation-calibration data/probability-calibration-validation.json",
+        "--gate-file data/profitability-gates.json",
+        "sudo systemctl restart poly-arb-bot poly-arb-web",
+        "profitability-acceptance",
+        "--strategy-state state/strategy-shadow.json",
+        "--acceptance-output data/profitability-acceptance.json",
+        "48 hours",
+        "300 independent",
+        "INCOMPLETE",
+        "does not authorize live trading",
+    ):
+        assert command_or_gate in DEPLOY
